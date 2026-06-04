@@ -1,29 +1,37 @@
 {
   "format": 1,
   "restore": {
-    "/mnt/d/SteamLibrary/steamapps/common/Barotrauma/LocalMods/BaroWardrobeSwitcher/CSharp/BaroWardrobeSwitcher.csproj": {}
+    "C:\\Users\\Hyman\\OneDrive\\桌面\\BaroWardrobeSwitcher-main\\CSharp\\BaroWardrobeSwitcher.csproj": {}
   },
   "projects": {
-    "/mnt/d/SteamLibrary/steamapps/common/Barotrauma/LocalMods/BaroWardrobeSwitcher/CSharp/BaroWardrobeSwitcher.csproj": {
+    "C:\\Users\\Hyman\\OneDrive\\桌面\\BaroWardrobeSwitcher-main\\CSharp\\BaroWardrobeSwitcher.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/mnt/d/SteamLibrary/steamapps/common/Barotrauma/LocalMods/BaroWardrobeSwitcher/CSharp/BaroWardrobeSwitcher.csproj",
+        "projectUniqueName": "C:\\Users\\Hyman\\OneDrive\\桌面\\BaroWardrobeSwitcher-main\\CSharp\\BaroWardrobeSwitcher.csproj",
         "projectName": "BaroWardrobeSwitcher",
-        "projectPath": "/mnt/d/SteamLibrary/steamapps/common/Barotrauma/LocalMods/BaroWardrobeSwitcher/CSharp/BaroWardrobeSwitcher.csproj",
-        "packagesPath": "/home/xuqing/.nuget/packages/",
-        "outputPath": "/mnt/d/SteamLibrary/steamapps/common/Barotrauma/LocalMods/BaroWardrobeSwitcher/CSharp/obj/",
+        "projectPath": "C:\\Users\\Hyman\\OneDrive\\桌面\\BaroWardrobeSwitcher-main\\CSharp\\BaroWardrobeSwitcher.csproj",
+        "packagesPath": "C:\\Users\\Hyman\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\Hyman\\OneDrive\\桌面\\BaroWardrobeSwitcher-main\\CSharp\\obj\\",
         "projectStyle": "PackageReference",
+        "fallbackFolders": [
+          "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
+        ],
         "configFilePaths": [
-          "/home/xuqing/.nuget/NuGet/NuGet.Config"
+          "C:\\Users\\Hyman\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
         "originalTargetFrameworks": [
           "net8.0"
         ],
         "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "C:\\Program Files\\dotnet\\library-packs": {},
           "https://api.nuget.org/v3/index.json": {}
         },
         "frameworks": {
           "net8.0": {
+            "framework": "net8.0",
             "targetAlias": "net8.0",
             "projectReferences": {}
           }
@@ -32,10 +40,17 @@
           "warnAsError": [
             "NU1605"
           ]
-        }
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.300"
       },
       "frameworks": {
         "net8.0": {
+          "framework": "net8.0",
           "targetAlias": "net8.0",
           "imports": [
             "net461",
@@ -48,12 +63,26 @@
           ],
           "assetTargetFallback": true,
           "warn": true,
+          "downloadDependencies": [
+            {
+              "name": "Microsoft.AspNetCore.App.Ref",
+              "version": "[8.0.27, 8.0.27]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Ref",
+              "version": "[8.0.27, 8.0.27]"
+            },
+            {
+              "name": "Microsoft.WindowsDesktop.App.Ref",
+              "version": "[8.0.27, 8.0.27]"
+            }
+          ],
           "frameworkReferences": {
             "Microsoft.NETCore.App": {
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "/usr/lib/dotnet/sdk/8.0.127/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.300/PortableRuntimeIdentifierGraph.json"
         }
       }
     }

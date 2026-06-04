@@ -42,11 +42,13 @@ local visualCarrierPriority = {
     HealthInterface = 6
 }
 
-local presets = {
-    fashion = {}
-}
-
-local statusText = "Ready. Capture fashion A, equip combat B, then apply look."
+local savedLook = {}
+local savedLookCaptured = false
+local activeLook = false
+local lastOperation = "Ready."
+local diagnosticsVisible = false
+local lastEquipmentSignature = nil
+local slotResults = {}
 local window = nil
 local overlayRoot = nil
 local lastCharacter = nil
@@ -59,7 +61,7 @@ local roundStartNoticeSent = false
 
 local function log(message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
-    statusText = tostring(message)
+    lastOperation = tostring(message)
     if LuaCsLogger ~= nil and LuaCsLogger.Log ~= nil then
         LuaCsLogger.Log(line)
     else
@@ -94,7 +96,6 @@ end
 local function sendRoundStartNotice()
     if roundStartNoticeSent then return end
     roundStartNoticeSent = true
-    addChatLine("時裝控制面板可以在按下 F8 後開啟。")
     addChatLine("Wardrobe control panel can be opened by pressing F8.")
 end
 
@@ -145,27 +146,61 @@ local function ensureVisualOverride()
     return VisualOverride
 end
 
-local function visualOverrideStatus()
+local function visualOverrideState()
     local override = ensureVisualOverride()
     if override == nil then
-        local message = "C# visual override unavailable; check LuaCs C# compile/load log and reload."
+        local details = "C# visual override unavailable; check LuaCs C# compile/load log and reload."
         if CSActive ~= nil then
-            message = message .. " CSActive=" .. tostring(CSActive) .. "."
+            details = details .. " CSActive=" .. tostring(CSActive) .. "."
         end
         if visualOverrideFailure ~= nil then
-            message = message .. " Lua error: " .. visualOverrideFailure
+            details = details .. " Lua error: " .. visualOverrideFailure
         end
         if visualOverrideDiagnostics ~= nil then
-            message = message .. " Diagnostics: " .. visualOverrideDiagnostics
+            details = details .. " Diagnostics: " .. visualOverrideDiagnostics
         end
-        return message
+        return {
+            ready = false,
+            label = "C#: unavailable",
+            details = details
+        }
     end
 
     local ok, ready = pcall(function()
         return override.IsReady()
     end)
+    local statusOk, status = pcall(function()
+        return override.GetReadinessStatus()
+    end)
+    local details = statusOk and status ~= nil and tostring(status) or nil
     if not ok or ready ~= true then
-        return "C# visual override loaded unexpectedly but did not report ready."
+        return {
+            ready = false,
+            label = details ~= nil and ("C#: " .. details) or "C#: not ready",
+            details = details or "C# visual override loaded but did not report ready."
+        }
+    end
+    return {
+        ready = true,
+        label = details ~= nil and ("C#: " .. details) or "C#: ready",
+        details = details
+    }
+end
+
+local function visualOverrideStatus()
+    local state = visualOverrideState()
+    if state.ready then return nil end
+    return "C# visual override is not ready. Enable C# scripting in LuaCs, accept this mod's C# prompt, then reload."
+end
+
+local function visualOverrideDebugStatus(character)
+    local override = ensureVisualOverride()
+    if override == nil or character == nil then return nil end
+    local ok, result = pcall(function()
+        return override.GetCharacterDebugStatus(character)
+    end)
+    if ok and result ~= nil then
+        return tostring(result)
     end
     return nil
 end
@@ -227,6 +262,39 @@ local function itemIdentifier(item)
     return tostring(item.Prefab.Identifier)
 end
 
+local function itemStableId(item)
+    if item == nil then return "-" end
+    local id = itemIdentifier(item) or itemName(item)
+    local runtimeId = nil
+    pcall(function()
+        runtimeId = item.ID
+    end)
+    if runtimeId ~= nil then
+        return tostring(id) .. "#" .. tostring(runtimeId)
+    end
+    return tostring(id)
+end
+
+local function hasSavedLook()
+    if savedLookCaptured then return true end
+    for _, entry in ipairs(slots) do
+        if savedLook[entry.key] ~= nil then return true end
+    end
+    return false
+end
+
+local function savedLookSummary()
+    if not hasSavedLook() then return "none" end
+    local count = 0
+    for _, entry in ipairs(slots) do
+        if savedLook[entry.key] ~= nil then
+            count = count + 1
+        end
+    end
+    if count == 0 then return "empty outfit" end
+    return tostring(count) .. " slot" .. (count == 1 and "" or "s")
+end
+
 local function getSlotItem(character, slot)
     if character == nil or character.Inventory == nil then return nil end
     local ok, result = pcall(function()
@@ -253,32 +321,6 @@ local function getSlotItem(character, slot)
     return nil
 end
 
-unequipItem = function(character, item)
-    if character == nil or item == nil then return true end
-
-    local function moveToAnySlot()
-        if character.Inventory == nil or CharacterInventory == nil then return false end
-        local ok, result = pcall(function()
-            return character.Inventory.TryPutItem(item, character, CharacterInventory.AnySlot, true, true)
-        end)
-        return ok and result
-    end
-
-    if moveToAnySlot() then return true end
-
-    pcall(function()
-        item.Unequip(character)
-    end)
-    if moveToAnySlot() then return true end
-
-    local ok, result = pcall(function()
-        return item.Drop(character)
-    end)
-    if ok then return result ~= false end
-
-    return false
-end
-
 isInSlot = function(character, item, slot)
     if character == nil or character.Inventory == nil or item == nil then return false end
     local ok, result = pcall(function()
@@ -286,6 +328,63 @@ isInSlot = function(character, item, slot)
     end)
     if ok then return result == true end
     return getSlotItem(character, slot) == item
+end
+
+local function wornSlotLabelsForItem(character, item)
+    local labels = {}
+    if character == nil or item == nil then return labels end
+    for _, entry in ipairs(slots) do
+        if isInSlot(character, item, entry.slot) then
+            labels[#labels + 1] = entry.label
+        end
+    end
+    return labels
+end
+
+local function isInAnyWearableSlot(character, item)
+    return #wornSlotLabelsForItem(character, item) > 0
+end
+
+local function equipmentSignature(character)
+    if character == nil then return "no-character" end
+    local parts = {}
+    for _, entry in ipairs(slots) do
+        parts[#parts + 1] = entry.key .. "=" .. itemStableId(getSlotItem(character, entry.slot))
+    end
+    return table.concat(parts, ";")
+end
+
+unequipItem = function(character, item)
+    if character == nil or item == nil then return true end
+
+    local function isClear()
+        return not isInAnyWearableSlot(character, item)
+    end
+
+    local function moveToInventoryAndValidate()
+        if character.Inventory == nil or CharacterInventory == nil then return false end
+        local ok, result = pcall(function()
+            return character.Inventory.TryPutItem(item, character, CharacterInventory.AnySlot, true, true)
+        end)
+        return ok and result == true and isClear()
+    end
+
+    pcall(function()
+        item.Unequip(character)
+    end)
+    if isClear() then return true end
+
+    if moveToInventoryAndValidate() then return true end
+
+    pcall(function()
+        item.Unequip(character)
+    end)
+    if isClear() then return true end
+
+    pcall(function()
+        item.Drop(character)
+    end)
+    return isClear()
 end
 
 local function snapshot(character)
@@ -310,10 +409,23 @@ local function clearAllVisualOverrides()
     end)
 end
 
-local function restoreItemVisuals()
+local function restoreItemVisuals(character)
     if ensureVisualOverride() == nil then return end
+    if character ~= nil then
+        local ok = pcall(function()
+            VisualOverride.RestoreCharacterItemVisuals(character)
+        end)
+        if ok then return end
+    end
     pcall(function()
         VisualOverride.RestoreItemVisuals()
+    end)
+end
+
+local function pruneVisualOverrides()
+    if ensureVisualOverride() == nil then return end
+    pcall(function()
+        VisualOverride.PruneStaleCharacters()
     end)
 end
 
@@ -326,10 +438,26 @@ local function captureVisualOverride(character, item)
     return 0
 end
 
+local function captureEmptyVisualOverride(character)
+    if ensureVisualOverride() == nil or character == nil then return false end
+    local ok, result = pcall(function()
+        return VisualOverride.CaptureEmptyFashion(character)
+    end)
+    return ok and result == true
+end
+
 local function applyVisualOverrideToItem(character, item, carrier)
     if ensureVisualOverride() == nil or character == nil or item == nil then return false end
     local ok, result = pcall(function()
         return VisualOverride.ApplyFashionItemVisual(character, item, carrier == true)
+    end)
+    return ok and result == true
+end
+
+local function activateFashionVisual(character)
+    if ensureVisualOverride() == nil or character == nil then return false end
+    local ok, result = pcall(function()
+        return VisualOverride.ActivateFashionVisual(character)
     end)
     return ok and result == true
 end
@@ -358,48 +486,97 @@ local function saveFashionAndUnequip()
         return
     end
 
-    presets.fashion = visualSnapshot(character)
+    local overrideState = visualOverrideState()
+    if not overrideState.ready then
+        log("C# visual override is not ready. Enable C# scripting in LuaCs, accept this mod's C# prompt, then reload.")
+        return
+    end
+
+    local startingItems = snapshot(character)
+    savedLook = visualSnapshot(character)
+    savedLookCaptured = true
+    slotResults = {}
+    activeLook = false
+    lastEquipmentSignature = nil
     clearVisualOverride(character)
+
     local capturedSprites = 0
     local removedItems = 0
-    local failedSlots = {}
+    local startingItemCount = 0
+    local failedItems = {}
+    local processedItems = {}
     for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
+        local item = startingItems[entry.key]
         if item ~= nil then
-            capturedSprites = capturedSprites + captureVisualOverride(character, item)
-            unequipItem(character, item)
-            if isInSlot(character, item, entry.slot) then
-                table.insert(failedSlots, entry.label .. ":" .. itemName(item))
+            startingItemCount = startingItemCount + 1
+            if processedItems[item] then
+                slotResults[entry.key] = "Already handled"
             else
-                removedItems = removedItems + 1
+                processedItems[item] = true
+                capturedSprites = capturedSprites + captureVisualOverride(character, item)
+                unequipItem(character, item)
+                local remainingSlots = wornSlotLabelsForItem(character, item)
+                if #remainingSlots > 0 then
+                    local result = "Still equipped in " .. table.concat(remainingSlots, ", ")
+                    slotResults[entry.key] = result
+                    failedItems[#failedItems + 1] = entry.label .. ": " .. itemName(item) .. " (" .. table.concat(remainingSlots, ", ") .. ")"
+                else
+                    removedItems = removedItems + 1
+                    slotResults[entry.key] = "Saved and removed"
+                end
             end
+        else
+            slotResults[entry.key] = "Empty"
         end
     end
 
-    lastCharacter = character
-    local visualStatus = visualOverrideStatus()
-    local message = "Captured fashion A, saved " ..
-        tostring(capturedSprites) ..
-        " wearable sprites, and removed " ..
-        tostring(removedItems) ..
-        " worn A items."
-    if #failedSlots > 0 then
-        message = message .. " Still equipped: " .. table.concat(failedSlots, ", ") .. "."
+    if capturedSprites <= 0 then
+        captureEmptyVisualOverride(character)
     end
-    if visualStatus ~= nil then
-        message = message .. " " .. visualStatus
+
+    lastCharacter = character
+    local message = "Saved current outfit: "
+    if startingItemCount == 0 then
+        message = message .. "empty outfit captured."
+    else
+        message = message ..
+            tostring(capturedSprites) ..
+            " wearable sprites captured, " ..
+            tostring(removedItems) ..
+            " item" .. (removedItems == 1 and "" or "s") .. " removed."
+        if capturedSprites <= 0 then
+            message = message .. " Saved as an empty visual look."
+        end
+    end
+    if #failedItems > 0 then
+        message = message .. " Still equipped: " .. table.concat(failedItems, "; ") .. "."
     end
     log(message)
 end
 
-local function applyFashionToCurrentEquipment()
+local function applyFashionToCurrentEquipment(silent)
     local character = controlled()
     if character == nil then
-        log("No controlled character.")
-        return
+        if not silent then log("No controlled character.") end
+        return false
     end
 
-    restoreItemVisuals()
+    if not hasSavedLook() then
+        if not silent then log("No saved look. Save an outfit first.") end
+        activeLook = false
+        lastEquipmentSignature = nil
+        return false
+    end
+
+    local visualStatus = visualOverrideStatus()
+    if visualStatus ~= nil then
+        if not silent then log(visualStatus) end
+        activeLook = false
+        lastEquipmentSignature = nil
+        return false
+    end
+
+    restoreItemVisuals(character)
 
     local current = snapshot(character)
     local equippedItems = {}
@@ -423,17 +600,78 @@ local function applyFashionToCurrentEquipment()
             visualItems = visualItems + 1
         end
     end
+    local activated = activateFashionVisual(character)
 
     lastCharacter = character
-    local visualStatus = visualOverrideStatus()
-    local message = "Activated fashion A draw override for current equipment."
-    if visualItems > 0 then
-        message = message .. " Checked " .. tostring(visualItems) .. " worn items."
+    activeLook = activated == true
+    lastEquipmentSignature = equipmentSignature(character)
+
+    if not activated then
+        if not silent then
+            log("Saved look could not be applied. Save the outfit again after C# has loaded.")
+        end
+        return false
     end
-    if visualStatus ~= nil then
-        message = message .. " " .. visualStatus
+
+    if not silent then
+        local message = "Saved look applied."
+        if visualItems > 0 then
+            message = message .. " Checked " .. tostring(visualItems) .. " worn item" .. (visualItems == 1 and "" or "s") .. "."
+        else
+            message = message .. " No worn equipment required."
+        end
+        log(message)
     end
-    log(message)
+    return true
+end
+
+local function clearActiveLook()
+    local character = controlled()
+    if character ~= nil then
+        restoreItemVisuals(character)
+    end
+    activeLook = false
+    lastEquipmentSignature = nil
+    log("Look cleared. Real equipment visuals restored.")
+end
+
+local function refreshActiveLookIfNeeded(character)
+    if character == nil or not activeLook or not hasSavedLook() then return end
+    local signature = equipmentSignature(character)
+    if lastEquipmentSignature == signature then return end
+    if applyFashionToCurrentEquipment(true) then
+        lastOperation = "Saved look refreshed for changed equipment."
+    else
+        activeLook = false
+        lastEquipmentSignature = nil
+        lastOperation = "Saved look needs to be applied again."
+    end
+end
+
+local function handleControlledCharacterChange(character)
+    if lastCharacter == nil or character == lastCharacter then return end
+    restoreItemVisuals(lastCharacter)
+    clearVisualOverride(lastCharacter)
+    activeLook = false
+    savedLook = {}
+    savedLookCaptured = false
+    slotResults = {}
+    lastEquipmentSignature = nil
+    lastOperation = "Controlled character changed. Save a new outfit for this character."
+    pruneVisualOverrides()
+end
+
+local function clearSavedLook()
+    local character = controlled()
+    if character ~= nil then
+        clearVisualOverride(character)
+    end
+    savedLook = {}
+    savedLookCaptured = false
+    activeLook = false
+    slotResults = {}
+    lastEquipmentSignature = nil
+    log("Saved look cleared.")
 end
 
 local function clearWindow()
@@ -451,8 +689,11 @@ local function addText(parent, text)
     return block
 end
 
-local function addButton(parent, text, action, refresh)
+local function addButton(parent, text, action, refresh, enabled)
     local button = GUI.Button(GUI.RectTransform(Vector2(1.0, 0.08), parent.RectTransform), text)
+    if enabled == false then
+        pcall(function() button.Enabled = false end)
+    end
     button.OnClicked = function()
         action()
         if refresh ~= false then
@@ -476,7 +717,7 @@ buildWindow = function()
         return
     end
 
-    local frame = GUI.Frame(GUI.RectTransform(Vector2(0.42, 0.58), parent, GUI.Anchor.Center), "GUIFrame")
+    local frame = GUI.Frame(GUI.RectTransform(Vector2(0.48, 0.68), parent, GUI.Anchor.Center), "GUIFrame")
     window = frame
     fullPanelOpen = true
 
@@ -484,24 +725,41 @@ buildWindow = function()
     list.Stretch = true
     list.RelativeSpacing = 0.03
 
-    addText(list, "Wardrobe Switcher")
-    addText(list, "Flow: wear A -> capture A, wear B, then apply look.")
-    addText(list, "Status: " .. statusText)
+    local character = controlled()
+    local overrideState = visualOverrideState()
+    local canApply = overrideState.ready and hasSavedLook()
 
-    addButton(list, "1 Capture A (fashion)", function() saveFashionAndUnequip() end)
-    addButton(list, "2 Apply Look", function() applyFashionToCurrentEquipment() end)
+    addText(list, "Wardrobe Switcher")
+    addText(list, overrideState.label)
+    addText(list, "Saved look: " .. savedLookSummary() .. " | Look: " .. (activeLook and "active" or "inactive"))
+    addText(list, "Last: " .. lastOperation)
+
+    addButton(list, "Save Current Outfit", function() saveFashionAndUnequip() end, true, overrideState.ready)
+    addButton(list, "Apply Saved Look", function() applyFashionToCurrentEquipment(false) end, true, canApply)
+    addButton(list, "Clear Look", function() clearActiveLook() end)
+    addButton(list, diagnosticsVisible and "Hide Diagnostics" or "Diagnostics", function()
+        diagnosticsVisible = not diagnosticsVisible
+    end)
     addButton(list, "Close", function() fullPanelOpen = false; resetOverlay() end, false)
 
     for _, entry in ipairs(slots) do
         local currentItem = "-"
-        local character = controlled()
         if character ~= nil then
             currentItem = itemName(getSlotItem(character, entry.slot))
         end
+        local result = slotResults[entry.key] or "-"
         addText(
             list,
-            entry.label .. " | worn: " .. currentItem .. " | fashion: " .. itemName(presets.fashion[entry.key])
+            entry.label .. " | Current: " .. currentItem .. " | Saved: " .. itemName(savedLook[entry.key]) .. " | Result: " .. result
         )
+    end
+
+    if diagnosticsVisible then
+        addText(list, "Diagnostics: " .. tostring(overrideState.details or "none"))
+        local debugStatus = visualOverrideDebugStatus(character)
+        if debugStatus ~= nil then
+            addText(list, "Character: " .. debugStatus)
+        end
     end
 end
 
@@ -530,6 +788,11 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
 
     local character = controlled()
     if character == nil then
+        if lastCharacter ~= nil and activeLook then
+            restoreItemVisuals(lastCharacter)
+        end
+        activeLook = false
+        lastEquipmentSignature = nil
         lastCharacter = nil
         if fullPanelOpen and window == nil then
             buildWindow()
@@ -542,9 +805,9 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
 
     sendRoundStartNotice()
 
-    if character ~= lastCharacter then
-        lastCharacter = character
-    end
+    handleControlledCharacterChange(character)
+    lastCharacter = character
+    refreshActiveLookIfNeeded(character)
 
     if fullPanelOpen and window == nil then
         buildWindow()
@@ -562,10 +825,16 @@ end)
 Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     fullPanelOpen = false
     resetOverlay()
-    presets.fashion = {}
+    savedLook = {}
+    savedLookCaptured = false
+    slotResults = {}
+    activeLook = false
+    diagnosticsVisible = false
+    lastEquipmentSignature = nil
     clearAllVisualOverrides()
     lastCharacter = nil
     roundStartNoticeSent = false
+    lastOperation = "Round ended. Saved look cleared."
 end)
 
 log("Loaded. Press F8 to open the wardrobe panel.")

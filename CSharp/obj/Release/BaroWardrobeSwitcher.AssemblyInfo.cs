@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("BaroWardrobeSwitcher")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f65152d0571c654d9bdac13065b3e98fd4226236")]
 [assembly: System.Reflection.AssemblyProductAttribute("BaroWardrobeSwitcher")]
 [assembly: System.Reflection.AssemblyTitleAttribute("BaroWardrobeSwitcher")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

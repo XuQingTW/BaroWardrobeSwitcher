@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -6,6 +7,8 @@ using Barotrauma;
 using Barotrauma.Items.Components;
 using Barotrauma.LuaCs;
 using HarmonyLib;
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
 
 namespace BaroWardrobeSwitcher
 {
@@ -17,12 +20,13 @@ namespace BaroWardrobeSwitcher
         {
             LuaCsLogger.Log($"[Baro Wardrobe Switcher] C# visual override v{VisualOverride.Version} initializing.");
             harmonyInstance = new Harmony("BaroWardrobeSwitcher.VisualOverride");
+            VisualOverride.ResetPatchStatus();
         }
 
         public void OnLoadCompleted()
         {
-            harmonyInstance?.PatchAll();
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] C# visual override loaded.");
+            VisualOverride.InstallPatches(harmonyInstance);
+            LuaCsLogger.Log($"[Baro Wardrobe Switcher] C# visual override loaded: {VisualOverride.GetReadinessStatus()}.");
         }
 
         public void PreInitPatching() { }
@@ -37,58 +41,360 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
-        public const string Version = "0.1.7";
+        public const string Version = "0.3.5";
 
-        private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, WearableSprite>> FashionSpritesByCharacter =
-            new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, WearableSprite>>();
+        private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
+            new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
+        private static readonly Dictionary<Character, List<object>> FashionAnimationsByCharacter =
+            new Dictionary<Character, List<object>>();
+        private static readonly Dictionary<Character, List<FashionSoundEffect>> FashionSoundsByCharacter =
+            new Dictionary<Character, List<FashionSoundEffect>>();
+        private static readonly Dictionary<Character, List<FashionComponentSound>> FashionComponentSoundsByCharacter =
+            new Dictionary<Character, List<FashionComponentSound>>();
+        private static readonly Dictionary<Character, HashSet<StatusEffect>> SuppressedEquipmentSoundsByCharacter =
+            new Dictionary<Character, HashSet<StatusEffect>>();
+        private static readonly Dictionary<StatusEffect, Character> SuppressedEquipmentSoundOwners =
+            new Dictionary<StatusEffect, Character>();
+        private static readonly Dictionary<Character, HashSet<ItemComponent>> SuppressedEquipmentComponentSoundsByCharacter =
+            new Dictionary<Character, HashSet<ItemComponent>>();
+        private static readonly Dictionary<ItemComponent, Character> SuppressedEquipmentComponentSoundOwners =
+            new Dictionary<ItemComponent, Character>();
+        private static readonly Dictionary<Character, int> FashionSoundCursorByCharacter =
+            new Dictionary<Character, int>();
+        private static readonly Dictionary<Character, int> FashionComponentSoundCursorByCharacter =
+            new Dictionary<Character, int>();
+        private static readonly HashSet<Character> EmptyFashionCharacters = new HashSet<Character>();
         private static readonly HashSet<Character> ActiveCharacters = new HashSet<Character>();
-        private static readonly Dictionary<WearableSprite, SpriteMaskState> OriginalSpriteMasks =
-            new Dictionary<WearableSprite, SpriteMaskState>();
+        private static readonly Dictionary<Character, Dictionary<WearableSprite, SpriteMaskState>> OriginalSpriteMasksByCharacter =
+            new Dictionary<Character, Dictionary<WearableSprite, SpriteMaskState>>();
+        private static readonly Dictionary<Limb, HashSet<WearableSprite>> DrawnFashionSpritesByLimb =
+            new Dictionary<Limb, HashSet<WearableSprite>>();
+        private static readonly Dictionary<Limb, List<WearableSprite>> InjectedFashionSpritesByLimb =
+            new Dictionary<Limb, List<WearableSprite>>();
+        private static readonly Dictionary<Limb, List<WearableSprite>> OriginalWearableOrderByLimb =
+            new Dictionary<Limb, List<WearableSprite>>();
+        private static readonly Dictionary<string, PatchState> PatchStates =
+            new Dictionary<string, PatchState>();
         private static readonly MethodInfo OnWearablesChangedMethod = AccessTools.Method(typeof(Character), "OnWearablesChanged");
+        private static readonly MethodInfo DrawWearableMethod = AccessTools.Method(
+            typeof(Limb),
+            "DrawWearable",
+            new[] { typeof(WearableSprite), typeof(float), typeof(SpriteBatch), typeof(Color), typeof(float), typeof(SpriteEffects) });
+        private static readonly MethodInfo TryLoadTemporaryAnimationMethod =
+            AccessTools.Method(typeof(AnimController), "TryLoadTemporaryAnimation");
+        private static readonly MethodInfo PlaySoundMethod =
+            AccessTools.Method(typeof(StatusEffect), "PlaySound");
+        private static readonly MethodInfo ItemComponentPlaySoundMethod =
+            AccessTools.Method(typeof(ItemComponent), "PlaySound", new[] { typeof(ActionType), typeof(Character) });
+        private static readonly FieldInfo AnimationsToTriggerField =
+            AccessTools.Field(typeof(StatusEffect), "animationsToTrigger");
+        private static readonly FieldInfo SoundsField =
+            AccessTools.Field(typeof(StatusEffect), "sounds");
+        private static readonly FieldInfo ComponentSoundsField =
+            AccessTools.Field(typeof(ItemComponent), "sounds");
+        private static readonly FieldInfo ForcePlaySoundsField =
+            AccessTools.Field(typeof(StatusEffect), "forcePlaySounds");
         private static readonly MethodInfo MemberwiseCloneMethod = AccessTools.Method(typeof(object), "MemberwiseClone");
+        private static readonly PropertyInfo CharacterRemovedProperty = AccessTools.Property(typeof(Character), "Removed");
+        private const float DrawDepthStep = 0.000001f;
+        private const float FashionAnimationPriorityBoost = 10000.0f;
         private static int drawOverrideLogCount;
+        private static int virtualDrawErrorLogCount;
+        private static int animationOverrideErrorLogCount;
+        private static int soundOverrideErrorLogCount;
+        private static int lastInjectedSpriteCount;
+
+        public static void ResetPatchStatus()
+        {
+            PatchStates.Clear();
+            PatchStates["Limb.DrawWearable"] = new PatchState(required: true);
+            PatchStates["Limb.Draw"] = new PatchState(required: true);
+            PatchStates["AnimController.UpdateAnimations"] = new PatchState(required: false);
+            PatchStates["StatusEffect.PlaySound"] = new PatchState(required: false);
+            PatchStates["ItemComponent.PlaySound"] = new PatchState(required: false);
+        }
+
+        public static void InstallPatches(Harmony harmony)
+        {
+            ResetPatchStatus();
+            if (harmony == null)
+            {
+                foreach (PatchState state in PatchStates.Values)
+                {
+                    state.Fail("Harmony instance missing");
+                }
+                return;
+            }
+
+            PatchTarget(
+                harmony,
+                "Limb.DrawWearable",
+                DrawWearableMethod,
+                prefix: AccessTools.Method(typeof(LimbDrawWearablePatch), "Prefix"));
+            PatchTarget(
+                harmony,
+                "Limb.Draw",
+                FindLimbDrawMethod(),
+                prefix: AccessTools.Method(typeof(LimbDrawPatch), "Prefix"),
+                postfix: AccessTools.Method(typeof(LimbDrawPatch), "Postfix"),
+                finalizer: AccessTools.Method(typeof(LimbDrawPatch), "Finalizer"));
+            PatchTarget(
+                harmony,
+                "AnimController.UpdateAnimations",
+                AccessTools.Method(typeof(AnimController), "UpdateAnimations"),
+                postfix: AccessTools.Method(typeof(AnimControllerUpdateAnimationsPatch), "Postfix"),
+                required: false);
+            PatchTarget(
+                harmony,
+                "StatusEffect.PlaySound",
+                PlaySoundMethod,
+                prefix: AccessTools.Method(typeof(StatusEffectPlaySoundPatch), "Prefix"),
+                required: false);
+            PatchTarget(
+                harmony,
+                "ItemComponent.PlaySound",
+                ItemComponentPlaySoundMethod,
+                prefix: AccessTools.Method(typeof(ItemComponentPlaySoundPatch), "Prefix"),
+                required: false);
+        }
 
         public static bool IsReady()
         {
-            return true;
+            if (PatchStates.Count == 0) { ResetPatchStatus(); }
+            return PatchStates.Values.Where(state => state.Required).All(state => state.Applied);
+        }
+
+        public static string GetReadinessStatus()
+        {
+            if (PatchStates.Count == 0) { ResetPatchStatus(); }
+            List<string> missingRequired = PatchStates
+                .Where(pair => pair.Value.Required && !pair.Value.Applied)
+                .Select(pair => pair.Key + " (" + pair.Value.Error + ")")
+                .ToList();
+            List<string> missingOptional = PatchStates
+                .Where(pair => !pair.Value.Required && !pair.Value.Applied)
+                .Select(pair => pair.Key + " (" + pair.Value.Error + ")")
+                .ToList();
+
+            if (missingRequired.Count == 0)
+            {
+                return missingOptional.Count == 0
+                    ? "ready"
+                    : "ready; optional hook unavailable: " + string.Join(", ", missingOptional);
+            }
+
+            bool hasAnyRequired = PatchStates.Values.Any(state => state.Required && state.Applied);
+            return (hasAnyRequired ? "degraded; missing " : "missing required hooks: ") +
+                   string.Join(", ", missingRequired);
+        }
+
+        private static void PatchTarget(
+            Harmony harmony,
+            string name,
+            MethodBase target,
+            MethodInfo prefix = null,
+            MethodInfo postfix = null,
+            MethodInfo finalizer = null,
+            bool required = true)
+        {
+            if (!PatchStates.TryGetValue(name, out PatchState state))
+            {
+                state = new PatchState(required);
+                PatchStates[name] = state;
+            }
+
+            if (target == null)
+            {
+                state.Fail("target missing");
+                return;
+            }
+
+            if (prefix == null && postfix == null && finalizer == null)
+            {
+                state.Fail("patch method missing");
+                return;
+            }
+
+            try
+            {
+                PatchProcessor processor = harmony.CreateProcessor(target);
+                if (prefix != null)
+                {
+                    processor.AddPrefix(new HarmonyMethod(prefix));
+                }
+                if (postfix != null)
+                {
+                    processor.AddPostfix(new HarmonyMethod(postfix));
+                }
+                if (finalizer != null)
+                {
+                    processor.AddFinalizer(new HarmonyMethod(finalizer));
+                }
+                processor.Patch();
+                state.Applied = true;
+                state.Error = null;
+            }
+            catch (Exception ex)
+            {
+                state.Fail(ex.GetType().Name + ": " + ex.Message);
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to patch {name}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        public static string GetCharacterDebugStatus(Character character)
+        {
+            if (character == null) { return "character=nil"; }
+            int spriteCount = FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot)
+                ? spritesBySlot.Values.Sum(spriteList => spriteList.Count)
+                : 0;
+            int animationCount = FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos)
+                ? animationInfos.Count
+                : 0;
+            int soundCount = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> soundEffects)
+                ? soundEffects.Count
+                : 0;
+            int componentSoundCount = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds)
+                ? componentSounds.Count
+                : 0;
+            int suppressedSoundCount = SuppressedEquipmentSoundsByCharacter.TryGetValue(character, out HashSet<StatusEffect> suppressedSounds)
+                ? suppressedSounds.Count
+                : 0;
+            int suppressedComponentSoundCount = SuppressedEquipmentComponentSoundsByCharacter.TryGetValue(character, out HashSet<ItemComponent> suppressedComponentSounds)
+                ? suppressedComponentSounds.Count
+                : 0;
+            return "active=" + ActiveCharacters.Contains(character) +
+                   ", empty=" + EmptyFashionCharacters.Contains(character) +
+                   ", sprites=" + spriteCount +
+                   ", animations=" + animationCount +
+                   ", sounds=" + soundCount +
+                   ", itemSounds=" + componentSoundCount +
+                   ", suppressedSounds=" + suppressedSoundCount +
+                   ", suppressedItemSounds=" + suppressedComponentSoundCount +
+                   ", drawPatchTarget=" + (FindLimbDrawMethod() != null) +
+                   ", drawWearableTarget=" + (DrawWearableMethod != null) +
+                   ", lastInjected=" + lastInjectedSpriteCount;
         }
 
         public static void ClearAll()
         {
             RestoreAllSpriteMasks();
             FashionSpritesByCharacter.Clear();
+            FashionAnimationsByCharacter.Clear();
+            FashionSoundsByCharacter.Clear();
+            FashionComponentSoundsByCharacter.Clear();
+            SuppressedEquipmentSoundsByCharacter.Clear();
+            SuppressedEquipmentSoundOwners.Clear();
+            SuppressedEquipmentComponentSoundsByCharacter.Clear();
+            SuppressedEquipmentComponentSoundOwners.Clear();
+            FashionSoundCursorByCharacter.Clear();
+            FashionComponentSoundCursorByCharacter.Clear();
+            EmptyFashionCharacters.Clear();
             ActiveCharacters.Clear();
+            SuppressedEquipmentSoundsByCharacter.Clear();
+            SuppressedEquipmentSoundOwners.Clear();
+            SuppressedEquipmentComponentSoundsByCharacter.Clear();
+            SuppressedEquipmentComponentSoundOwners.Clear();
+            FashionSoundCursorByCharacter.Clear();
+            FashionComponentSoundCursorByCharacter.Clear();
+            DrawnFashionSpritesByLimb.Clear();
+            InjectedFashionSpritesByLimb.Clear();
+            OriginalWearableOrderByLimb.Clear();
         }
 
         public static void RestoreItemVisuals()
         {
             RestoreAllSpriteMasks();
             ActiveCharacters.Clear();
+            DrawnFashionSpritesByLimb.Clear();
+            InjectedFashionSpritesByLimb.Clear();
+            OriginalWearableOrderByLimb.Clear();
+        }
+
+        public static void RestoreCharacterItemVisuals(Character character)
+        {
+            if (character == null) { return; }
+            RestoreSpriteMasks(character);
+            ClearSuppressedEquipmentSounds(character);
+            ClearSuppressedEquipmentComponentSounds(character);
+            ActiveCharacters.Remove(character);
+            DrawnFashionSpritesByLimb.Clear();
+            InjectedFashionSpritesByLimb.Clear();
+            OriginalWearableOrderByLimb.Clear();
+            RefreshWearables(character);
         }
 
         public static void ClearCharacter(Character character)
         {
             if (character == null) { return; }
-            RestoreAllSpriteMasks();
+            RestoreSpriteMasks(character);
             FashionSpritesByCharacter.Remove(character);
+            FashionAnimationsByCharacter.Remove(character);
+            FashionSoundsByCharacter.Remove(character);
+            FashionComponentSoundsByCharacter.Remove(character);
+            ClearSuppressedEquipmentSounds(character);
+            ClearSuppressedEquipmentComponentSounds(character);
+            FashionSoundCursorByCharacter.Remove(character);
+            FashionComponentSoundCursorByCharacter.Remove(character);
+            EmptyFashionCharacters.Remove(character);
             ActiveCharacters.Remove(character);
+            DrawnFashionSpritesByLimb.Clear();
+            InjectedFashionSpritesByLimb.Clear();
+            OriginalWearableOrderByLimb.Clear();
             RefreshWearables(character);
+        }
+
+        public static void PruneStaleCharacters()
+        {
+            List<Character> characters = FashionSpritesByCharacter.Keys
+                .Concat(FashionAnimationsByCharacter.Keys)
+                .Concat(FashionSoundsByCharacter.Keys)
+                .Concat(FashionComponentSoundsByCharacter.Keys)
+                .Concat(SuppressedEquipmentSoundsByCharacter.Keys)
+                .Concat(SuppressedEquipmentComponentSoundsByCharacter.Keys)
+                .Concat(EmptyFashionCharacters)
+                .Concat(ActiveCharacters)
+                .Concat(OriginalSpriteMasksByCharacter.Keys)
+                .Where(IsCharacterStale)
+                .Distinct()
+                .ToList();
+
+            foreach (Character character in characters)
+            {
+                RestoreSpriteMasks(character);
+                FashionSpritesByCharacter.Remove(character);
+                FashionAnimationsByCharacter.Remove(character);
+                FashionSoundsByCharacter.Remove(character);
+                FashionComponentSoundsByCharacter.Remove(character);
+                ClearSuppressedEquipmentSounds(character);
+                ClearSuppressedEquipmentComponentSounds(character);
+                FashionSoundCursorByCharacter.Remove(character);
+                FashionComponentSoundCursorByCharacter.Remove(character);
+                EmptyFashionCharacters.Remove(character);
+                ActiveCharacters.Remove(character);
+                OriginalSpriteMasksByCharacter.Remove(character);
+            }
         }
 
         public static int CaptureFashionItem(Character character, Item item)
         {
             if (character == null || item == null) { return 0; }
 
+            EmptyFashionCharacters.Remove(character);
+            int animationCount = CaptureFashionAnimations(character, item);
+            int soundCount = CaptureFashionSounds(character, item);
+            int itemSoundCount = CaptureFashionComponentSounds(character, item);
             Wearable wearable = item.GetComponent<Wearable>();
             if (wearable?.wearableSprites == null || wearable.wearableSprites.Length == 0)
             {
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] No wearable sprites on fashion item: {item.Name}.");
+                drawOverrideLogCount = 0;
+                ActiveCharacters.Remove(character);
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Captured 0 wearable sprites, {animationCount} animation triggers, {soundCount} status sound triggers, and {itemSoundCount} item sound components from fashion item without wearable sprites: {item.Name}.");
                 return 0;
             }
 
-            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, WearableSprite> spritesBySlot))
+            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot))
             {
-                spritesBySlot = new Dictionary<Tuple<WearableType, LimbType>, WearableSprite>();
+                spritesBySlot = new Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>();
                 FashionSpritesByCharacter[character] = spritesBySlot;
             }
 
@@ -99,37 +405,70 @@ namespace BaroWardrobeSwitcher
                 {
                     continue;
                 }
-                spritesBySlot[Tuple.Create(sprite.Type, sprite.Limb)] = CreateNonMaskingSprite(sprite);
+                Tuple<WearableType, LimbType> key = Tuple.Create(sprite.Type, sprite.Limb);
+                if (!spritesBySlot.TryGetValue(key, out List<WearableSprite> spriteList))
+                {
+                    spriteList = new List<WearableSprite>();
+                    spritesBySlot[key] = spriteList;
+                }
+                spriteList.Add(CreateFashionSpriteClone(sprite));
                 count++;
             }
             drawOverrideLogCount = 0;
             ActiveCharacters.Remove(character);
-            LuaCsLogger.Log($"[Baro Wardrobe Switcher] Captured {count} non-masking wearable sprites from fashion item: {item.Name}.");
+            LuaCsLogger.Log($"[Baro Wardrobe Switcher] Captured {count} wearable sprites, {animationCount} animation triggers, {soundCount} status sound triggers, and {itemSoundCount} item sound components from fashion item: {item.Name}.");
             return count;
+        }
+
+        public static bool CaptureEmptyFashion(Character character)
+        {
+            if (character == null) { return false; }
+            EmptyFashionCharacters.Add(character);
+            ActiveCharacters.Remove(character);
+            drawOverrideLogCount = 0;
+            LuaCsLogger.Log("[Baro Wardrobe Switcher] Captured empty fashion look.");
+            return true;
         }
 
         public static bool ApplyFashionItemVisual(Character character, Item item, bool carrier)
         {
             if (character == null || item == null) { return false; }
-            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, WearableSprite> spritesBySlot) ||
-                spritesBySlot.Count == 0)
+            if (!HasFashionPayload(character))
             {
                 return false;
             }
+
+            RegisterSuppressedEquipmentSounds(character, item);
+            RegisterSuppressedEquipmentComponentSounds(character, item);
 
             Wearable wearable = item.GetComponent<Wearable>();
             if (wearable?.wearableSprites == null || wearable.wearableSprites.Length == 0)
             {
-                return false;
+                return ActivateFashionVisual(character);
             }
 
-            int sanitized = SanitizeEquippedItemMasks(wearable);
-            ActiveCharacters.Add(character);
+            int sanitized = SanitizeEquippedItemMasks(character, wearable);
+            bool activated = ActivateFashionVisual(character);
             if (carrier)
             {
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Enabled draw-only fashion override through carrier: {item.Name}, capturedSprites={spritesBySlot.Count}, sanitizedSprites={sanitized}.");
+                int capturedSprites = FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot)
+                    ? spritesBySlot.Values.Sum(spriteList => spriteList.Count)
+                    : 0;
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Enabled draw-only fashion override through carrier: {item.Name}, capturedSprites={capturedSprites}, sanitizedSprites={sanitized}.");
             }
             drawOverrideLogCount = 0;
+            return activated;
+        }
+
+        public static bool ActivateFashionVisual(Character character)
+        {
+            if (character == null || !HasFashionPayload(character)) { return false; }
+            ActiveCharacters.Add(character);
+            drawOverrideLogCount = 0;
+            virtualDrawErrorLogCount = 0;
+            animationOverrideErrorLogCount = 0;
+            soundOverrideErrorLogCount = 0;
+            lastInjectedSpriteCount = 0;
             RefreshWearables(character);
             return true;
         }
@@ -141,7 +480,12 @@ namespace BaroWardrobeSwitcher
             if (limb == null || original == null) { return false; }
             if (limb.character == null || !ActiveCharacters.Contains(limb.character)) { return false; }
             if (!IsEquipmentSprite(original)) { return false; }
-            if (!TryGetFashionSprite(limb.character, original.Type, limb.type, out WearableSprite fashionSprite))
+            if (!DrawnFashionSpritesByLimb.TryGetValue(limb, out HashSet<WearableSprite> drawnSprites))
+            {
+                drawnSprites = new HashSet<WearableSprite>();
+                DrawnFashionSpritesByLimb[limb] = drawnSprites;
+            }
+            if (!TryGetFashionSprite(limb.character, original.Type, limb.type, drawnSprites, out WearableSprite fashionSprite))
             {
                 skipOriginal = true;
                 if (drawOverrideLogCount < 12)
@@ -151,6 +495,7 @@ namespace BaroWardrobeSwitcher
                 }
                 return true;
             }
+            drawnSprites.Add(fashionSprite);
             replacement = fashionSprite;
             if (drawOverrideLogCount < 12)
             {
@@ -160,12 +505,695 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
+        internal static void BeginLimbDraw(Limb limb)
+        {
+            if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return; }
+            if (!FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
+                spritesBySlot.Count == 0)
+            {
+                return;
+            }
+            DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
+
+            List<WearableSprite> injectedSprites = null;
+            List<WearableSprite> originalOrder = null;
+            foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
+            {
+                if (limb.WearingItems.Contains(pair.Value)) { continue; }
+
+                if (injectedSprites == null)
+                {
+                    injectedSprites = new List<WearableSprite>();
+                    originalOrder = limb.WearingItems.ToList();
+                }
+                limb.WearingItems.Add(pair.Value);
+                injectedSprites.Add(pair.Value);
+            }
+
+            if (injectedSprites != null && injectedSprites.Count > 0)
+            {
+                OriginalWearableOrderByLimb[limb] = originalOrder ?? new List<WearableSprite>();
+                SortWearablesForDraw(limb.WearingItems);
+                InjectedFashionSpritesByLimb[limb] = injectedSprites;
+                lastInjectedSpriteCount = injectedSprites.Count;
+            }
+        }
+
+        internal static void EndLimbDraw(Limb limb)
+        {
+            if (limb == null) { return; }
+            List<WearableSprite> injectedSprites = null;
+            if (InjectedFashionSpritesByLimb.TryGetValue(limb, out injectedSprites))
+            {
+                InjectedFashionSpritesByLimb.Remove(limb);
+            }
+            HashSet<WearableSprite> injectedSet = injectedSprites == null
+                ? new HashSet<WearableSprite>()
+                : new HashSet<WearableSprite>(injectedSprites);
+
+            if (OriginalWearableOrderByLimb.TryGetValue(limb, out List<WearableSprite> originalOrder))
+            {
+                List<WearableSprite> remainingWearables = limb.WearingItems
+                    .Where(wearable => wearable != null && !injectedSet.Contains(wearable))
+                    .ToList();
+                limb.WearingItems.Clear();
+                foreach (WearableSprite originalWearable in originalOrder)
+                {
+                    if (originalWearable == null || !remainingWearables.Contains(originalWearable) || limb.WearingItems.Contains(originalWearable))
+                    {
+                        continue;
+                    }
+                    limb.WearingItems.Add(originalWearable);
+                }
+                foreach (WearableSprite remainingWearable in remainingWearables)
+                {
+                    if (remainingWearable != null && !limb.WearingItems.Contains(remainingWearable))
+                    {
+                        limb.WearingItems.Add(remainingWearable);
+                    }
+                }
+                OriginalWearableOrderByLimb.Remove(limb);
+            }
+            else if (injectedSprites != null)
+            {
+                foreach (WearableSprite injectedSprite in injectedSprites)
+                {
+                    limb.WearingItems.RemoveAll(wearable => wearable == injectedSprite);
+                }
+            }
+            DrawnFashionSpritesByLimb.Remove(limb);
+        }
+
+        internal static void DrawMissingFashionSprites(Limb limb, SpriteBatch spriteBatch, Color? overrideColor)
+        {
+            try
+            {
+                if (limb?.character == null || spriteBatch == null || !ActiveCharacters.Contains(limb.character)) { return; }
+                if (!FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
+                    spritesBySlot.Count == 0)
+                {
+                    return;
+                }
+                if (DrawWearableMethod == null)
+                {
+                    LogVirtualDrawError("Limb.DrawWearable method was not found.");
+                    return;
+                }
+
+                if (!DrawnFashionSpritesByLimb.TryGetValue(limb, out HashSet<WearableSprite> drawnSprites))
+                {
+                    drawnSprites = new HashSet<WearableSprite>();
+                }
+
+                int depthIndex = Math.Max(limb.WearingItems.Count + 8, 8);
+                foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
+                {
+                    if (drawnSprites.Contains(pair.Value)) { continue; }
+                    if (!ShouldFallbackDrawMissingFashionSprite(pair.Value, limb.type)) { continue; }
+
+                    drawnSprites.Add(pair.Value);
+                    DrawFashionWearable(limb, pair.Value, depthIndex++, spriteBatch, overrideColor);
+                }
+            }
+            finally
+            {
+                if (limb != null)
+                {
+                    DrawnFashionSpritesByLimb.Remove(limb);
+                }
+            }
+        }
+
+        internal static void KeepFashionEffectsAlive(AnimController animController)
+        {
+            KeepFashionAnimationsAlive(animController);
+        }
+
+        private static void KeepFashionAnimationsAlive(AnimController animController)
+        {
+            Character character = animController?.Character;
+            if (character == null || !ActiveCharacters.Contains(character)) { return; }
+            if (!FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos) || animationInfos.Count == 0) { return; }
+            if (TryLoadTemporaryAnimationMethod == null)
+            {
+                LogAnimationError("AnimController.TryLoadTemporaryAnimation method was not found.");
+                return;
+            }
+
+            foreach (object animationInfo in animationInfos)
+            {
+                try
+                {
+                    TryLoadTemporaryAnimationMethod.Invoke(animController, new[] { animationInfo, false });
+                }
+                catch (Exception ex)
+                {
+                    LogAnimationError($"Failed to refresh fashion animation: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
+        private static bool HasFashionPayload(Character character)
+        {
+            if (character == null) { return false; }
+            bool hasEmptyLook = EmptyFashionCharacters.Contains(character);
+            bool hasSprites = FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) &&
+                              spritesBySlot.Values.Sum(spriteList => spriteList.Count) > 0;
+            bool hasAnimations = FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos) &&
+                                 animationInfos.Count > 0;
+            bool hasSounds = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> soundEffects) &&
+                             soundEffects.Count > 0;
+            bool hasComponentSounds = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds) &&
+                                      componentSounds.Count > 0;
+            return hasEmptyLook || hasSprites || hasAnimations || hasSounds || hasComponentSounds;
+        }
+
+        private static int CaptureFashionAnimations(Character character, Item item)
+        {
+            if (character == null || item?.Components == null) { return 0; }
+            if (AnimationsToTriggerField == null) { return 0; }
+
+            if (!FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos))
+            {
+                animationInfos = new List<object>();
+                FashionAnimationsByCharacter[character] = animationInfos;
+            }
+
+            int count = 0;
+            foreach (ItemComponent component in item.Components)
+            {
+                if (component?.statusEffectLists == null) { continue; }
+                if (!component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> statusEffects)) { continue; }
+                foreach (StatusEffect statusEffect in statusEffects)
+                {
+                    IEnumerable animations = AnimationsToTriggerField.GetValue(statusEffect) as IEnumerable;
+                    if (animations == null) { continue; }
+                    foreach (object animationInfo in animations)
+                    {
+                        object boostedAnimationInfo = BoostFashionAnimationPriority(animationInfo);
+                        if (boostedAnimationInfo == null || animationInfos.Contains(boostedAnimationInfo)) { continue; }
+                        animationInfos.Add(boostedAnimationInfo);
+                        count++;
+                    }
+                }
+            }
+
+            return count;
+        }
+
+        private static int CaptureFashionSounds(Character character, Item item)
+        {
+            if (character == null || item?.Components == null) { return 0; }
+            if (SoundsField == null) { return 0; }
+
+            if (!FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> soundEffects))
+            {
+                soundEffects = new List<FashionSoundEffect>();
+                FashionSoundsByCharacter[character] = soundEffects;
+            }
+
+            int count = 0;
+            foreach (ItemComponent component in item.Components)
+            {
+                if (component?.statusEffectLists == null) { continue; }
+                if (!component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> statusEffects)) { continue; }
+                foreach (StatusEffect statusEffect in statusEffects)
+                {
+                    if (!HasSounds(statusEffect)) { continue; }
+                    if (soundEffects.Any(soundEffect => ReferenceEquals(soundEffect.StatusEffect, statusEffect))) { continue; }
+
+                    soundEffects.Add(new FashionSoundEffect(statusEffect));
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static int CaptureFashionComponentSounds(Character character, Item item)
+        {
+            if (character == null || item?.Components == null || ComponentSoundsField == null) { return 0; }
+
+            if (!FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds))
+            {
+                componentSounds = new List<FashionComponentSound>();
+                FashionComponentSoundsByCharacter[character] = componentSounds;
+            }
+
+            int count = 0;
+            foreach (ItemComponent component in item.Components)
+            {
+                if (component == null || !HasComponentSounds(component)) { continue; }
+                foreach (ActionType actionType in GetComponentSoundTypes(component))
+                {
+                    if (componentSounds.Any(sound => ReferenceEquals(sound.Component, component) && sound.ActionType == actionType)) { continue; }
+                    componentSounds.Add(new FashionComponentSound(component, actionType));
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static void RegisterSuppressedEquipmentSounds(Character character, Item item)
+        {
+            if (character == null || item?.Components == null || SoundsField == null) { return; }
+            if (!HasAnyFashionSound(character))
+            {
+                return;
+            }
+            if (!SuppressedEquipmentSoundsByCharacter.TryGetValue(character, out HashSet<StatusEffect> suppressedSounds))
+            {
+                suppressedSounds = new HashSet<StatusEffect>();
+                SuppressedEquipmentSoundsByCharacter[character] = suppressedSounds;
+            }
+
+            foreach (ItemComponent component in item.Components)
+            {
+                if (component?.statusEffectLists == null) { continue; }
+                if (!component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> statusEffects)) { continue; }
+                foreach (StatusEffect statusEffect in statusEffects)
+                {
+                    if (!HasSounds(statusEffect)) { continue; }
+                    suppressedSounds.Add(statusEffect);
+                    SuppressedEquipmentSoundOwners[statusEffect] = character;
+                }
+            }
+        }
+
+        private static void RegisterSuppressedEquipmentComponentSounds(Character character, Item item)
+        {
+            if (character == null || item?.Components == null || ComponentSoundsField == null) { return; }
+            if (!HasAnyFashionSound(character))
+            {
+                return;
+            }
+            if (!SuppressedEquipmentComponentSoundsByCharacter.TryGetValue(character, out HashSet<ItemComponent> suppressedComponents))
+            {
+                suppressedComponents = new HashSet<ItemComponent>();
+                SuppressedEquipmentComponentSoundsByCharacter[character] = suppressedComponents;
+            }
+
+            foreach (ItemComponent component in item.Components)
+            {
+                if (component == null || !HasComponentSounds(component)) { continue; }
+                suppressedComponents.Add(component);
+                SuppressedEquipmentComponentSoundOwners[component] = character;
+            }
+        }
+
+        private static void ClearSuppressedEquipmentSounds(Character character)
+        {
+            if (character == null) { return; }
+            if (SuppressedEquipmentSoundsByCharacter.TryGetValue(character, out HashSet<StatusEffect> suppressedSounds))
+            {
+                foreach (StatusEffect statusEffect in suppressedSounds.ToList())
+                {
+                    SuppressedEquipmentSoundOwners.Remove(statusEffect);
+                }
+                SuppressedEquipmentSoundsByCharacter.Remove(character);
+            }
+        }
+
+        private static void ClearSuppressedEquipmentComponentSounds(Character character)
+        {
+            if (character == null) { return; }
+            if (SuppressedEquipmentComponentSoundsByCharacter.TryGetValue(character, out HashSet<ItemComponent> suppressedComponents))
+            {
+                foreach (ItemComponent component in suppressedComponents.ToList())
+                {
+                    SuppressedEquipmentComponentSoundOwners.Remove(component);
+                }
+                SuppressedEquipmentComponentSoundsByCharacter.Remove(character);
+            }
+        }
+
+        internal static bool ShouldPlayOriginalStatusEffectSound(StatusEffect statusEffect, Entity entity, Hull hull, Vector2 worldPosition)
+        {
+            if (statusEffect == null) { return true; }
+            if (!SuppressedEquipmentSoundOwners.TryGetValue(statusEffect, out Character character)) { return true; }
+            if (character == null || !ActiveCharacters.Contains(character)) { return true; }
+            if (!HasAnyFashionSound(character))
+            {
+                return false;
+            }
+
+            bool played = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> fashionSounds) &&
+                          TryPlayReplacementFashionSound(character, fashionSounds, entity, hull, worldPosition);
+            if (!played && FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds))
+            {
+                played = TryPlayReplacementFashionComponentSound(character, componentSounds, ActionType.OnWearing, character);
+            }
+            if (!played)
+            {
+                LogSoundError("Skipped real equipment sound but could not play a saved appearance sound.");
+            }
+            return false;
+        }
+
+        internal static bool ShouldPlayOriginalItemComponentSound(ItemComponent component, ActionType actionType, Character user)
+        {
+            if (component == null) { return true; }
+            if (!SuppressedEquipmentComponentSoundOwners.TryGetValue(component, out Character character)) { return true; }
+            if (character == null || !ActiveCharacters.Contains(character)) { return true; }
+            if (user != null && character != user) { return true; }
+            if (!HasAnyFashionSound(character))
+            {
+                return false;
+            }
+
+            bool played = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> fashionSounds) &&
+                          TryPlayReplacementFashionComponentSound(character, fashionSounds, actionType, user ?? character);
+            if (!played && FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds))
+            {
+                played = TryPlayReplacementFashionSound(
+                    character,
+                    statusSounds,
+                    user ?? character,
+                    character.CurrentHull,
+                    character.WorldPosition);
+            }
+            if (!played)
+            {
+                LogSoundError("Skipped real equipment item sound but could not play a saved appearance item sound.");
+            }
+            return false;
+        }
+
+        private static bool HasAnyFashionSound(Character character)
+        {
+            if (character == null) { return false; }
+            bool hasStatusSounds = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds) &&
+                                   statusSounds.Count > 0;
+            bool hasComponentSounds = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds) &&
+                                      componentSounds.Count > 0;
+            return hasStatusSounds || hasComponentSounds;
+        }
+
+        private static bool TryPlayReplacementFashionSound(
+            Character character,
+            List<FashionSoundEffect> fashionSounds,
+            Entity entity,
+            Hull hull,
+            Vector2 worldPosition)
+        {
+            if (character == null || fashionSounds == null || fashionSounds.Count == 0 || PlaySoundMethod == null)
+            {
+                return false;
+            }
+
+            int cursor = FashionSoundCursorByCharacter.TryGetValue(character, out int storedCursor) ? storedCursor : 0;
+            for (int offset = 0; offset < fashionSounds.Count; offset++)
+            {
+                int index = (cursor + offset) % fashionSounds.Count;
+                FashionSoundEffect fashionSound = fashionSounds[index];
+                if (fashionSound?.StatusEffect == null) { continue; }
+
+                FashionSoundCursorByCharacter[character] = (index + 1) % fashionSounds.Count;
+                bool originalForcePlay = false;
+                bool forcePlayChanged = false;
+                try
+                {
+                    if (ForcePlaySoundsField != null)
+                    {
+                        object originalValue = ForcePlaySoundsField.GetValue(fashionSound.StatusEffect);
+                        originalForcePlay = originalValue is bool boolValue && boolValue;
+                        ForcePlaySoundsField.SetValue(fashionSound.StatusEffect, true);
+                        forcePlayChanged = true;
+                    }
+
+                    PlaySoundMethod.Invoke(
+                        fashionSound.StatusEffect,
+                        new object[]
+                        {
+                            entity ?? character,
+                            hull ?? character.CurrentHull,
+                            worldPosition
+                        });
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    LogSoundError($"Failed to replace equipment sound with saved appearance sound: {ex.GetType().Name}: {ex.Message}");
+                    return false;
+                }
+                finally
+                {
+                    if (forcePlayChanged)
+                    {
+                        try
+                        {
+                            ForcePlaySoundsField.SetValue(fashionSound.StatusEffect, originalForcePlay);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogSoundError($"Failed to restore sound force flag: {ex.GetType().Name}: {ex.Message}");
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryPlayReplacementFashionComponentSound(
+            Character character,
+            List<FashionComponentSound> fashionSounds,
+            ActionType actionType,
+            Character user)
+        {
+            if (character == null || fashionSounds == null || fashionSounds.Count == 0) { return false; }
+
+            int cursor = FashionComponentSoundCursorByCharacter.TryGetValue(character, out int storedCursor) ? storedCursor : 0;
+            for (int pass = 0; pass < 2; pass++)
+            {
+                for (int offset = 0; offset < fashionSounds.Count; offset++)
+                {
+                    int index = (cursor + offset) % fashionSounds.Count;
+                    FashionComponentSound fashionSound = fashionSounds[index];
+                    if (fashionSound?.Component == null) { continue; }
+                    if (pass == 0 && fashionSound.ActionType != actionType) { continue; }
+
+                    FashionComponentSoundCursorByCharacter[character] = (index + 1) % fashionSounds.Count;
+                    try
+                    {
+                        fashionSound.Component.PlaySound(fashionSound.ActionType, user ?? character);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogSoundError($"Failed to replace equipment item sound with saved appearance item sound: {ex.GetType().Name}: {ex.Message}");
+                        return false;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static bool HasSounds(StatusEffect statusEffect)
+        {
+            if (statusEffect == null || SoundsField == null) { return false; }
+            try
+            {
+                IEnumerable sounds = SoundsField.GetValue(statusEffect) as IEnumerable;
+                if (sounds == null) { return false; }
+                foreach (object sound in sounds)
+                {
+                    if (sound != null) { return true; }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to inspect fashion sounds: {ex.GetType().Name}: {ex.Message}");
+            }
+            return false;
+        }
+
+        private static bool HasComponentSounds(ItemComponent component)
+        {
+            if (component == null || ComponentSoundsField == null) { return false; }
+            try
+            {
+                object sounds = ComponentSoundsField.GetValue(component);
+                return sounds is System.Collections.IDictionary dictionary && dictionary.Count > 0;
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to inspect item component sounds: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static IEnumerable<ActionType> GetComponentSoundTypes(ItemComponent component)
+        {
+            if (component == null || ComponentSoundsField == null) { yield break; }
+            System.Collections.IDictionary dictionary = null;
+            try
+            {
+                dictionary = ComponentSoundsField.GetValue(component) as System.Collections.IDictionary;
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to enumerate item component sounds: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            if (dictionary == null) { yield break; }
+            foreach (object key in dictionary.Keys)
+            {
+                if (key is ActionType actionType)
+                {
+                    yield return actionType;
+                }
+            }
+        }
+
+        private static IEnumerable<KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite>> EnumerateFashionSpritesForLimb(
+            Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot,
+            LimbType limbType)
+        {
+            return spritesBySlot
+                .Where(pair => pair.Key.Item2 == limbType && pair.Value != null)
+                .SelectMany(pair => pair.Value
+                    .Where(sprite => sprite != null)
+                    .Select(sprite => new KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite>(pair.Key, sprite)))
+                .OrderByDescending(pair => pair.Value.Sprite?.Depth ?? 0.0f);
+        }
+
+        private static void SortWearablesForDraw(List<WearableSprite> wearingItems)
+        {
+            wearingItems.Sort((wearable, nextWearable) =>
+            {
+                float depth = wearable?.Sprite?.Depth ?? 0;
+                float nextDepth = nextWearable?.Sprite?.Depth ?? 0;
+                return nextDepth.CompareTo(depth);
+            });
+            wearingItems.Sort((wearable, nextWearable) =>
+            {
+                Wearable wearableComponent = wearable?.WearableComponent;
+                Wearable nextWearableComponent = nextWearable?.WearableComponent;
+                if (wearableComponent == null && nextWearableComponent == null) { return 0; }
+                if (wearableComponent == null) { return -1; }
+                if (nextWearableComponent == null) { return 1; }
+                return wearableComponent.AllowedSlots.Contains(InvSlotType.OuterClothes).CompareTo(nextWearableComponent.AllowedSlots.Contains(InvSlotType.OuterClothes));
+            });
+        }
+
+        private static bool ShouldFallbackDrawMissingFashionSprite(WearableSprite sprite, LimbType limbType)
+        {
+            if (sprite == null || limbType != LimbType.Head) { return false; }
+            return sprite.WearableComponent?.AllowedSlots?.Contains(InvSlotType.Head) == true;
+        }
+
+        private static object BoostFashionAnimationPriority(object animationInfo)
+        {
+            if (animationInfo == null) { return null; }
+            Type animationInfoType = animationInfo.GetType();
+            try
+            {
+                PropertyInfo typeProperty = animationInfoType.GetProperty("Type");
+                PropertyInfo fileProperty = animationInfoType.GetProperty("File");
+                PropertyInfo priorityProperty = animationInfoType.GetProperty("Priority");
+                PropertyInfo expectedSpeciesProperty = animationInfoType.GetProperty("ExpectedSpeciesNames");
+                ConstructorInfo constructor = animationInfoType.GetConstructors()
+                    .FirstOrDefault(ctor => ctor.GetParameters().Length == 4);
+                if (typeProperty == null || fileProperty == null || priorityProperty == null || expectedSpeciesProperty == null || constructor == null)
+                {
+                    return animationInfo;
+                }
+
+                float priority = Convert.ToSingle(priorityProperty.GetValue(animationInfo));
+                return constructor.Invoke(new[]
+                {
+                    typeProperty.GetValue(animationInfo),
+                    fileProperty.GetValue(animationInfo),
+                    priority + FashionAnimationPriorityBoost,
+                    expectedSpeciesProperty.GetValue(animationInfo)
+                });
+            }
+            catch (Exception ex)
+            {
+                LogAnimationError($"Failed to boost fashion animation priority: {ex.GetType().Name}: {ex.Message}");
+                return animationInfo;
+            }
+        }
+
+        private static void DrawFashionWearable(Limb limb, WearableSprite wearable, int depthIndex, SpriteBatch spriteBatch, Color? overrideColor)
+        {
+            try
+            {
+                Color color = overrideColor.GetValueOrDefault(Color.White);
+                color *= limb.Alpha;
+                if (color.A <= 0) { return; }
+
+                SpriteEffects spriteEffect = limb.Dir > 0.0f ? SpriteEffects.None : SpriteEffects.FlipHorizontally;
+                if (limb.Params.MirrorHorizontally)
+                {
+                    spriteEffect = spriteEffect == SpriteEffects.None ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
+                }
+                if (limb.Params.MirrorVertically)
+                {
+                    spriteEffect |= SpriteEffects.FlipVertically;
+                }
+
+                DrawWearableMethod.Invoke(
+                    limb,
+                    new object[]
+                    {
+                        wearable,
+                        DrawDepthStep * depthIndex,
+                        spriteBatch,
+                        color,
+                        color.A / 255.0f,
+                        spriteEffect
+                    });
+            }
+            catch (Exception ex)
+            {
+                LogVirtualDrawError($"Failed to draw stored fashion sprite: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private static void LogVirtualDrawError(string message)
+        {
+            if (virtualDrawErrorLogCount >= 6) { return; }
+            virtualDrawErrorLogCount++;
+            LuaCsLogger.Log($"[Baro Wardrobe Switcher] {message}");
+        }
+
+        private static void LogAnimationError(string message)
+        {
+            if (animationOverrideErrorLogCount >= 6) { return; }
+            animationOverrideErrorLogCount++;
+            LuaCsLogger.Log($"[Baro Wardrobe Switcher] {message}");
+        }
+
+        private static void LogSoundError(string message)
+        {
+            if (soundOverrideErrorLogCount >= 6) { return; }
+            soundOverrideErrorLogCount++;
+            LuaCsLogger.Log($"[Baro Wardrobe Switcher] {message}");
+        }
+
+        internal static MethodInfo FindLimbDrawMethod()
+        {
+            return AccessTools.GetDeclaredMethods(typeof(Limb))
+                .FirstOrDefault(method =>
+                {
+                    if (method.Name != "Draw") { return false; }
+                    ParameterInfo[] parameters = method.GetParameters();
+                    return parameters.Length >= 2 &&
+                           parameters[0].ParameterType == typeof(SpriteBatch) &&
+                           parameters[1].ParameterType == typeof(Camera);
+                }) as MethodInfo;
+        }
+
         private static bool IsEquipmentSprite(WearableSprite sprite)
         {
             return sprite != null && sprite.Type == WearableType.Item;
         }
 
-        private static WearableSprite CreateNonMaskingSprite(WearableSprite original)
+        private static WearableSprite CreateFashionSpriteClone(WearableSprite original)
         {
             WearableSprite clone = original;
             try
@@ -177,26 +1205,31 @@ namespace BaroWardrobeSwitcher
                 LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to clone fashion sprite, using original: {ex.GetType().Name}: {ex.Message}");
             }
 
-            ClearMask(clone);
             return clone;
         }
 
-        private static int SanitizeEquippedItemMasks(Wearable wearable)
+        private static int SanitizeEquippedItemMasks(Character character, Wearable wearable)
         {
             int count = 0;
             foreach (WearableSprite sprite in wearable.wearableSprites.Where(sprite => IsEquipmentSprite(sprite)))
             {
-                SaveOriginalMask(sprite);
+                SaveOriginalMask(character, sprite);
                 ClearMask(sprite);
                 count++;
             }
             return count;
         }
 
-        private static void SaveOriginalMask(WearableSprite sprite)
+        private static void SaveOriginalMask(Character character, WearableSprite sprite)
         {
-            if (sprite == null || OriginalSpriteMasks.ContainsKey(sprite)) { return; }
-            OriginalSpriteMasks[sprite] = new SpriteMaskState(sprite);
+            if (character == null || sprite == null) { return; }
+            if (!OriginalSpriteMasksByCharacter.TryGetValue(character, out Dictionary<WearableSprite, SpriteMaskState> masks))
+            {
+                masks = new Dictionary<WearableSprite, SpriteMaskState>();
+                OriginalSpriteMasksByCharacter[character] = masks;
+            }
+            if (masks.ContainsKey(sprite)) { return; }
+            masks[sprite] = new SpriteMaskState(sprite);
         }
 
         private static void ClearMask(WearableSprite sprite)
@@ -210,11 +1243,40 @@ namespace BaroWardrobeSwitcher
 
         private static void RestoreAllSpriteMasks()
         {
-            foreach (KeyValuePair<WearableSprite, SpriteMaskState> pair in OriginalSpriteMasks.ToList())
+            foreach (Character character in OriginalSpriteMasksByCharacter.Keys.ToList())
+            {
+                RestoreSpriteMasks(character);
+            }
+            OriginalSpriteMasksByCharacter.Clear();
+        }
+
+        private static void RestoreSpriteMasks(Character character)
+        {
+            if (character == null) { return; }
+            if (!OriginalSpriteMasksByCharacter.TryGetValue(character, out Dictionary<WearableSprite, SpriteMaskState> masks))
+            {
+                return;
+            }
+            foreach (KeyValuePair<WearableSprite, SpriteMaskState> pair in masks.ToList())
             {
                 pair.Value.Restore(pair.Key);
             }
-            OriginalSpriteMasks.Clear();
+            OriginalSpriteMasksByCharacter.Remove(character);
+        }
+
+        private static bool IsCharacterStale(Character character)
+        {
+            if (character == null) { return true; }
+            if (CharacterRemovedProperty == null) { return false; }
+            try
+            {
+                object removed = CharacterRemovedProperty.GetValue(character);
+                return removed is bool removedValue && removedValue;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void RefreshWearables(Character character)
@@ -230,13 +1292,74 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        internal static bool TryGetFashionSprite(Character character, WearableType type, LimbType limbType, out WearableSprite sprite)
+        internal static bool TryGetFashionSprite(
+            Character character,
+            WearableType type,
+            LimbType limbType,
+            HashSet<WearableSprite> drawnSprites,
+            out WearableSprite sprite)
         {
             sprite = null;
             if (character == null) { return false; }
-            return FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, WearableSprite> spritesBySlot) &&
-                   spritesBySlot.TryGetValue(Tuple.Create(type, limbType), out sprite) &&
-                   sprite != null;
+            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot))
+            {
+                return false;
+            }
+            if (!spritesBySlot.TryGetValue(Tuple.Create(type, limbType), out List<WearableSprite> spriteList) || spriteList == null)
+            {
+                return false;
+            }
+
+            foreach (WearableSprite candidate in spriteList)
+            {
+                if (candidate == null) { continue; }
+                if (drawnSprites != null && drawnSprites.Contains(candidate)) { continue; }
+                sprite = candidate;
+                return true;
+            }
+            return false;
+        }
+
+        private sealed class FashionSoundEffect
+        {
+            public FashionSoundEffect(StatusEffect statusEffect)
+            {
+                StatusEffect = statusEffect;
+            }
+
+            public StatusEffect StatusEffect { get; }
+        }
+
+        private sealed class FashionComponentSound
+        {
+            public FashionComponentSound(ItemComponent component, ActionType actionType)
+            {
+                Component = component;
+                ActionType = actionType;
+            }
+
+            public ItemComponent Component { get; }
+            public ActionType ActionType { get; }
+        }
+
+        private sealed class PatchState
+        {
+            public PatchState(bool required)
+            {
+                Required = required;
+                Applied = false;
+                Error = "not installed";
+            }
+
+            public bool Required { get; }
+            public bool Applied { get; set; }
+            public string Error { get; set; }
+
+            public void Fail(string error)
+            {
+                Applied = false;
+                Error = string.IsNullOrWhiteSpace(error) ? "unknown error" : error;
+            }
         }
 
         private sealed class SpriteMaskState
@@ -269,14 +1392,8 @@ namespace BaroWardrobeSwitcher
         }
     }
 
-    [HarmonyPatch]
     internal static class LimbDrawWearablePatch
     {
-        private static MethodBase TargetMethod()
-        {
-            return AccessTools.Method(typeof(Limb), "DrawWearable");
-        }
-
         private static bool Prefix(Limb __instance, ref WearableSprite wearable)
         {
             if (!VisualOverride.TryOverrideDrawWearable(__instance, wearable, out WearableSprite replacement, out bool skipOriginal))
@@ -289,6 +1406,55 @@ namespace BaroWardrobeSwitcher
             }
             wearable = replacement;
             return true;
+        }
+    }
+
+    internal static class LimbDrawPatch
+    {
+        private static void Prefix(Limb __instance)
+        {
+            VisualOverride.BeginLimbDraw(__instance);
+        }
+
+        private static void Postfix(Limb __instance, object[] __args)
+        {
+            SpriteBatch spriteBatch = __args != null && __args.Length > 0 ? __args[0] as SpriteBatch : null;
+            Color? overrideColor = null;
+            if (__args != null && __args.Length > 2 && __args[2] is Color color)
+            {
+                overrideColor = color;
+            }
+            VisualOverride.DrawMissingFashionSprites(__instance, spriteBatch, overrideColor);
+        }
+
+        private static Exception Finalizer(Limb __instance, Exception __exception)
+        {
+            VisualOverride.EndLimbDraw(__instance);
+            return __exception;
+        }
+    }
+
+    internal static class AnimControllerUpdateAnimationsPatch
+    {
+        private static void Postfix(AnimController __instance)
+        {
+            VisualOverride.KeepFashionEffectsAlive(__instance);
+        }
+    }
+
+    internal static class StatusEffectPlaySoundPatch
+    {
+        private static bool Prefix(StatusEffect __instance, Entity entity, Hull hull, Vector2 worldPosition)
+        {
+            return VisualOverride.ShouldPlayOriginalStatusEffectSound(__instance, entity, hull, worldPosition);
+        }
+    }
+
+    internal static class ItemComponentPlaySoundPatch
+    {
+        private static bool Prefix(ItemComponent __instance, ActionType type, Character user)
+        {
+            return VisualOverride.ShouldPlayOriginalItemComponentSound(__instance, type, user);
         }
     }
 }
