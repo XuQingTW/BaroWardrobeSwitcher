@@ -11,6 +11,12 @@
     <OutputPath>../bin/Client/Windows/</OutputPath>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <BarotraumaInstallDir Condition="'$(BarotraumaInstallDir)' == '' And Exists('C:\Program Files (x86)\Steam\steamapps\common\Barotrauma\Barotrauma.dll')">C:\Program Files (x86)\Steam\steamapps\common\Barotrauma</BarotraumaInstallDir>
+    <LuaCsPublicizedDir Condition="'$(LuaCsPublicizedDir)' == '' And Exists('$(BarotraumaInstallDir)\LocalMods\LuaCsForBarotrauma\Publicized\Barotrauma.dll')">$(BarotraumaInstallDir)\LocalMods\LuaCsForBarotrauma\Publicized</LuaCsPublicizedDir>
+    <LuaCsPublicizedDir Condition="'$(LuaCsPublicizedDir)' == '' And Exists('$(BarotraumaInstallDir)\Publicized\Barotrauma.dll')">$(BarotraumaInstallDir)\Publicized</LuaCsPublicizedDir>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Remove="obj/**" />
     <Compile Remove="../bin.disabled-precompiled-20260603/**" />
@@ -18,23 +24,32 @@
 
   <ItemGroup>
     <Reference Include="Barotrauma">
-      <HintPath>../../LuaCsForBarotrauma/Publicized/Barotrauma.dll</HintPath>
+      <HintPath Condition="'$(LuaCsPublicizedDir)' != ''">$(LuaCsPublicizedDir)\Barotrauma.dll</HintPath>
+      <HintPath Condition="'$(LuaCsPublicizedDir)' == ''">../../LuaCsForBarotrauma/Publicized/Barotrauma.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="BarotraumaCore">
-      <HintPath>../../LuaCsForBarotrauma/Publicized/BarotraumaCore.dll</HintPath>
+      <HintPath Condition="'$(LuaCsPublicizedDir)' != ''">$(LuaCsPublicizedDir)\BarotraumaCore.dll</HintPath>
+      <HintPath Condition="'$(LuaCsPublicizedDir)' == ''">../../LuaCsForBarotrauma/Publicized/BarotraumaCore.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>../../../0Harmony.dll</HintPath>
+      <HintPath Condition="'$(BarotraumaInstallDir)' != ''">$(BarotraumaInstallDir)\0Harmony.dll</HintPath>
+      <HintPath Condition="'$(BarotraumaInstallDir)' == ''">../../../0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="MoonSharp.Interpreter">
-      <HintPath>../../../MoonSharp.Interpreter.dll</HintPath>
+      <HintPath Condition="'$(BarotraumaInstallDir)' != ''">$(BarotraumaInstallDir)\MoonSharp.Interpreter.dll</HintPath>
+      <HintPath Condition="'$(BarotraumaInstallDir)' == ''">../../../MoonSharp.Interpreter.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="XNATypes">
-      <HintPath>../../../XNATypes.dll</HintPath>
+      <HintPath Condition="'$(BarotraumaInstallDir)' != ''">$(BarotraumaInstallDir)\XNATypes.dll</HintPath>
+      <HintPath Condition="'$(BarotraumaInstallDir)' == ''">../../../XNATypes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MonoGame.Framework.Windows.NetStandard" Condition="'$(BarotraumaInstallDir)' != '' And Exists('$(BarotraumaInstallDir)\MonoGame.Framework.Windows.NetStandard.dll')">
+      <HintPath>$(BarotraumaInstallDir)\MonoGame.Framework.Windows.NetStandard.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

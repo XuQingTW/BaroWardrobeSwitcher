@@ -1,5 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<contentpackage name="Baro Wardrobe Switcher" modversion="0.1.2" corepackage="False" steamworkshopid="3737903001" gameversion="1.12.7.0">
+<contentpackage name="Baro Wardrobe Switcher" modversion="0.3.5" corepackage="False" steamworkshopid="3737903001" gameversion="1.12.7.0">
   <Text file="%ModDir%/Texts.xml" />
   <Other file="%ModDir%/ModConfig.xml" />
+  <Other file="%ModDir%/Lua/WardrobeSwitcher.lua" />
+  <Other file="%ModDir%/CSharp/Client/WardrobeVisualOverridePlugin.cs" />
 </contentpackage>
