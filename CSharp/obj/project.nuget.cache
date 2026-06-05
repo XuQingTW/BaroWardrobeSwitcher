@@ -1,12 +1,12 @@
 {
   "version": 2,
-  "dgSpecHash": "SrJ5S5lOEsM=",
+  "dgSpecHash": "xsLdxaTIf7s=",
   "success": true,
-  "projectFilePath": "C:\\Users\\Hyman\\OneDrive\\桌面\\BaroWardrobeSwitcher-main\\CSharp\\BaroWardrobeSwitcher.csproj",
+  "projectFilePath": "D:\\SteamLibrary\\steamapps\\common\\Barotrauma\\LocalMods\\BaroWardrobeSwitcher\\CSharp\\BaroWardrobeSwitcher.csproj",
   "expectedPackageFiles": [
-    "C:\\Users\\Hyman\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.27\\microsoft.netcore.app.ref.8.0.27.nupkg.sha512",
-    "C:\\Users\\Hyman\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.27\\microsoft.windowsdesktop.app.ref.8.0.27.nupkg.sha512",
-    "C:\\Users\\Hyman\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.27\\microsoft.aspnetcore.app.ref.8.0.27.nupkg.sha512"
+    "C:\\Users\\XuQing\\.nuget\\packages\\microsoft.netcore.app.ref\\8.0.26\\microsoft.netcore.app.ref.8.0.26.nupkg.sha512",
+    "C:\\Users\\XuQing\\.nuget\\packages\\microsoft.windowsdesktop.app.ref\\8.0.26\\microsoft.windowsdesktop.app.ref.8.0.26.nupkg.sha512",
+    "C:\\Users\\XuQing\\.nuget\\packages\\microsoft.aspnetcore.app.ref\\8.0.26\\microsoft.aspnetcore.app.ref.8.0.26.nupkg.sha512"
   ],
   "logs": []
 }

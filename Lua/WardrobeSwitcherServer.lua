@@ -47,6 +47,11 @@ local function itemIdentifier(item)
     return tostring(item.Prefab.Identifier)
 end
 
+local function isIgnoredWardrobeItem(item)
+    local identifier = itemIdentifier(item)
+    return identifier == "genesplicer" or identifier == "advancedgenesplicer"
+end
+
 local function itemEntityId(item)
     if item == nil then return 0 end
     local ok, id = pcall(function()
@@ -149,7 +154,7 @@ local function buildLookState(character)
 
     for _, entry in ipairs(slots) do
         local item = getSlotItem(character, entry.slot)
-        if item ~= nil then
+        if item ~= nil and not isIgnoredWardrobeItem(item) then
             state.slots[entry.key] = {
                 itemId = itemEntityId(item),
                 identifier = itemIdentifier(item),
@@ -218,7 +223,7 @@ Networking.Receive(NET_SAVE_REQUEST, function(_, client)
     local removedItems = 0
     for _, entry in ipairs(slots) do
         local item = getSlotItem(character, entry.slot)
-        if item ~= nil and not processedItems[item] then
+        if item ~= nil and not isIgnoredWardrobeItem(item) and not processedItems[item] then
             processedItems[item] = true
             if unequipItem(character, item) then
                 removedItems = removedItems + 1

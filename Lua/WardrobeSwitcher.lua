@@ -29,17 +29,254 @@ local Entity = nil
 pcall(function()
     Entity = LuaUserData.CreateStatic("Barotrauma.Entity", true)
 end)
+local TextManager = TextManager
+pcall(function()
+    TextManager = LuaUserData.CreateStatic("Barotrauma.TextManager", true)
+end)
+local GameSettings = GameSettings
+pcall(function()
+    GameSettings = LuaUserData.CreateStatic("Barotrauma.GameSettings", true)
+end)
 local VisualOverride = nil
 local visualOverrideFailure = nil
 local visualOverrideDiagnostics = nil
 
+local translations = {
+    en = {
+        ["notice.open_panel"] = "Wardrobe control panel can be opened by pressing F8.",
+        ["panel.title"] = "Wardrobe Switcher",
+        ["panel.saved_look"] = "Saved look",
+        ["panel.look"] = "Look",
+        ["panel.active"] = "active",
+        ["panel.inactive"] = "inactive",
+        ["panel.last"] = "Last",
+        ["panel.current"] = "Current",
+        ["panel.saved"] = "Saved",
+        ["panel.result"] = "Result",
+        ["panel.diagnostics"] = "Diagnostics",
+        ["panel.character"] = "Character",
+        ["button.save"] = "Save Current Outfit",
+        ["button.apply"] = "Apply Saved Look",
+        ["button.clear"] = "Clear Look",
+        ["button.diagnostics"] = "Diagnostics",
+        ["button.hide_diagnostics"] = "Hide Diagnostics",
+        ["button.close"] = "Close",
+        ["slot.head"] = "Head",
+        ["slot.headset"] = "Headset",
+        ["slot.inner"] = "Inner",
+        ["slot.outer"] = "Outer",
+        ["slot.bag"] = "Bag",
+        ["slot.health"] = "Health",
+        ["summary.none"] = "none",
+        ["summary.empty"] = "empty outfit",
+        ["summary.slot"] = "slot",
+        ["summary.slots"] = "slots",
+        ["status.ready"] = "Ready.",
+        ["status.empty"] = "Empty",
+        ["status.already_handled"] = "Already handled",
+        ["status.server_removal_requested"] = "Saved; server removal requested",
+        ["status.saved_removed"] = "Saved and removed",
+        ["status.synced_server"] = "Synced from server",
+        ["status.saved_applied_sync"] = "Saved look applied from multiplayer sync.",
+        ["status.multiplayer_sync_failed"] = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled.",
+        ["status.still_equipped_in"] = "Still equipped in ",
+        ["status.look_cleared_sync"] = "Look cleared from multiplayer sync.",
+        ["status.round_ended"] = "Round ended. Saved look cleared.",
+        ["status.refreshed"] = "Saved look refreshed for changed equipment.",
+        ["status.apply_again"] = "Saved look needs to be applied again.",
+        ["status.character_changed"] = "Controlled character changed. Save a new outfit for this character.",
+        ["status.saved_cleared"] = "Saved look cleared.",
+        ["status.none"] = "none"
+    },
+    zh_hans = {
+        ["notice.open_panel"] = "按 F8 可打开衣柜控制面板。",
+        ["panel.title"] = "衣柜切换器",
+        ["panel.saved_look"] = "已保存外观",
+        ["panel.look"] = "外观",
+        ["panel.active"] = "启用",
+        ["panel.inactive"] = "未启用",
+        ["panel.last"] = "上次操作",
+        ["panel.current"] = "当前",
+        ["panel.saved"] = "已保存",
+        ["panel.result"] = "结果",
+        ["panel.diagnostics"] = "诊断",
+        ["panel.character"] = "角色",
+        ["button.save"] = "保存当前服装",
+        ["button.apply"] = "套用已保存外观",
+        ["button.clear"] = "清除外观",
+        ["button.diagnostics"] = "诊断",
+        ["button.hide_diagnostics"] = "隐藏诊断",
+        ["button.close"] = "关闭",
+        ["slot.head"] = "头部",
+        ["slot.headset"] = "耳机",
+        ["slot.inner"] = "内衣",
+        ["slot.outer"] = "外衣",
+        ["slot.bag"] = "背包",
+        ["slot.health"] = "医疗接口",
+        ["summary.none"] = "无",
+        ["summary.empty"] = "空服装",
+        ["summary.slot"] = "个栏位",
+        ["summary.slots"] = "个栏位",
+        ["status.ready"] = "就绪。",
+        ["status.empty"] = "空",
+        ["status.already_handled"] = "已处理",
+        ["status.server_removal_requested"] = "已保存；已请求服务器移除",
+        ["status.saved_removed"] = "已保存并移除",
+        ["status.synced_server"] = "已从服务器同步",
+        ["status.saved_applied_sync"] = "已从多人同步套用保存的外观。",
+        ["status.multiplayer_sync_failed"] = "多人衣柜同步失败；请确认每位客户端都有这些时装物品并已启用 C# 脚本。",
+        ["status.still_equipped_in"] = "仍装备于 ",
+        ["status.look_cleared_sync"] = "外观已由多人同步清除。",
+        ["status.round_ended"] = "回合结束。已清除保存的外观。",
+        ["status.refreshed"] = "装备改变，已刷新保存的外观。",
+        ["status.apply_again"] = "保存的外观需要重新套用。",
+        ["status.character_changed"] = "控制角色已改变。请为此角色保存新的服装。",
+        ["status.saved_cleared"] = "已清除保存的外观。",
+        ["status.none"] = "无"
+    },
+    zh_hant = {
+        ["notice.open_panel"] = "按 F8 可開啟衣櫃控制面板。",
+        ["panel.title"] = "衣櫃切換器",
+        ["panel.saved_look"] = "已儲存外觀",
+        ["panel.look"] = "外觀",
+        ["panel.active"] = "啟用",
+        ["panel.inactive"] = "未啟用",
+        ["panel.last"] = "上次操作",
+        ["panel.current"] = "目前",
+        ["panel.saved"] = "已儲存",
+        ["panel.result"] = "結果",
+        ["panel.diagnostics"] = "診斷",
+        ["panel.character"] = "角色",
+        ["button.save"] = "儲存目前服裝",
+        ["button.apply"] = "套用已儲存外觀",
+        ["button.clear"] = "清除外觀",
+        ["button.diagnostics"] = "診斷",
+        ["button.hide_diagnostics"] = "隱藏診斷",
+        ["button.close"] = "關閉",
+        ["slot.head"] = "頭部",
+        ["slot.headset"] = "耳機",
+        ["slot.inner"] = "內衣",
+        ["slot.outer"] = "外衣",
+        ["slot.bag"] = "背包",
+        ["slot.health"] = "醫療介面",
+        ["summary.none"] = "無",
+        ["summary.empty"] = "空服裝",
+        ["summary.slot"] = "個欄位",
+        ["summary.slots"] = "個欄位",
+        ["status.ready"] = "就緒。",
+        ["status.empty"] = "空",
+        ["status.already_handled"] = "已處理",
+        ["status.server_removal_requested"] = "已儲存；已要求伺服器移除",
+        ["status.saved_removed"] = "已儲存並移除",
+        ["status.synced_server"] = "已從伺服器同步",
+        ["status.saved_applied_sync"] = "已從多人同步套用儲存外觀。",
+        ["status.multiplayer_sync_failed"] = "多人衣櫃同步失敗；請確認每位客戶端都有這些時裝物品並已啟用 C# 腳本。",
+        ["status.still_equipped_in"] = "仍裝備於 ",
+        ["status.look_cleared_sync"] = "外觀已由多人同步清除。",
+        ["status.round_ended"] = "回合結束。已清除儲存的外觀。",
+        ["status.refreshed"] = "裝備改變，已重新套用儲存外觀。",
+        ["status.apply_again"] = "儲存外觀需要重新套用。",
+        ["status.character_changed"] = "控制角色已改變。請為此角色儲存新的服裝。",
+        ["status.saved_cleared"] = "已清除儲存的外觀。",
+        ["status.none"] = "無"
+    }
+}
+
+local statusKeys = {
+    ["Ready."] = "status.ready",
+    ["Empty"] = "status.empty",
+    ["Already handled"] = "status.already_handled",
+    ["Saved; server removal requested"] = "status.server_removal_requested",
+    ["Saved and removed"] = "status.saved_removed",
+    ["Synced from server"] = "status.synced_server",
+    ["Saved look applied from multiplayer sync."] = "status.saved_applied_sync",
+    ["Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."] = "status.multiplayer_sync_failed",
+    ["Look cleared from multiplayer sync."] = "status.look_cleared_sync",
+    ["Round ended. Saved look cleared."] = "status.round_ended",
+    ["Saved look refreshed for changed equipment."] = "status.refreshed",
+    ["Saved look needs to be applied again."] = "status.apply_again",
+    ["Controlled character changed. Save a new outfit for this character."] = "status.character_changed",
+    ["Saved look cleared."] = "status.saved_cleared"
+}
+
+local function normalizeLanguage(value)
+    if value == nil then return nil end
+    local text = tostring(value):lower()
+    if text:find("traditional", 1, true) or text:find("tchinese", 1, true) or
+        text:find("zh%-hant") or text:find("zh_hant", 1, true) or
+        text:find("zhtw", 1, true) or text:find("zh%-tw") or
+        text:find("繁", 1, true) or text:find("語言", 1, true) then
+        return "zh_hant"
+    end
+    if text:find("simplified", 1, true) or text:find("schinese", 1, true) or
+        text:find("zh%-hans") or text:find("zh_hans", 1, true) or
+        text:find("zhcn", 1, true) or text:find("zh%-cn") or
+        text:find("简", 1, true) or text:find("语言", 1, true) then
+        return "zh_hans"
+    end
+    if text == "chinese" or text == "中文" then
+        return "zh_hant"
+    end
+    if text == "english" or text == "en" or text:find("english", 1, true) then
+        return "en"
+    end
+    return nil
+end
+
+local function languageFromCandidate(getter)
+    local ok, value = pcall(getter)
+    if not ok or value == nil then return nil end
+    return normalizeLanguage(value)
+end
+
+local function currentLanguage()
+    local candidates = {
+        function() return TextManager ~= nil and TextManager.CurrentLanguage or nil end,
+        function() return TextManager ~= nil and TextManager.Language or nil end,
+        function() return TextManager ~= nil and TextManager.SelectedLanguage or nil end,
+        function() return GameSettings ~= nil and GameSettings.CurrentConfig ~= nil and GameSettings.CurrentConfig.Language or nil end,
+        function() return GameSettings ~= nil and GameSettings.CurrentConfig ~= nil and GameSettings.CurrentConfig.SelectedLanguage or nil end,
+        function() return TextManager ~= nil and TextManager.Get ~= nil and TextManager.Get("language") or nil end
+    }
+
+    for _, getter in ipairs(candidates) do
+        local language = languageFromCandidate(getter)
+        if language ~= nil then return language end
+    end
+    return "en"
+end
+
+local function tr(key, fallback)
+    local language = currentLanguage()
+    local localized = translations[language] ~= nil and translations[language][key] or nil
+    if localized ~= nil then return localized end
+    localized = translations.en[key]
+    if localized ~= nil then return localized end
+    return fallback or key
+end
+
+local function localizedStatus(value)
+    local text = tostring(value)
+    local key = statusKeys[text]
+    if key ~= nil then return tr(key, text) end
+    local stillEquippedPrefix = "Still equipped in "
+    if text:sub(1, #stillEquippedPrefix) == stillEquippedPrefix then
+        return tr("status.still_equipped_in") .. text:sub(#stillEquippedPrefix + 1)
+    end
+    return text
+end
+
+local function slotLabel(entry)
+    return tr(entry.labelKey, entry.label)
+end
+
 local slots = {
-    { key = "Head", label = "Head", slot = InvSlotType.Head },
-    { key = "Headset", label = "Headset", slot = InvSlotType.Headset },
-    { key = "InnerClothes", label = "Inner", slot = InvSlotType.InnerClothes },
-    { key = "OuterClothes", label = "Outer", slot = InvSlotType.OuterClothes },
-    { key = "Bag", label = "Bag", slot = InvSlotType.Bag },
-    { key = "HealthInterface", label = "Health", slot = InvSlotType.HealthInterface }
+    { key = "Head", label = "Head", labelKey = "slot.head", slot = InvSlotType.Head },
+    { key = "Headset", label = "Headset", labelKey = "slot.headset", slot = InvSlotType.Headset },
+    { key = "InnerClothes", label = "Inner", labelKey = "slot.inner", slot = InvSlotType.InnerClothes },
+    { key = "OuterClothes", label = "Outer", labelKey = "slot.outer", slot = InvSlotType.OuterClothes },
+    { key = "Bag", label = "Bag", labelKey = "slot.bag", slot = InvSlotType.Bag },
+    { key = "HealthInterface", label = "Health", labelKey = "slot.health", slot = InvSlotType.HealthInterface }
 }
 
 local visualCarrierPriority = {
@@ -105,7 +342,7 @@ end
 local function sendRoundStartNotice()
     if roundStartNoticeSent then return end
     roundStartNoticeSent = true
-    addChatLine("Wardrobe control panel can be opened by pressing F8.")
+    addChatLine(tr("notice.open_panel"))
 end
 
 local function ensureVisualOverride()
@@ -275,6 +512,11 @@ local function itemIdentifier(item)
     return tostring(item.Prefab.Identifier)
 end
 
+local function isIgnoredWardrobeItem(item)
+    local identifier = itemIdentifier(item)
+    return identifier == "genesplicer" or identifier == "advancedgenesplicer"
+end
+
 local function itemEntityId(item)
     if item == nil then return 0 end
     local ok, id = pcall(function()
@@ -315,15 +557,19 @@ local function hasSavedLook()
 end
 
 local function savedLookSummary()
-    if not hasSavedLook() then return "none" end
+    if not hasSavedLook() then return tr("summary.none") end
     local count = 0
     for _, entry in ipairs(slots) do
         if savedLook[entry.key] ~= nil then
             count = count + 1
         end
     end
-    if count == 0 then return "empty outfit" end
-    return tostring(count) .. " slot" .. (count == 1 and "" or "s")
+    if count == 0 then return tr("summary.empty") end
+    local slotKey = count == 1 and "summary.slot" or "summary.slots"
+    if currentLanguage() == "en" then
+        return tostring(count) .. " " .. tr(slotKey)
+    end
+    return tostring(count) .. " " .. tr(slotKey)
 end
 
 local function getSlotItem(character, slot)
@@ -366,7 +612,7 @@ local function wornSlotLabelsForItem(character, item)
     if character == nil or item == nil then return labels end
     for _, entry in ipairs(slots) do
         if isInSlot(character, item, entry.slot) then
-            labels[#labels + 1] = entry.label
+            labels[#labels + 1] = slotLabel(entry)
         end
     end
     return labels
@@ -421,7 +667,8 @@ end
 local function snapshot(character)
     local data = {}
     for _, entry in ipairs(slots) do
-        data[entry.key] = getSlotItem(character, entry.slot)
+        local item = getSlotItem(character, entry.slot)
+        data[entry.key] = isIgnoredWardrobeItem(item) and nil or item
     end
     return data
 end
@@ -497,7 +744,7 @@ local function visualSnapshot(character)
     local data = {}
     for _, entry in ipairs(slots) do
         local item = getSlotItem(character, entry.slot)
-        if item ~= nil then
+        if item ~= nil and not isIgnoredWardrobeItem(item) then
             data[entry.key] = {
                 identifier = itemIdentifier(item),
                 itemId = itemEntityId(item),
@@ -661,7 +908,7 @@ local function saveFashionAndUnequip()
                     if #remainingSlots > 0 then
                         local result = "Still equipped in " .. table.concat(remainingSlots, ", ")
                         slotResults[entry.key] = result
-                        failedItems[#failedItems + 1] = entry.label .. ": " .. itemName(item) .. " (" .. table.concat(remainingSlots, ", ") .. ")"
+                        failedItems[#failedItems + 1] = slotLabel(entry) .. ": " .. itemName(item) .. " (" .. table.concat(remainingSlots, ", ") .. ")"
                     else
                         removedItems = removedItems + 1
                         slotResults[entry.key] = "Saved and removed"
@@ -908,36 +1155,36 @@ buildWindow = function()
     local overrideState = visualOverrideState()
     local canApply = overrideState.ready and hasSavedLook()
 
-    addText(list, "Wardrobe Switcher")
+    addText(list, tr("panel.title"))
     addText(list, overrideState.label)
-    addText(list, "Saved look: " .. savedLookSummary() .. " | Look: " .. (activeLook and "active" or "inactive"))
-    addText(list, "Last: " .. lastOperation)
+    addText(list, tr("panel.saved_look") .. ": " .. savedLookSummary() .. " | " .. tr("panel.look") .. ": " .. (activeLook and tr("panel.active") or tr("panel.inactive")))
+    addText(list, tr("panel.last") .. ": " .. localizedStatus(lastOperation))
 
-    addButton(list, "Save Current Outfit", function() saveFashionAndUnequip() end, true, overrideState.ready)
-    addButton(list, "Apply Saved Look", function() applyFashionToCurrentEquipment(false) end, true, canApply)
-    addButton(list, "Clear Look", function() clearActiveLook() end)
-    addButton(list, diagnosticsVisible and "Hide Diagnostics" or "Diagnostics", function()
+    addButton(list, tr("button.save"), function() saveFashionAndUnequip() end, true, overrideState.ready)
+    addButton(list, tr("button.apply"), function() applyFashionToCurrentEquipment(false) end, true, canApply)
+    addButton(list, tr("button.clear"), function() clearActiveLook() end)
+    addButton(list, diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
         diagnosticsVisible = not diagnosticsVisible
     end)
-    addButton(list, "Close", function() fullPanelOpen = false; resetOverlay() end, false)
+    addButton(list, tr("button.close"), function() fullPanelOpen = false; resetOverlay() end, false)
 
     for _, entry in ipairs(slots) do
         local currentItem = "-"
         if character ~= nil then
             currentItem = itemName(getSlotItem(character, entry.slot))
         end
-        local result = slotResults[entry.key] or "-"
+        local result = localizedStatus(slotResults[entry.key] or "-")
         addText(
             list,
-            entry.label .. " | Current: " .. currentItem .. " | Saved: " .. itemName(savedLook[entry.key]) .. " | Result: " .. result
+            slotLabel(entry) .. " | " .. tr("panel.current") .. ": " .. currentItem .. " | " .. tr("panel.saved") .. ": " .. itemName(savedLook[entry.key]) .. " | " .. tr("panel.result") .. ": " .. result
         )
     end
 
     if diagnosticsVisible then
-        addText(list, "Diagnostics: " .. tostring(overrideState.details or "none"))
+        addText(list, tr("panel.diagnostics") .. ": " .. tostring(overrideState.details or tr("status.none")))
         local debugStatus = visualOverrideDebugStatus(character)
         if debugStatus ~= nil then
-            addText(list, "Character: " .. debugStatus)
+            addText(list, tr("panel.character") .. ": " .. debugStatus)
         end
     end
 end

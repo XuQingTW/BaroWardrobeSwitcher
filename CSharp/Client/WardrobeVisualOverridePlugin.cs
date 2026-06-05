@@ -114,6 +114,7 @@ namespace BaroWardrobeSwitcher
             PatchStates["Limb.DrawWearable"] = new PatchState(required: true);
             PatchStates["Limb.Draw"] = new PatchState(required: true);
             PatchStates["AnimController.UpdateAnimations"] = new PatchState(required: false);
+            PatchStates["AnimController.TryLoadTemporaryAnimation"] = new PatchState(required: false);
             PatchStates["StatusEffect.PlaySound"] = new PatchState(required: false);
             PatchStates["ItemComponent.PlaySound"] = new PatchState(required: false);
         }
@@ -147,6 +148,12 @@ namespace BaroWardrobeSwitcher
                 "AnimController.UpdateAnimations",
                 AccessTools.Method(typeof(AnimController), "UpdateAnimations"),
                 postfix: AccessTools.Method(typeof(AnimControllerUpdateAnimationsPatch), "Postfix"),
+                required: false);
+            PatchTarget(
+                harmony,
+                "AnimController.TryLoadTemporaryAnimation",
+                TryLoadTemporaryAnimationMethod,
+                prefix: AccessTools.Method(typeof(AnimControllerTryLoadTemporaryAnimationPatch), "Prefix"),
                 required: false);
             PatchTarget(
                 harmony,
@@ -632,6 +639,18 @@ namespace BaroWardrobeSwitcher
         {
             KeepFashionAnimationsAlive(animController);
             KeepFashionSoundsAlive(animController);
+        }
+
+        internal static bool ShouldLoadTemporaryAnimation(AnimController animController, object animationInfo)
+        {
+            Character character = animController?.Character;
+            if (character == null || !ActiveCharacters.Contains(character)) { return true; }
+
+            bool hasFashionAnimations = FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos) &&
+                                        animationInfos.Count > 0;
+            if (hasFashionAnimations) { return true; }
+
+            return !IsLargeEquipmentMovementAnimation(animationInfo);
         }
 
         private static void KeepFashionAnimationsAlive(AnimController animController)
@@ -1239,6 +1258,32 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        private static bool IsLargeEquipmentMovementAnimation(object animationInfo)
+        {
+            if (animationInfo == null) { return false; }
+            Type animationInfoType = animationInfo.GetType();
+            try
+            {
+                PropertyInfo typeProperty = animationInfoType.GetProperty("Type");
+                PropertyInfo fileProperty = animationInfoType.GetProperty("File");
+                string animationType = typeProperty?.GetValue(animationInfo)?.ToString();
+                if (!string.Equals(animationType, "Walk", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(animationType, "Run", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                string file = fileProperty?.GetValue(animationInfo)?.ToString() ?? string.Empty;
+                return file.IndexOf("Exosuit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                       file.IndexOf("DivingSuit", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch (Exception ex)
+            {
+                LogAnimationError($"Failed to inspect temporary animation: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
+        }
+
         private static void DrawFashionWearable(Limb limb, WearableSprite wearable, int depthIndex, SpriteBatch spriteBatch, Color? overrideColor)
         {
             try
@@ -1573,6 +1618,14 @@ namespace BaroWardrobeSwitcher
         private static void Postfix(AnimController __instance)
         {
             VisualOverride.KeepFashionEffectsAlive(__instance);
+        }
+    }
+
+    internal static class AnimControllerTryLoadTemporaryAnimationPatch
+    {
+        private static bool Prefix(AnimController __instance, object __0)
+        {
+            return VisualOverride.ShouldLoadTemporaryAnimation(__instance, __0);
         }
     }
 
