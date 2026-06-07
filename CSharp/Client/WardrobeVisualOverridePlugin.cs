@@ -41,7 +41,7 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
-        public const string Version = "0.3.12";
+        public const string Version = "0.3.13";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -643,81 +643,116 @@ namespace BaroWardrobeSwitcher
 
         internal static void BeginLimbDraw(Limb limb)
         {
-            if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return; }
-            if (!FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
-                spritesBySlot.Count == 0)
+            try
             {
-                return;
-            }
-            DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
-
-            List<WearableSprite> injectedSprites = null;
-            List<WearableSprite> originalOrder = null;
-            foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
-            {
-                if (limb.WearingItems.Contains(pair.Value)) { continue; }
-
-                if (injectedSprites == null)
+                if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return; }
+                if (!FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
+                    spritesBySlot.Count == 0)
                 {
-                    injectedSprites = new List<WearableSprite>();
-                    originalOrder = limb.WearingItems.ToList();
+                    return;
                 }
-                limb.WearingItems.Add(pair.Value);
-                injectedSprites.Add(pair.Value);
-            }
+                DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
 
-            if (injectedSprites != null && injectedSprites.Count > 0)
+                List<WearableSprite> wearingItems = limb.WearingItems;
+                if (wearingItems == null)
+                {
+                    LogVirtualDrawError($"Skipping injected fashion sprite order for limb={limb.type}; WearingItems is null.");
+                    return;
+                }
+
+                List<WearableSprite> injectedSprites = null;
+                List<WearableSprite> originalOrder = null;
+                foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
+                {
+                    if (wearingItems.Contains(pair.Value)) { continue; }
+
+                    if (injectedSprites == null)
+                    {
+                        injectedSprites = new List<WearableSprite>();
+                        originalOrder = wearingItems.ToList();
+                    }
+                    wearingItems.Add(pair.Value);
+                    injectedSprites.Add(pair.Value);
+                }
+
+                if (injectedSprites != null && injectedSprites.Count > 0)
+                {
+                    OriginalWearableOrderByLimb[limb] = originalOrder ?? new List<WearableSprite>();
+                    SortWearablesForDraw(wearingItems);
+                    InjectedFashionSpritesByLimb[limb] = injectedSprites;
+                    lastInjectedSpriteCount = injectedSprites.Count;
+                }
+            }
+            catch (Exception ex)
             {
-                OriginalWearableOrderByLimb[limb] = originalOrder ?? new List<WearableSprite>();
-                SortWearablesForDraw(limb.WearingItems);
-                InjectedFashionSpritesByLimb[limb] = injectedSprites;
-                lastInjectedSpriteCount = injectedSprites.Count;
+                LogVirtualDrawError($"Failed to begin fashion limb draw: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
         internal static void EndLimbDraw(Limb limb)
         {
-            if (limb == null) { return; }
-            List<WearableSprite> injectedSprites = null;
-            if (InjectedFashionSpritesByLimb.TryGetValue(limb, out injectedSprites))
+            try
             {
-                InjectedFashionSpritesByLimb.Remove(limb);
-            }
-            HashSet<WearableSprite> injectedSet = injectedSprites == null
-                ? new HashSet<WearableSprite>()
-                : new HashSet<WearableSprite>(injectedSprites);
+                if (limb == null) { return; }
+                List<WearableSprite> injectedSprites = null;
+                if (InjectedFashionSpritesByLimb.TryGetValue(limb, out injectedSprites))
+                {
+                    InjectedFashionSpritesByLimb.Remove(limb);
+                }
+                HashSet<WearableSprite> injectedSet = injectedSprites == null
+                    ? new HashSet<WearableSprite>()
+                    : new HashSet<WearableSprite>(injectedSprites);
 
-            if (OriginalWearableOrderByLimb.TryGetValue(limb, out List<WearableSprite> originalOrder))
-            {
-                List<WearableSprite> remainingWearables = limb.WearingItems
-                    .Where(wearable => wearable != null && !injectedSet.Contains(wearable))
-                    .ToList();
-                limb.WearingItems.Clear();
-                foreach (WearableSprite originalWearable in originalOrder)
+                List<WearableSprite> wearingItems = limb.WearingItems;
+                if (wearingItems == null)
                 {
-                    if (originalWearable == null || !remainingWearables.Contains(originalWearable) || limb.WearingItems.Contains(originalWearable))
+                    OriginalWearableOrderByLimb.Remove(limb);
+                    DrawnFashionSpritesByLimb.Remove(limb);
+                    return;
+                }
+
+                if (OriginalWearableOrderByLimb.TryGetValue(limb, out List<WearableSprite> originalOrder))
+                {
+                    List<WearableSprite> remainingWearables = wearingItems
+                        .Where(wearable => wearable != null && !injectedSet.Contains(wearable))
+                        .ToList();
+                    wearingItems.Clear();
+                    foreach (WearableSprite originalWearable in originalOrder)
                     {
-                        continue;
+                        if (originalWearable == null || !remainingWearables.Contains(originalWearable) || wearingItems.Contains(originalWearable))
+                        {
+                            continue;
+                        }
+                        wearingItems.Add(originalWearable);
                     }
-                    limb.WearingItems.Add(originalWearable);
-                }
-                foreach (WearableSprite remainingWearable in remainingWearables)
-                {
-                    if (remainingWearable != null && !limb.WearingItems.Contains(remainingWearable))
+                    foreach (WearableSprite remainingWearable in remainingWearables)
                     {
-                        limb.WearingItems.Add(remainingWearable);
+                        if (remainingWearable != null && !wearingItems.Contains(remainingWearable))
+                        {
+                            wearingItems.Add(remainingWearable);
+                        }
+                    }
+                    OriginalWearableOrderByLimb.Remove(limb);
+                }
+                else if (injectedSprites != null)
+                {
+                    foreach (WearableSprite injectedSprite in injectedSprites)
+                    {
+                        wearingItems.RemoveAll(wearable => wearable == injectedSprite);
                     }
                 }
-                OriginalWearableOrderByLimb.Remove(limb);
+                DrawnFashionSpritesByLimb.Remove(limb);
             }
-            else if (injectedSprites != null)
+            catch (Exception ex)
             {
-                foreach (WearableSprite injectedSprite in injectedSprites)
+                LogVirtualDrawError($"Failed to end fashion limb draw: {ex.GetType().Name}: {ex.Message}");
+                if (limb != null)
                 {
-                    limb.WearingItems.RemoveAll(wearable => wearable == injectedSprite);
+                    OriginalWearableOrderByLimb.Remove(limb);
+                    InjectedFashionSpritesByLimb.Remove(limb);
+                    DrawnFashionSpritesByLimb.Remove(limb);
                 }
             }
-            DrawnFashionSpritesByLimb.Remove(limb);
         }
 
         internal static void DrawMissingFashionSprites(Limb limb, SpriteBatch spriteBatch, Color? overrideColor)
@@ -741,7 +776,7 @@ namespace BaroWardrobeSwitcher
                     drawnSprites = new HashSet<WearableSprite>();
                 }
 
-                int depthIndex = Math.Max(limb.WearingItems.Count + 8, 8);
+                int depthIndex = Math.Max((limb.WearingItems?.Count ?? 0) + 8, 8);
                 foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
                 {
                     if (drawnSprites.Contains(pair.Value)) { continue; }
@@ -751,6 +786,10 @@ namespace BaroWardrobeSwitcher
                     fallbackDrawnFashionSpriteCount++;
                     DrawFashionWearable(limb, pair.Value, depthIndex++, spriteBatch, overrideColor);
                 }
+            }
+            catch (Exception ex)
+            {
+                LogVirtualDrawError($"Failed to draw missing fashion sprites: {ex.GetType().Name}: {ex.Message}");
             }
             finally
             {
@@ -1366,6 +1405,7 @@ namespace BaroWardrobeSwitcher
 
         private static void SortWearablesForDraw(List<WearableSprite> wearingItems)
         {
+            if (wearingItems == null) { return; }
             wearingItems.Sort((wearable, nextWearable) =>
             {
                 float depth = wearable?.Sprite?.Depth ?? 0;
@@ -1379,6 +1419,9 @@ namespace BaroWardrobeSwitcher
                 if (wearableComponent == null && nextWearableComponent == null) { return 0; }
                 if (wearableComponent == null) { return -1; }
                 if (nextWearableComponent == null) { return 1; }
+                if (wearableComponent.AllowedSlots == null && nextWearableComponent.AllowedSlots == null) { return 0; }
+                if (wearableComponent.AllowedSlots == null) { return -1; }
+                if (nextWearableComponent.AllowedSlots == null) { return 1; }
                 return wearableComponent.AllowedSlots.Contains(InvSlotType.OuterClothes).CompareTo(nextWearableComponent.AllowedSlots.Contains(InvSlotType.OuterClothes));
             });
         }
