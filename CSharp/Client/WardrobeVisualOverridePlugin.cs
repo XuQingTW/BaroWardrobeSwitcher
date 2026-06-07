@@ -429,7 +429,7 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
-        public const string Version = "0.3.15";
+        public const string Version = "0.3.16";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -972,13 +972,19 @@ namespace BaroWardrobeSwitcher
             if (limb.character == null || !ActiveCharacters.Contains(limb.character)) { return false; }
             if (storedFashionDrawDepth > 0) { return false; }
             if (!IsEquipmentSprite(original)) { return false; }
-            bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
-            bool hideOriginalForSavedSlot = ShouldHideOriginalForSavedSlot(limb.character, original);
             if (!DrawnFashionSpritesByLimb.TryGetValue(limb, out HashSet<WearableSprite> drawnSprites))
             {
                 drawnSprites = new HashSet<WearableSprite>();
                 DrawnFashionSpritesByLimb[limb] = drawnSprites;
             }
+            if (IsInjectedFashionSprite(limb, original))
+            {
+                drawnSprites.Add(original);
+                drawOverrideHitCount++;
+                return false;
+            }
+            bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
+            bool hideOriginalForSavedSlot = ShouldHideOriginalForSavedSlot(limb.character, original);
             if (!TryGetFashionSprite(limb.character, original.Type, limb.type, drawnSprites, out WearableSprite fashionSprite))
             {
                 if (hideOriginalForEmptySavedSlot)
@@ -1054,6 +1060,7 @@ namespace BaroWardrobeSwitcher
                     return;
                 }
                 DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
+                InjectFashionSpritesForLimb(limb, spritesBySlot);
             }
             catch (Exception ex)
             {
@@ -1126,6 +1133,53 @@ namespace BaroWardrobeSwitcher
                 }
             }
             return FinalizeLimbDrawException(limb, exception);
+        }
+
+        private static void InjectFashionSpritesForLimb(
+            Limb limb,
+            Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot)
+        {
+            if (limb == null || spritesBySlot == null || spritesBySlot.Count == 0) { return; }
+
+            List<WearableSprite> wearingItems = limb.WearingItems;
+            if (wearingItems == null) { return; }
+
+            List<WearableSprite> spritesToInject = EnumerateFashionSpritesForLimb(spritesBySlot, limb.type)
+                .Select(pair => pair.Value)
+                .Where(sprite => sprite != null && !wearingItems.Contains(sprite))
+                .Distinct()
+                .ToList();
+            if (spritesToInject.Count == 0) { return; }
+
+            if (!OriginalWearableOrderByLimb.ContainsKey(limb))
+            {
+                OriginalWearableOrderByLimb[limb] = wearingItems
+                    .Where(wearable => wearable != null)
+                    .ToList();
+            }
+
+            if (!InjectedFashionSpritesByLimb.TryGetValue(limb, out List<WearableSprite> injectedSprites))
+            {
+                injectedSprites = new List<WearableSprite>();
+                InjectedFashionSpritesByLimb[limb] = injectedSprites;
+            }
+
+            foreach (WearableSprite sprite in spritesToInject)
+            {
+                wearingItems.Add(sprite);
+                injectedSprites.Add(sprite);
+            }
+
+            SortWearablesForDraw(wearingItems);
+            lastInjectedSpriteCount = spritesToInject.Count;
+        }
+
+        private static bool IsInjectedFashionSprite(Limb limb, WearableSprite sprite)
+        {
+            return limb != null &&
+                   sprite != null &&
+                   InjectedFashionSpritesByLimb.TryGetValue(limb, out List<WearableSprite> injectedSprites) &&
+                   injectedSprites.Contains(sprite);
         }
 
         private static Exception FinalizeLimbDrawException(Limb limb, Exception exception)

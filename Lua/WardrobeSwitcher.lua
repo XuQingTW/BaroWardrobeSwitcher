@@ -61,6 +61,8 @@ local translations = {
         ["panel.result"] = "Result",
         ["panel.diagnostics"] = "Diagnostics",
         ["panel.character"] = "Character",
+        ["panel.debug_log_hint"] = "Debug dump writes to the LuaCs/Barotrauma log; search for [Baro Wardrobe Switcher].",
+        ["panel.saved_file"] = "Saved-look file",
         ["button.save"] = "Save Current Outfit",
         ["button.apply"] = "Apply Saved Look",
         ["button.clear"] = "Clear Look",
@@ -112,6 +114,8 @@ local translations = {
         ["panel.result"] = "结果",
         ["panel.diagnostics"] = "诊断",
         ["panel.character"] = "角色",
+        ["panel.debug_log_hint"] = "诊断会写入 LuaCs/Barotrauma 日志；搜索 [Baro Wardrobe Switcher]。",
+        ["panel.saved_file"] = "保存外观文件",
         ["button.save"] = "保存当前服装",
         ["button.apply"] = "套用已保存外观",
         ["button.clear"] = "清除外观",
@@ -163,6 +167,8 @@ local translations = {
         ["panel.result"] = "結果",
         ["panel.diagnostics"] = "診斷",
         ["panel.character"] = "角色",
+        ["panel.debug_log_hint"] = "診斷會寫入 LuaCs/Barotrauma 日誌；搜尋 [Baro Wardrobe Switcher]。",
+        ["panel.saved_file"] = "儲存外觀檔案",
         ["button.save"] = "儲存目前服裝",
         ["button.apply"] = "套用已儲存外觀",
         ["button.clear"] = "清除外觀",
@@ -1859,6 +1865,19 @@ if Networking ~= nil then
     end)
 end
 
+local function clientLookStoragePath()
+    local persistence = ensureWardrobePersistence()
+    if persistence ~= nil then
+        local ok, path = pcall(function()
+            return persistence.GetClientLookPath()
+        end)
+        if ok and path ~= nil and tostring(path) ~= "" then
+            return tostring(path)
+        end
+    end
+    return clientPersistPath()
+end
+
 local function dumpDebugLog()
     local character = controlled()
     local overrideState = visualOverrideState()
@@ -1871,15 +1890,7 @@ local function dumpDebugLog()
     emit("lastOperation=" .. tostring(lastOperation))
     emit("savedLookCaptured=" .. tostring(savedLookCaptured) .. ", activeLook=" .. tostring(activeLook) .. ", autoApplyLook=" .. tostring(autoApplyLook))
     emit("overrideLabel=" .. tostring(overrideState.label) .. ", overrideDetails=" .. tostring(overrideState.details))
-    local persistence = ensureWardrobePersistence()
-    if persistence ~= nil then
-        local ok, path = pcall(function()
-            return persistence.GetClientLookPath()
-        end)
-        emit("persistence=" .. tostring(ok and path or "unavailable"))
-    else
-        emit("persistence=unavailable, error=" .. tostring(wardrobePersistenceFailure))
-    end
+    emit("persistence=" .. tostring(clientLookStoragePath()))
     emit("character=" .. tostring(character) .. ", equipmentSignature=" .. tostring(character ~= nil and equipmentSignature(character) or "no-character"))
     for _, entry in ipairs(slots) do
         local current = character ~= nil and getSlotItem(character, entry.slot) or nil
@@ -1976,6 +1987,8 @@ buildWindow = function()
         diagnosticsVisible = not diagnosticsVisible
     end)
     addButton(list, tr("button.dump_debug"), function() dumpDebugLog() end, true)
+    addText(list, tr("panel.debug_log_hint"))
+    addText(list, tr("panel.saved_file") .. ": " .. clientLookStoragePath())
     addButton(list, tr("button.close"), function() fullPanelOpen = false; resetOverlay() end, false)
 
     for _, entry in ipairs(slots) do
