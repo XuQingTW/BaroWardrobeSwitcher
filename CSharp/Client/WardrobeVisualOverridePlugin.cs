@@ -436,6 +436,7 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
+
         public const string Version = "0.3.17";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
