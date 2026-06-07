@@ -159,6 +159,7 @@ namespace BaroWardrobeSwitcher
                         Captured = false,
                         Active = false,
                         AutoApply = false,
+                        SessionKey = null,
                         Slots = new Dictionary<string, WardrobeSlotDocument>()
                     });
                 return true;
@@ -248,6 +249,7 @@ namespace BaroWardrobeSwitcher
                 Captured = GetBoolean(parts, "captured"),
                 Active = GetBoolean(parts, "active"),
                 AutoApply = GetBoolean(parts, "auto"),
+                SessionKey = parts.TryGetValue("session", out string encodedSessionKey) ? Unescape(encodedSessionKey) : null,
                 Slots = ParseSlots(parts)
             };
             return document;
@@ -285,6 +287,10 @@ namespace BaroWardrobeSwitcher
                 "active=" + document.Active.ToString().ToLowerInvariant(),
                 "auto=" + document.AutoApply.ToString().ToLowerInvariant()
             };
+            if (!string.IsNullOrWhiteSpace(document.SessionKey))
+            {
+                parts.Add("session=" + Escape(document.SessionKey));
+            }
             AppendEncodedSlots(parts, document.Slots);
             return string.Join("|", parts);
         }
@@ -411,6 +417,7 @@ namespace BaroWardrobeSwitcher
             public bool Captured { get; set; }
             public bool Active { get; set; }
             public bool AutoApply { get; set; }
+            public string SessionKey { get; set; }
             public Dictionary<string, WardrobeSlotDocument> Slots { get; set; }
         }
 
@@ -429,7 +436,7 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
-        public const string Version = "0.3.15";
+        public const string Version = "0.3.17";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -535,13 +542,7 @@ namespace BaroWardrobeSwitcher
                 "Limb.DrawWearable",
                 DrawWearableMethod,
                 prefix: AccessTools.Method(typeof(LimbDrawWearablePatch), "Prefix"));
-            PatchTarget(
-                harmony,
-                "Limb.Draw",
-                FindLimbDrawMethod(),
-                prefix: AccessTools.Method(typeof(LimbDrawPatch), "Prefix"),
-                postfix: AccessTools.Method(typeof(LimbDrawPatch), "Postfix"),
-                finalizer: AccessTools.Method(typeof(LimbDrawPatch), "Finalizer"));
+            PatchLimbDrawTargets(harmony);
             PatchTarget(
                 harmony,
                 "AnimController.UpdateAnimations",
@@ -651,6 +652,59 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        private static void PatchLimbDrawTargets(Harmony harmony)
+        {
+            const string name = "Limb.Draw";
+            if (!PatchStates.TryGetValue(name, out PatchState state))
+            {
+                state = new PatchState(required: true);
+                PatchStates[name] = state;
+            }
+
+            List<MethodInfo> targets = FindLimbDrawMethods().ToList();
+            if (targets.Count == 0)
+            {
+                state.Fail("target missing");
+                return;
+            }
+
+            MethodInfo prefix = AccessTools.Method(typeof(LimbDrawPatch), "Prefix");
+            MethodInfo postfix = AccessTools.Method(typeof(LimbDrawPatch), "Postfix");
+            MethodInfo finalizer = AccessTools.Method(typeof(LimbDrawPatch), "Finalizer");
+            List<string> errors = new List<string>();
+            int patched = 0;
+
+            foreach (MethodInfo target in targets)
+            {
+                try
+                {
+                    PatchProcessor processor = harmony.CreateProcessor(target);
+                    processor.AddPrefix(new HarmonyMethod(prefix));
+                    processor.AddPostfix(new HarmonyMethod(postfix));
+                    processor.AddFinalizer(new HarmonyMethod(finalizer));
+                    processor.Patch();
+                    patched++;
+                }
+                catch (Exception ex)
+                {
+                    errors.Add(DescribeMethod(target) + ": " + ex.GetType().Name + ": " + ex.Message);
+                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to patch {name} overload {DescribeMethod(target)}: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            if (patched > 0)
+            {
+                state.Applied = true;
+                state.Error = errors.Count == 0
+                    ? "patched " + patched + " overload(s)"
+                    : "patched " + patched + " overload(s); failed " + errors.Count + " overload(s)";
+            }
+            else
+            {
+                state.Fail(string.Join("; ", errors));
+            }
+        }
+
         public static string GetCharacterDebugStatus(Character character)
         {
             if (character == null) { return "character=nil"; }
@@ -681,6 +735,7 @@ namespace BaroWardrobeSwitcher
                    ", suppressedSounds=" + suppressedSoundCount +
                    ", suppressedItemSounds=" + suppressedComponentSoundCount +
                    ", drawPatchTarget=" + (FindLimbDrawMethod() != null) +
+                   ", drawPatchTargets=" + FindLimbDrawMethods().Count() +
                    ", drawWearableTarget=" + (DrawWearableMethod != null) +
                    ", lastInjected=" + lastInjectedSpriteCount +
                    ", drawHits=" + drawOverrideHitCount +
@@ -972,13 +1027,19 @@ namespace BaroWardrobeSwitcher
             if (limb.character == null || !ActiveCharacters.Contains(limb.character)) { return false; }
             if (storedFashionDrawDepth > 0) { return false; }
             if (!IsEquipmentSprite(original)) { return false; }
-            bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
-            bool hideOriginalForSavedSlot = ShouldHideOriginalForSavedSlot(limb.character, original);
             if (!DrawnFashionSpritesByLimb.TryGetValue(limb, out HashSet<WearableSprite> drawnSprites))
             {
                 drawnSprites = new HashSet<WearableSprite>();
                 DrawnFashionSpritesByLimb[limb] = drawnSprites;
             }
+            if (IsInjectedFashionSprite(limb, original))
+            {
+                drawnSprites.Add(original);
+                drawOverrideHitCount++;
+                return false;
+            }
+            bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
+            bool hideOriginalForSavedSlot = ShouldHideOriginalForSavedSlot(limb.character, original);
             if (!TryGetFashionSprite(limb.character, original.Type, limb.type, drawnSprites, out WearableSprite fashionSprite))
             {
                 if (hideOriginalForEmptySavedSlot)
@@ -1054,6 +1115,7 @@ namespace BaroWardrobeSwitcher
                     return;
                 }
                 DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
+                InjectFashionSpritesForLimb(limb, spritesBySlot);
             }
             catch (Exception ex)
             {
@@ -1126,6 +1188,53 @@ namespace BaroWardrobeSwitcher
                 }
             }
             return FinalizeLimbDrawException(limb, exception);
+        }
+
+        private static void InjectFashionSpritesForLimb(
+            Limb limb,
+            Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot)
+        {
+            if (limb == null || spritesBySlot == null || spritesBySlot.Count == 0) { return; }
+
+            List<WearableSprite> wearingItems = limb.WearingItems;
+            if (wearingItems == null) { return; }
+
+            List<WearableSprite> spritesToInject = EnumerateFashionSpritesForLimb(spritesBySlot, limb.type)
+                .Select(pair => pair.Value)
+                .Where(sprite => sprite != null && !wearingItems.Contains(sprite))
+                .Distinct()
+                .ToList();
+            if (spritesToInject.Count == 0) { return; }
+
+            if (!OriginalWearableOrderByLimb.ContainsKey(limb))
+            {
+                OriginalWearableOrderByLimb[limb] = wearingItems
+                    .Where(wearable => wearable != null)
+                    .ToList();
+            }
+
+            if (!InjectedFashionSpritesByLimb.TryGetValue(limb, out List<WearableSprite> injectedSprites))
+            {
+                injectedSprites = new List<WearableSprite>();
+                InjectedFashionSpritesByLimb[limb] = injectedSprites;
+            }
+
+            foreach (WearableSprite sprite in spritesToInject)
+            {
+                wearingItems.Add(sprite);
+                injectedSprites.Add(sprite);
+            }
+
+            SortWearablesForDraw(wearingItems);
+            lastInjectedSpriteCount = spritesToInject.Count;
+        }
+
+        private static bool IsInjectedFashionSprite(Limb limb, WearableSprite sprite)
+        {
+            return limb != null &&
+                   sprite != null &&
+                   InjectedFashionSpritesByLimb.TryGetValue(limb, out List<WearableSprite> injectedSprites) &&
+                   injectedSprites.Contains(sprite);
         }
 
         private static Exception FinalizeLimbDrawException(Limb limb, Exception exception)
@@ -1938,15 +2047,22 @@ namespace BaroWardrobeSwitcher
 
         internal static MethodInfo FindLimbDrawMethod()
         {
+            return FindLimbDrawMethods().FirstOrDefault();
+        }
+
+        private static IEnumerable<MethodInfo> FindLimbDrawMethods()
+        {
             return AccessTools.GetDeclaredMethods(typeof(Limb))
-                .FirstOrDefault(method =>
-                {
-                    if (method.Name != "Draw") { return false; }
-                    ParameterInfo[] parameters = method.GetParameters();
-                    return parameters.Length >= 2 &&
-                           parameters[0].ParameterType == typeof(SpriteBatch) &&
-                           parameters[1].ParameterType == typeof(Camera);
-                }) as MethodInfo;
+                .Where(method =>
+                    method.Name == "Draw" &&
+                    method.GetParameters().Any(parameter => parameter.ParameterType == typeof(SpriteBatch)));
+        }
+
+        private static string DescribeMethod(MethodInfo method)
+        {
+            if (method == null) { return "null"; }
+            string parameters = string.Join(",", method.GetParameters().Select(parameter => parameter.ParameterType.Name));
+            return method.Name + "(" + parameters + ")";
         }
 
         private static bool IsEquipmentSprite(WearableSprite sprite)
@@ -2309,11 +2425,18 @@ namespace BaroWardrobeSwitcher
 
         private static void Postfix(Limb __instance, object[] __args)
         {
-            SpriteBatch spriteBatch = __args != null && __args.Length > 0 ? __args[0] as SpriteBatch : null;
+            SpriteBatch spriteBatch = null;
             Color? overrideColor = null;
-            if (__args != null && __args.Length > 2 && __args[2] is Color color)
+            foreach (object arg in __args ?? Array.Empty<object>())
             {
-                overrideColor = color;
+                if (spriteBatch == null && arg is SpriteBatch batch)
+                {
+                    spriteBatch = batch;
+                }
+                if (!overrideColor.HasValue && arg is Color color)
+                {
+                    overrideColor = color;
+                }
             }
             VisualOverride.DrawMissingFashionSprites(__instance, spriteBatch, overrideColor);
         }
