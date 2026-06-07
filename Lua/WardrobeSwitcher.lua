@@ -88,6 +88,7 @@ local translations = {
         ["status.still_equipped_in"] = "Still equipped in ",
         ["status.look_cleared_sync"] = "Look cleared from multiplayer sync.",
         ["status.round_ended"] = "Round ended. Saved look cleared.",
+        ["status.next_scene_preserved"] = "Saved look will be reapplied in the next scene.",
         ["status.refreshed"] = "Saved look refreshed for changed equipment.",
         ["status.restored_character"] = "Saved look restored for this character.",
         ["status.apply_again"] = "Saved look needs to be applied again.",
@@ -137,6 +138,7 @@ local translations = {
         ["status.still_equipped_in"] = "仍装备于 ",
         ["status.look_cleared_sync"] = "外观已由多人同步清除。",
         ["status.round_ended"] = "回合结束。已清除保存的外观。",
+        ["status.next_scene_preserved"] = "保存的外观会在下一个场景重新套用。",
         ["status.refreshed"] = "装备改变，已刷新保存的外观。",
         ["status.restored_character"] = "已恢复此角色保存的外观。",
         ["status.apply_again"] = "保存的外观需要重新套用。",
@@ -186,6 +188,7 @@ local translations = {
         ["status.still_equipped_in"] = "仍裝備於 ",
         ["status.look_cleared_sync"] = "外觀已由多人同步清除。",
         ["status.round_ended"] = "回合結束。已清除儲存的外觀。",
+        ["status.next_scene_preserved"] = "儲存外觀會在下一個場景重新套用。",
         ["status.refreshed"] = "裝備改變，已重新套用儲存外觀。",
         ["status.restored_character"] = "已恢復此角色儲存外觀。",
         ["status.apply_again"] = "儲存外觀需要重新套用。",
@@ -207,6 +210,7 @@ local statusKeys = {
     ["Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."] = "status.multiplayer_sync_failed",
     ["Look cleared from multiplayer sync."] = "status.look_cleared_sync",
     ["Round ended. Saved look cleared."] = "status.round_ended",
+    ["Saved look will be reapplied in the next scene."] = "status.next_scene_preserved",
     ["Saved look refreshed for changed equipment."] = "status.refreshed",
     ["Saved look restored for this character."] = "status.restored_character",
     ["Saved look needs to be applied again."] = "status.apply_again",
@@ -723,6 +727,39 @@ local function hasSavedLook()
     return false
 end
 
+local function stateHasSavedLook(state)
+    if state == nil then return false end
+    if state.savedLookCaptured == true then return true end
+    local look = state.savedLook or {}
+    for _, entry in ipairs(slots) do
+        if look[entry.key] ~= nil then return true end
+    end
+    return false
+end
+
+local function preserveSceneTransitionLookIntent()
+    local shouldReapplyCurrentLook = hasSavedLook() and (activeLook or autoApplyLook)
+    if shouldReapplyCurrentLook then
+        autoApplyLook = true
+        activeLook = false
+        lastEquipmentSignature = nil
+        lastServerAutoApplySignature = nil
+    end
+
+    for _, state in pairs(characterStates) do
+        if stateHasSavedLook(state) and (state.activeLook == true or state.autoApplyLook == true) then
+            state.activeLook = false
+            state.autoApplyLook = true
+            state.lastEquipmentSignature = nil
+        else
+            state.activeLook = false
+            state.lastEquipmentSignature = nil
+        end
+    end
+
+    return shouldReapplyCurrentLook
+end
+
 local function savedLookSummary()
     if not hasSavedLook() then return tr("summary.none") end
     local count = 0
@@ -798,18 +835,6 @@ local function equipmentSignature(character)
     return table.concat(parts, ";")
 end
 
-local function equippedWearableCount(character)
-    if character == nil then return 0 end
-    local count = 0
-    for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
-        if item ~= nil and not isIgnoredWardrobeItem(item) then
-            count = count + 1
-        end
-    end
-    return count
-end
-
 local function resetInitialEquipGate()
     initialEquipGateActive = false
     initialEquipGateStartedTick = 0
@@ -870,11 +895,10 @@ local function initialEquipGateReady(character)
         initialEquipGateStableTicks = 0
     end
 
-    local equippedCount = equippedWearableCount(character)
     local waitedTicks = globalTick - initialEquipGateStartedTick
     local quietAfterEquip = initialEquipGateSeenEquip and (globalTick - initialEquipGateLastEquipTick >= InitialEquipStableTicks)
     local stable = initialEquipGateStableTicks >= InitialEquipStableTicks
-    local fallbackStable = waitedTicks >= InitialEquipFallbackTicks and stable and equippedCount > 0
+    local fallbackStable = waitedTicks >= InitialEquipFallbackTicks and stable
 
     if (quietAfterEquip and stable) or fallbackStable then
         resetInitialEquipGate()
@@ -1714,6 +1738,11 @@ end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
     startInitialEquipGate()
+    if hasSavedLook() and autoApplyLook then
+        activeLook = false
+        lastEquipmentSignature = nil
+        lastServerAutoApplySignature = nil
+    end
     sendRoundStartNotice()
 end)
 
@@ -1730,6 +1759,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     if lastCharacter ~= nil then
         saveCharacterState(lastCharacter)
     end
+    local preservedForNextScene = preserveSceneTransitionLookIntent()
     resetInitialEquipGate()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
@@ -1742,13 +1772,13 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     lastServerAutoApplySignature = nil
     lastEquipmentSignature = nil
     clearAllVisualOverrides()
-    for _, state in pairs(characterStates) do
-        state.activeLook = false
-        state.lastEquipmentSignature = nil
-    end
     lastCharacter = nil
     roundStartNoticeSent = false
-    lastOperation = hasSavedLook() and "Saved look needs to be applied again." or "Round ended. Saved look cleared."
+    if preservedForNextScene then
+        lastOperation = "Saved look will be reapplied in the next scene."
+    else
+        lastOperation = hasSavedLook() and "Saved look needs to be applied again." or "Round ended. Saved look cleared."
+    end
 end)
 
 log("Loaded. Press F8 to open the wardrobe panel.")

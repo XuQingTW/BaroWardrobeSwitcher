@@ -317,7 +317,7 @@ local function syncActiveClientLook(client)
     savedLooksByCharacterId[characterId] = characterState
     activeLooksByCharacterId[characterId] = true
     lastSyncedCharacterByClientKey[key] = characterId
-    sendLookState(client, characterState)
+    broadcastLookState(characterState)
 end
 
 local function broadcastClear(characterId)
@@ -406,15 +406,17 @@ end)
 Hook.Add("client.connected", "barowardrobeswitcher.sync-connected", function(connectedClient)
     local connectedCharacter = clientCharacter(connectedClient)
     local key = clientKey(connectedClient)
+    local syncedCharacterId = nil
     if connectedCharacter ~= nil and key ~= nil and savedLooksByClientKey[key] ~= nil and activeLooksByClientKey[key] == true then
         local state = cloneStateForCharacter(savedLooksByClientKey[key], connectedCharacter)
         savedLooksByCharacterId[state.characterId] = state
         activeLooksByCharacterId[state.characterId] = true
         lastSyncedCharacterByClientKey[key] = state.characterId
-        sendLookState(connectedClient, state)
+        syncedCharacterId = state.characterId
+        broadcastLookState(state)
     end
     for characterId, state in pairs(savedLooksByCharacterId) do
-        if activeLooksByCharacterId[characterId] == true then
+        if activeLooksByCharacterId[characterId] == true and characterId ~= syncedCharacterId then
             sendLookState(connectedClient, state)
         end
     end
