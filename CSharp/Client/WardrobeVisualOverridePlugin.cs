@@ -41,7 +41,7 @@ namespace BaroWardrobeSwitcher
 
     public static class VisualOverride
     {
-        public const string Version = "0.3.13";
+        public const string Version = "0.3.14";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -117,6 +117,7 @@ namespace BaroWardrobeSwitcher
         private static int drawOverrideHiddenEmptySlotCount;
         private static int drawOverrideHiddenSavedSlotCount;
         private static int fallbackDrawnFashionSpriteCount;
+        private static int storedFashionDrawDepth;
 
         public static void ResetPatchStatus()
         {
@@ -581,7 +582,10 @@ namespace BaroWardrobeSwitcher
             skipOriginal = false;
             if (limb == null || original == null) { return false; }
             if (limb.character == null || !ActiveCharacters.Contains(limb.character)) { return false; }
+            if (storedFashionDrawDepth > 0) { return false; }
             if (!IsEquipmentSprite(original)) { return false; }
+            bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
+            bool hideOriginalForSavedSlot = ShouldHideOriginalForSavedSlot(limb.character, original);
             if (!DrawnFashionSpritesByLimb.TryGetValue(limb, out HashSet<WearableSprite> drawnSprites))
             {
                 drawnSprites = new HashSet<WearableSprite>();
@@ -589,7 +593,7 @@ namespace BaroWardrobeSwitcher
             }
             if (!TryGetFashionSprite(limb.character, original.Type, limb.type, drawnSprites, out WearableSprite fashionSprite))
             {
-                if (ShouldHideOriginalForEmptySavedSlot(limb.character, original))
+                if (hideOriginalForEmptySavedSlot)
                 {
                     skipOriginal = true;
                     drawOverrideHiddenEmptySlotCount++;
@@ -600,7 +604,7 @@ namespace BaroWardrobeSwitcher
                     }
                     return true;
                 }
-                if (ShouldHideOriginalForSavedSlot(limb.character, original))
+                if (hideOriginalForSavedSlot)
                 {
                     skipOriginal = true;
                     drawOverrideHiddenSavedSlotCount++;
@@ -630,15 +634,25 @@ namespace BaroWardrobeSwitcher
                 }
                 return false;
             }
-            drawnSprites.Add(fashionSprite);
-            replacement = fashionSprite;
-            drawOverrideHitCount++;
+
+            if (hideOriginalForSavedSlot)
+            {
+                skipOriginal = true;
+                drawOverrideHiddenSavedSlotCount++;
+                if (drawOverrideLogCount < 12)
+                {
+                    drawOverrideLogCount++;
+                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable hidden original for saved slot; stored fashion will be fallback drawn: limb={limb.type}, type={original.Type}.");
+                }
+                return true;
+            }
+            drawOverrideMissCount++;
             if (drawOverrideLogCount < 12)
             {
                 drawOverrideLogCount++;
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable override hit: limb={limb.type}, type={original.Type}.");
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable kept original; stored fashion will be fallback drawn: limb={limb.type}, type={original.Type}.");
             }
-            return true;
+            return false;
         }
 
         internal static void BeginLimbDraw(Limb limb)
@@ -652,36 +666,6 @@ namespace BaroWardrobeSwitcher
                     return;
                 }
                 DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
-
-                List<WearableSprite> wearingItems = limb.WearingItems;
-                if (wearingItems == null)
-                {
-                    LogVirtualDrawError($"Skipping injected fashion sprite order for limb={limb.type}; WearingItems is null.");
-                    return;
-                }
-
-                List<WearableSprite> injectedSprites = null;
-                List<WearableSprite> originalOrder = null;
-                foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
-                {
-                    if (wearingItems.Contains(pair.Value)) { continue; }
-
-                    if (injectedSprites == null)
-                    {
-                        injectedSprites = new List<WearableSprite>();
-                        originalOrder = wearingItems.ToList();
-                    }
-                    wearingItems.Add(pair.Value);
-                    injectedSprites.Add(pair.Value);
-                }
-
-                if (injectedSprites != null && injectedSprites.Count > 0)
-                {
-                    OriginalWearableOrderByLimb[limb] = originalOrder ?? new List<WearableSprite>();
-                    SortWearablesForDraw(wearingItems);
-                    InjectedFashionSpritesByLimb[limb] = injectedSprites;
-                    lastInjectedSpriteCount = injectedSprites.Count;
-                }
             }
             catch (Exception ex)
             {
@@ -689,11 +673,11 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        internal static void EndLimbDraw(Limb limb)
+        internal static Exception EndLimbDraw(Limb limb, Exception exception = null)
         {
             try
             {
-                if (limb == null) { return; }
+                if (limb == null) { return exception; }
                 List<WearableSprite> injectedSprites = null;
                 if (InjectedFashionSpritesByLimb.TryGetValue(limb, out injectedSprites))
                 {
@@ -708,7 +692,7 @@ namespace BaroWardrobeSwitcher
                 {
                     OriginalWearableOrderByLimb.Remove(limb);
                     DrawnFashionSpritesByLimb.Remove(limb);
-                    return;
+                    return FinalizeLimbDrawException(limb, exception);
                 }
 
                 if (OriginalWearableOrderByLimb.TryGetValue(limb, out List<WearableSprite> originalOrder))
@@ -753,6 +737,20 @@ namespace BaroWardrobeSwitcher
                     DrawnFashionSpritesByLimb.Remove(limb);
                 }
             }
+            return FinalizeLimbDrawException(limb, exception);
+        }
+
+        private static Exception FinalizeLimbDrawException(Limb limb, Exception exception)
+        {
+            if (exception == null) { return null; }
+            if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return exception; }
+            if (exception is ArgumentNullException argumentNullException &&
+                string.Equals(argumentNullException.ParamName, "source", StringComparison.Ordinal))
+            {
+                LogVirtualDrawError($"Suppressed wardrobe Limb.Draw transition exception for limb={limb.type}: {exception.GetType().Name}: {exception.Message}");
+                return null;
+            }
+            return exception;
         }
 
         internal static void DrawMissingFashionSprites(Limb limb, SpriteBatch spriteBatch, Color? overrideColor)
@@ -818,17 +816,25 @@ namespace BaroWardrobeSwitcher
                     spriteEffect |= SpriteEffects.FlipVertically;
                 }
 
-                DrawWearableMethod.Invoke(
-                    limb,
-                    new object[]
-                    {
-                        wearable,
-                        DrawDepthStep * depthIndex,
-                        spriteBatch,
-                        color,
-                        color.A / 255.0f,
-                        spriteEffect
-                    });
+                storedFashionDrawDepth++;
+                try
+                {
+                    DrawWearableMethod.Invoke(
+                        limb,
+                        new object[]
+                        {
+                            wearable,
+                            DrawDepthStep * depthIndex,
+                            spriteBatch,
+                            color,
+                            color.A / 255.0f,
+                            spriteEffect
+                        });
+                }
+                finally
+                {
+                    storedFashionDrawDepth--;
+                }
             }
             catch (Exception ex)
             {
@@ -1926,8 +1932,7 @@ namespace BaroWardrobeSwitcher
 
         private static Exception Finalizer(Limb __instance, Exception __exception)
         {
-            VisualOverride.EndLimbDraw(__instance);
-            return __exception;
+            return VisualOverride.EndLimbDraw(__instance, __exception);
         }
     }
 
