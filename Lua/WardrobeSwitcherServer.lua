@@ -4,7 +4,6 @@ local NET_APPLY_REQUEST = "barowardrobeswitcher.apply"
 local NET_CLEAR_REQUEST = "barowardrobeswitcher.clear"
 local NET_LOOK_APPLY = "barowardrobeswitcher.look.apply"
 local NET_LOOK_CLEAR = "barowardrobeswitcher.look.clear"
-local PERSIST_PATH = "LocalMods/BaroWardrobeSwitcher/PersistentLooks.txt"
 
 if not SERVER then return end
 
@@ -15,6 +14,14 @@ end)
 local Client = nil
 pcall(function()
     Client = LuaUserData.CreateStatic("Barotrauma.Networking.Client", true)
+end)
+local Environment = nil
+pcall(function()
+    Environment = LuaUserData.CreateStatic("System.Environment", true)
+end)
+local Directory = nil
+pcall(function()
+    Directory = LuaUserData.CreateStatic("System.IO.Directory", true)
 end)
 
 local slots = {
@@ -40,6 +47,48 @@ local function log(message)
     else
         print(line)
     end
+end
+
+local function getEnvironmentVariable(name)
+    if Environment ~= nil then
+        local ok, value = pcall(function()
+            return Environment.GetEnvironmentVariable(name)
+        end)
+        if ok and value ~= nil and tostring(value) ~= "" then
+            return tostring(value)
+        end
+    end
+    if os ~= nil and os.getenv ~= nil then
+        local value = os.getenv(name)
+        if value ~= nil and tostring(value) ~= "" then
+            return tostring(value)
+        end
+    end
+    return nil
+end
+
+local function persistentDirectory()
+    local localAppData = getEnvironmentVariable("LOCALAPPDATA") or getEnvironmentVariable("APPDATA")
+    if localAppData ~= nil then
+        return tostring(localAppData):gsub("\\", "/") .. "/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
+    end
+    local home = getEnvironmentVariable("HOME")
+    if home ~= nil then
+        return tostring(home):gsub("\\", "/") .. "/.local/share/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
+    end
+    return "./Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
+end
+
+local function persistentPath()
+    return persistentDirectory() .. "/ServerLooks.txt"
+end
+
+local function ensurePersistentDirectory()
+    if Directory == nil then return false end
+    local ok = pcall(function()
+        Directory.CreateDirectory(persistentDirectory())
+    end)
+    return ok == true
 end
 
 local function itemName(item)
@@ -197,13 +246,13 @@ end
 
 local function escape(value)
     local text = tostring(value or "")
-    text = text:gsub("%%", "%%25"):gsub("|", "%%7C"):gsub("=", "%%3D"):gsub("\n", "%%0A"):gsub("\r", "%%0D")
+    text = text:gsub("%%", "%%25"):gsub("|", "%%7C"):gsub(",", "%%2C"):gsub("=", "%%3D"):gsub("\n", "%%0A"):gsub("\r", "%%0D")
     return text
 end
 
 local function unescape(value)
     local text = tostring(value or "")
-    text = text:gsub("%%0D", "\r"):gsub("%%0A", "\n"):gsub("%%3D", "="):gsub("%%7C", "|"):gsub("%%25", "%%")
+    text = text:gsub("%%0D", "\r"):gsub("%%0A", "\n"):gsub("%%3D", "="):gsub("%%2C", ","):gsub("%%7C", "|"):gsub("%%25", "%%")
     return text
 end
 
@@ -227,9 +276,11 @@ local function cloneStateForCharacter(state, character)
 end
 
 local function persistLooks()
-    local file = io.open(PERSIST_PATH, "w")
+    ensurePersistentDirectory()
+    local path = persistentPath()
+    local file = io.open(path, "w")
     if file == nil then
-        log("Could not write persistent wardrobe data.")
+        log("Could not write persistent wardrobe data to " .. tostring(path) .. ".")
         return
     end
     for key, state in pairs(savedLooksByClientKey) do
@@ -245,9 +296,9 @@ local function persistLooks()
     file:close()
 end
 
-local function loadPersistentLooks()
-    local file = io.open(PERSIST_PATH, "r")
-    if file == nil then return end
+local function loadPersistentLooksFromPath(path)
+    local file = io.open(path, "r")
+    if file == nil then return false end
     for line in file:lines() do
         local key = nil
         local state = { characterId = 0, slots = {} }
@@ -275,6 +326,14 @@ local function loadPersistentLooks()
         end
     end
     file:close()
+    return true
+end
+
+local function loadPersistentLooks()
+    if loadPersistentLooksFromPath(persistentPath()) then return end
+    if loadPersistentLooksFromPath("PersistentLooks.txt") then
+        persistLooks()
+    end
 end
 
 local function writeLookState(message, state)
@@ -444,4 +503,4 @@ Hook.Add("think", "barowardrobeswitcher.persistent-sync", function()
 end)
 
 loadPersistentLooks()
-log("Server sync loaded.")
+log("Server sync loaded. Persistent path: " .. tostring(persistentPath()))

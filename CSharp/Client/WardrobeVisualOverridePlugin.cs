@@ -1,8 +1,11 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
+using System.Text.Json;
 using Barotrauma;
 using Barotrauma.Items.Components;
 using Barotrauma.LuaCs;
@@ -39,9 +42,394 @@ namespace BaroWardrobeSwitcher
         }
     }
 
+    public static class WardrobePersistence
+    {
+        private const int PersistenceVersion = 1;
+        private const string ModFolderName = "BaroWardrobeSwitcher";
+        private const string ClientLookFileName = "ClientLook.json";
+        private const string ServerLooksFileName = "ServerLooks.json";
+        private static readonly string[] SlotKeys =
+        {
+            "Head",
+            "Headset",
+            "InnerClothes",
+            "OuterClothes",
+            "Bag",
+            "HealthInterface"
+        };
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            WriteIndented = true
+        };
+
+        public static string GetStorageDirectory()
+        {
+            try
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (string.IsNullOrWhiteSpace(localAppData))
+                {
+                    localAppData = AppContext.BaseDirectory;
+                }
+                return Path.Combine(
+                    localAppData,
+                    "Daedalic Entertainment GmbH",
+                    "Barotrauma",
+                    "ModData",
+                    ModFolderName);
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to resolve storage directory", ex);
+                return Path.Combine(AppContext.BaseDirectory, "ModData", ModFolderName);
+            }
+        }
+
+        public static string GetClientLookPath()
+        {
+            return Path.Combine(GetStorageDirectory(), ClientLookFileName);
+        }
+
+        public static string GetServerLooksPath()
+        {
+            return Path.Combine(GetStorageDirectory(), ServerLooksFileName);
+        }
+
+        public static string LoadClientLook()
+        {
+            try
+            {
+                string path = GetClientLookPath();
+                if (!File.Exists(path)) { return string.Empty; }
+                ClientLookDocument document = ReadJson<ClientLookDocument>(path);
+                if (document == null || !HasAnySlot(document.Slots) && !document.Captured)
+                {
+                    return string.Empty;
+                }
+                return EncodeClientLook(document);
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to load client look", ex);
+                return string.Empty;
+            }
+        }
+
+        public static bool ClientLookFileExists()
+        {
+            try
+            {
+                return File.Exists(GetClientLookPath());
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to inspect client look file", ex);
+                return false;
+            }
+        }
+
+        public static bool SaveClientLook(string encodedLook)
+        {
+            try
+            {
+                ClientLookDocument document = ParseClientLook(encodedLook);
+                if (document == null || !HasAnySlot(document.Slots) && !document.Captured)
+                {
+                    return ClearClientLook();
+                }
+                WriteJson(GetClientLookPath(), document);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to save client look", ex);
+                return false;
+            }
+        }
+
+        public static bool ClearClientLook()
+        {
+            try
+            {
+                WriteJson(
+                    GetClientLookPath(),
+                    new ClientLookDocument
+                    {
+                        Version = PersistenceVersion,
+                        Captured = false,
+                        Active = false,
+                        AutoApply = false,
+                        Slots = new Dictionary<string, WardrobeSlotDocument>()
+                    });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to clear client look", ex);
+                return false;
+            }
+        }
+
+        public static string LoadServerLooks()
+        {
+            try
+            {
+                string path = GetServerLooksPath();
+                if (!File.Exists(path)) { return string.Empty; }
+                ServerLooksDocument document = ReadJson<ServerLooksDocument>(path);
+                if (document?.Looks == null || document.Looks.Count == 0)
+                {
+                    return string.Empty;
+                }
+
+                List<string> lines = new List<string>();
+                foreach (KeyValuePair<string, ServerLookDocument> pair in document.Looks)
+                {
+                    if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value == null) { continue; }
+                    lines.Add(EncodeServerLook(pair.Key, pair.Value));
+                }
+                return string.Join("\n", lines);
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to load server looks", ex);
+                return string.Empty;
+            }
+        }
+
+        public static bool SaveServerLooks(string encodedLooks)
+        {
+            try
+            {
+                ServerLooksDocument document = ParseServerLooks(encodedLooks);
+                WriteJson(GetServerLooksPath(), document);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to save server looks", ex);
+                return false;
+            }
+        }
+
+        private static T ReadJson<T>(string path)
+        {
+            string json = File.ReadAllText(path, Encoding.UTF8);
+            return JsonSerializer.Deserialize<T>(json, JsonOptions);
+        }
+
+        private static void WriteJson<T>(string path, T value)
+        {
+            string directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            string tempPath = path + ".tmp";
+            string json = JsonSerializer.Serialize(value, JsonOptions);
+            File.WriteAllText(tempPath, json, Encoding.UTF8);
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
+        }
+
+        private static ClientLookDocument ParseClientLook(string encodedLook)
+        {
+            Dictionary<string, string> parts = ParseParts(encodedLook);
+            ClientLookDocument document = new ClientLookDocument
+            {
+                Version = PersistenceVersion,
+                Captured = GetBoolean(parts, "captured"),
+                Active = GetBoolean(parts, "active"),
+                AutoApply = GetBoolean(parts, "auto"),
+                Slots = ParseSlots(parts)
+            };
+            return document;
+        }
+
+        private static ServerLooksDocument ParseServerLooks(string encodedLooks)
+        {
+            ServerLooksDocument document = new ServerLooksDocument
+            {
+                Version = PersistenceVersion,
+                Looks = new Dictionary<string, ServerLookDocument>()
+            };
+
+            foreach (string rawLine in SplitLines(encodedLooks))
+            {
+                Dictionary<string, string> parts = ParseParts(rawLine);
+                if (!parts.TryGetValue("key", out string encodedKey)) { continue; }
+                string key = Unescape(encodedKey);
+                if (string.IsNullOrWhiteSpace(key)) { continue; }
+                document.Looks[key] = new ServerLookDocument
+                {
+                    Active = GetBoolean(parts, "active"),
+                    Slots = ParseSlots(parts)
+                };
+            }
+
+            return document;
+        }
+
+        private static string EncodeClientLook(ClientLookDocument document)
+        {
+            List<string> parts = new List<string>
+            {
+                "captured=" + document.Captured.ToString().ToLowerInvariant(),
+                "active=" + document.Active.ToString().ToLowerInvariant(),
+                "auto=" + document.AutoApply.ToString().ToLowerInvariant()
+            };
+            AppendEncodedSlots(parts, document.Slots);
+            return string.Join("|", parts);
+        }
+
+        private static string EncodeServerLook(string key, ServerLookDocument document)
+        {
+            List<string> parts = new List<string>
+            {
+                "key=" + Escape(key),
+                "active=" + document.Active.ToString().ToLowerInvariant()
+            };
+            AppendEncodedSlots(parts, document.Slots);
+            return string.Join("|", parts);
+        }
+
+        private static void AppendEncodedSlots(List<string> parts, Dictionary<string, WardrobeSlotDocument> slots)
+        {
+            if (parts == null || slots == null) { return; }
+            foreach (string slotKey in SlotKeys)
+            {
+                if (!slots.TryGetValue(slotKey, out WardrobeSlotDocument slot) || slot == null) { continue; }
+                if (string.IsNullOrWhiteSpace(slot.Identifier)) { continue; }
+                parts.Add(slotKey + "=" + Escape(slot.Identifier) + "," + Escape(slot.Name));
+            }
+        }
+
+        private static Dictionary<string, WardrobeSlotDocument> ParseSlots(Dictionary<string, string> parts)
+        {
+            Dictionary<string, WardrobeSlotDocument> slots = new Dictionary<string, WardrobeSlotDocument>();
+            foreach (string slotKey in SlotKeys)
+            {
+                if (!parts.TryGetValue(slotKey, out string encodedValue)) { continue; }
+                int commaIndex = encodedValue.IndexOf(',');
+                if (commaIndex < 0) { continue; }
+                string identifier = Unescape(encodedValue.Substring(0, commaIndex));
+                if (string.IsNullOrWhiteSpace(identifier)) { continue; }
+                string name = Unescape(encodedValue.Substring(commaIndex + 1));
+                slots[slotKey] = new WardrobeSlotDocument
+                {
+                    Identifier = identifier,
+                    Name = name ?? string.Empty
+                };
+            }
+            return slots;
+        }
+
+        private static Dictionary<string, string> ParseParts(string line)
+        {
+            Dictionary<string, string> parts = new Dictionary<string, string>();
+            if (string.IsNullOrWhiteSpace(line)) { return parts; }
+            foreach (string part in line.Split('|'))
+            {
+                int equalsIndex = part.IndexOf('=');
+                if (equalsIndex <= 0) { continue; }
+                string name = part.Substring(0, equalsIndex);
+                string value = part.Substring(equalsIndex + 1);
+                parts[name] = value;
+            }
+            return parts;
+        }
+
+        private static IEnumerable<string> SplitLines(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) { yield break; }
+            string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+            foreach (string line in normalized.Split('\n'))
+            {
+                if (!string.IsNullOrWhiteSpace(line))
+                {
+                    yield return line;
+                }
+            }
+        }
+
+        private static bool GetBoolean(Dictionary<string, string> parts, string key)
+        {
+            return parts != null &&
+                   parts.TryGetValue(key, out string value) &&
+                   string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasAnySlot(Dictionary<string, WardrobeSlotDocument> slots)
+        {
+            return slots != null &&
+                   slots.Values.Any(slot => slot != null && !string.IsNullOrWhiteSpace(slot.Identifier));
+        }
+
+        private static string Escape(string value)
+        {
+            return (value ?? string.Empty)
+                .Replace("%", "%25")
+                .Replace("|", "%7C")
+                .Replace(",", "%2C")
+                .Replace("=", "%3D")
+                .Replace("\r", "%0D")
+                .Replace("\n", "%0A");
+        }
+
+        private static string Unescape(string value)
+        {
+            return (value ?? string.Empty)
+                .Replace("%0A", "\n")
+                .Replace("%0D", "\r")
+                .Replace("%3D", "=")
+                .Replace("%2C", ",")
+                .Replace("%7C", "|")
+                .Replace("%25", "%");
+        }
+
+        private static void LogPersistenceError(string message, Exception ex)
+        {
+            LuaCsLogger.Log("[Baro Wardrobe Switcher] " + message + ": " + ex.GetType().Name + ": " + ex.Message);
+        }
+
+        private sealed class WardrobeSlotDocument
+        {
+            public string Identifier { get; set; }
+            public string Name { get; set; }
+        }
+
+        private sealed class ClientLookDocument
+        {
+            public int Version { get; set; }
+            public bool Captured { get; set; }
+            public bool Active { get; set; }
+            public bool AutoApply { get; set; }
+            public Dictionary<string, WardrobeSlotDocument> Slots { get; set; }
+        }
+
+        private sealed class ServerLookDocument
+        {
+            public bool Active { get; set; }
+            public Dictionary<string, WardrobeSlotDocument> Slots { get; set; }
+        }
+
+        private sealed class ServerLooksDocument
+        {
+            public int Version { get; set; }
+            public Dictionary<string, ServerLookDocument> Looks { get; set; }
+        }
+    }
+
     public static class VisualOverride
     {
-        public const string Version = "0.3.14";
+        public const string Version = "0.3.15";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();

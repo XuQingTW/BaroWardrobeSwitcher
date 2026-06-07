@@ -44,6 +44,8 @@ end)
 local VisualOverride = nil
 local visualOverrideFailure = nil
 local visualOverrideDiagnostics = nil
+local WardrobePersistence = nil
+local wardrobePersistenceFailure = nil
 
 local translations = {
     en = {
@@ -62,6 +64,7 @@ local translations = {
         ["button.save"] = "Save Current Outfit",
         ["button.apply"] = "Apply Saved Look",
         ["button.clear"] = "Clear Look",
+        ["button.forget"] = "Forget Saved Look",
         ["button.diagnostics"] = "Diagnostics",
         ["button.hide_diagnostics"] = "Hide Diagnostics",
         ["button.dump_debug"] = "Dump Debug Log",
@@ -112,6 +115,7 @@ local translations = {
         ["button.save"] = "保存当前服装",
         ["button.apply"] = "套用已保存外观",
         ["button.clear"] = "清除外观",
+        ["button.forget"] = "忘记已保存外观",
         ["button.diagnostics"] = "诊断",
         ["button.hide_diagnostics"] = "隐藏诊断",
         ["button.dump_debug"] = "输出诊断到日志",
@@ -162,6 +166,7 @@ local translations = {
         ["button.save"] = "儲存目前服裝",
         ["button.apply"] = "套用已儲存外觀",
         ["button.clear"] = "清除外觀",
+        ["button.forget"] = "忘記已儲存外觀",
         ["button.diagnostics"] = "診斷",
         ["button.hide_diagnostics"] = "隱藏診斷",
         ["button.dump_debug"] = "輸出診斷到日誌",
@@ -341,8 +346,10 @@ local initialEquipGateLastStatusTick = 0
 local pendingRoundStartNetworkLook = nil
 local pendingRoundStartNetworkCharacterKey = nil
 local clientPersistPathCache = nil
+local persistentClientLookLoaded = false
 local persistClientLook
 local clearPersistentClientLook
+local ensureWardrobePersistence
 
 local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
@@ -492,19 +499,7 @@ local function unescapePersistentValue(value)
         :gsub("%%25", "%%")
 end
 
-persistClientLook = function()
-    local path = clientPersistPath()
-    if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
-        clearPersistentClientLook()
-        return false
-    end
-
-    local file = io.open(path, "w")
-    if file == nil then
-        debugLog("Could not write persistent client wardrobe data to " .. tostring(path) .. ".")
-        return false
-    end
-
+local function encodePersistentClientLook()
     local parts = {
         "captured=" .. tostring(savedLookCaptured == true),
         "active=" .. tostring(activeLook == true),
@@ -521,19 +516,10 @@ persistClientLook = function()
                 escapePersistentValue(slotState.name or "")
         end
     end
-    file:write(table.concat(parts, "|") .. "\n")
-    file:close()
-    return true
+    return table.concat(parts, "|")
 end
 
-clearPersistentClientLook = function()
-    local file = io.open(clientPersistPath(), "w")
-    if file == nil then return false end
-    file:close()
-    return true
-end
-
-local function loadPersistentClientLook()
+local function readLegacyPersistentClientLookLine()
     local path = clientPersistPath()
     local file = io.open(path, "r")
     if file == nil then return false end
@@ -541,7 +527,10 @@ local function loadPersistentClientLook()
     local line = file:read("*l")
     file:close()
     if line == nil or tostring(line) == "" then return false end
+    return tostring(line), path
+end
 
+local function restorePersistentClientLookLine(line, source)
     local restoredLook = {}
     local captured = false
     local active = false
@@ -569,6 +558,7 @@ local function loadPersistentClientLook()
 
     if not lookDataHasSavedLook(restoredLook, captured) then return false end
     savedLook = copyLookData(restoredLook)
+    persistentClientLookLoaded = true
     savedLookCaptured = true
     activeLook = false
     autoApplyLook = active == true or auto == true
@@ -579,8 +569,75 @@ local function loadPersistentClientLook()
         slotResults[entry.key] = savedLook[entry.key] ~= nil and "Saved look needs to be applied again." or "Empty"
     end
     lastOperation = autoApplyLook and "Saved look will be reapplied in the next scene." or "Saved look needs to be applied again."
-    debugLog("Loaded persistent client wardrobe look from " .. tostring(path) .. ".")
+    debugLog("Loaded persistent client wardrobe look from " .. tostring(source or "C# persistence") .. ".")
     return true
+end
+
+persistClientLook = function()
+    if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
+        clearPersistentClientLook()
+        return false
+    end
+
+    local encoded = encodePersistentClientLook()
+    local persistence = ensureWardrobePersistence()
+    if persistence ~= nil then
+        local ok, saved = pcall(function()
+            return persistence.SaveClientLook(encoded)
+        end)
+        if ok and saved == true then
+            return true
+        end
+        debugLog("C# wardrobe persistence write failed; saved look remains in memory for this session. " .. tostring(ok and saved or wardrobePersistenceFailure))
+    end
+
+    return false
+end
+
+clearPersistentClientLook = function()
+    local cleared = false
+    local persistence = ensureWardrobePersistence()
+    if persistence ~= nil then
+        local ok, result = pcall(function()
+            return persistence.ClearClientLook()
+        end)
+        cleared = ok and result == true
+    end
+    return cleared
+end
+
+local function loadPersistentClientLook()
+    local persistence = ensureWardrobePersistence()
+    if persistence ~= nil then
+        local ok, line = pcall(function()
+            return persistence.LoadClientLook()
+        end)
+        if ok and line ~= nil and tostring(line) ~= "" then
+            return restorePersistentClientLookLine(tostring(line), "C# persistence")
+        end
+        if ok then
+            local existsOk, exists = pcall(function()
+                return persistence.ClientLookFileExists()
+            end)
+            if existsOk and exists == true then
+                persistentClientLookLoaded = true
+                return false
+            end
+        end
+    end
+
+    local legacyLine, legacyPath = readLegacyPersistentClientLookLine()
+    if legacyLine == false then
+        if persistence ~= nil then
+            persistentClientLookLoaded = true
+        end
+        return false
+    end
+    local restored = restorePersistentClientLookLine(legacyLine, legacyPath)
+    if restored then
+        persistClientLook()
+    end
+    return restored
 end
 
 local function addChatLine(text)
@@ -658,6 +715,33 @@ local function ensureVisualOverride()
 
     visualOverrideDiagnostics = table.concat(diagnostics, " ")
     return VisualOverride
+end
+
+ensureWardrobePersistence = function()
+    if WardrobePersistence ~= nil then return WardrobePersistence end
+
+    wardrobePersistenceFailure = nil
+    pcall(function()
+        if PluginPackageManager ~= nil and PluginPackageManager.LuaTryRegisterPackageTypes ~= nil then
+            PluginPackageManager.LuaTryRegisterPackageTypes("Baro Wardrobe Switcher", false)
+            PluginPackageManager.LuaTryRegisterPackageTypes("BaroWardrobeSwitcher", false)
+        end
+    end)
+
+    pcall(function()
+        LuaUserData.RegisterType("BaroWardrobeSwitcher.WardrobePersistence")
+    end)
+
+    local ok, result = pcall(function()
+        return LuaUserData.CreateStatic("BaroWardrobeSwitcher.WardrobePersistence", true)
+    end)
+    if ok then
+        WardrobePersistence = result
+    else
+        WardrobePersistence = nil
+        wardrobePersistenceFailure = tostring(result)
+    end
+    return WardrobePersistence
 end
 
 local function visualOverrideState()
@@ -1762,6 +1846,15 @@ local function dumpDebugLog()
     emit("lastOperation=" .. tostring(lastOperation))
     emit("savedLookCaptured=" .. tostring(savedLookCaptured) .. ", activeLook=" .. tostring(activeLook) .. ", autoApplyLook=" .. tostring(autoApplyLook))
     emit("overrideLabel=" .. tostring(overrideState.label) .. ", overrideDetails=" .. tostring(overrideState.details))
+    local persistence = ensureWardrobePersistence()
+    if persistence ~= nil then
+        local ok, path = pcall(function()
+            return persistence.GetClientLookPath()
+        end)
+        emit("persistence=" .. tostring(ok and path or "unavailable"))
+    else
+        emit("persistence=unavailable, error=" .. tostring(wardrobePersistenceFailure))
+    end
     emit("character=" .. tostring(character) .. ", equipmentSignature=" .. tostring(character ~= nil and equipmentSignature(character) or "no-character"))
     for _, entry in ipairs(slots) do
         local current = character ~= nil and getSlotItem(character, entry.slot) or nil
@@ -1853,6 +1946,7 @@ buildWindow = function()
     addButton(list, tr("button.save"), function() saveFashionAndUnequip() end, true, overrideState.ready)
     addButton(list, tr("button.apply"), function() applyFashionToCurrentEquipment(false) end, true, canApply)
     addButton(list, tr("button.clear"), function() clearActiveLook() end)
+    addButton(list, tr("button.forget"), function() clearSavedLook() end, true, hasSavedLook())
     addButton(list, diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
         diagnosticsVisible = not diagnosticsVisible
     end)
@@ -1900,6 +1994,10 @@ end
 
 Hook.Add("think", "barowardrobeswitcher.panel", function()
     globalTick = globalTick + 1
+
+    if not persistentClientLookLoaded then
+        loadPersistentClientLook()
+    end
 
     if f8Hit() then
         toggleWindow()
