@@ -437,8 +437,6 @@ local function saveCharacterState(character)
     local key = characterStateKey(character)
     if key == nil then return end
     characterStates[key] = {
-        savedLook = copyLookData(savedLook),
-        savedLookCaptured = savedLookCaptured,
         activeLook = activeLook,
         autoApplyLook = autoApplyLook,
         lastEquipmentSignature = lastEquipmentSignature,
@@ -450,7 +448,7 @@ end
 local function loadCharacterState(character)
     local key = characterStateKey(character)
     local state = key ~= nil and characterStates[key] or nil
-    if state == nil or not lookDataHasSavedLook(state.savedLook, state.savedLookCaptured) then
+    if state == nil then
         activeLook = false
         lastEquipmentSignature = nil
         lastNetworkApplyDiagnostics = {}
@@ -463,8 +461,14 @@ local function loadCharacterState(character)
         slotResults = {}
         return false
     end
-    savedLook = copyLookData(state.savedLook)
-    savedLookCaptured = state.savedLookCaptured == true
+    if not lookDataHasSavedLook(savedLook, savedLookCaptured) then
+        activeLook = false
+        autoApplyLook = false
+        lastEquipmentSignature = nil
+        slotResults = {}
+        lastNetworkApplyDiagnostics = {}
+        return false
+    end
     activeLook = state.activeLook == true
     autoApplyLook = state.autoApplyLook == true
     lastEquipmentSignature = state.lastEquipmentSignature
@@ -987,6 +991,15 @@ local function itemEntityId(item)
     return 0
 end
 
+local function characterEntityId(character)
+    if character == nil then return 0 end
+    local ok, id = pcall(function()
+        return character.ID
+    end)
+    if ok and id ~= nil then return id end
+    return 0
+end
+
 local function findEntityById(id)
     if Entity == nil or id == nil or id <= 0 then return nil end
     local ok, entity = pcall(function()
@@ -1082,7 +1095,41 @@ end
 
 local function stateHasSavedLook(state)
     if state == nil then return false end
-    return lookDataHasSavedLook(state.savedLook, state.savedLookCaptured)
+    return hasSavedLook()
+end
+
+local function deactivateCachedCharacterStates()
+    for _, state in pairs(characterStates) do
+        state.activeLook = false
+        state.autoApplyLook = false
+        state.lastEquipmentSignature = nil
+    end
+end
+
+local function clearPendingNetworkApplyForCharacterId(characterId)
+    local id = tonumber(characterId) or 0
+    if id <= 0 then return end
+    pendingNetworkAppliesByCharacterId[id] = nil
+end
+
+local function clearLocalPendingNetworkState(character)
+    local key = characterStateKey(character)
+    if key ~= nil then
+        lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
+        if pendingRoundStartNetworkCharacterKey == key then
+            pendingRoundStartNetworkLook = nil
+            pendingRoundStartNetworkCharacterKey = nil
+        end
+        clearPendingNetworkApplyForCharacterId(key)
+    end
+    clearPendingNetworkApplyForCharacterId(characterEntityId(character))
+end
+
+local function clearCachedLocalNetworkState()
+    for key in pairs(characterStates) do
+        lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
+        clearPendingNetworkApplyForCharacterId(key)
+    end
 end
 
 local function preserveSceneTransitionLookIntent()
@@ -1802,11 +1849,15 @@ local function clearActiveLook()
     if character ~= nil then
         restoreItemVisuals(character)
     end
+    deactivateCachedCharacterStates()
+    clearLocalPendingNetworkState(character)
     activeLook = false
     autoApplyLook = false
     lastServerAutoApplySignature = nil
     clearPendingServerApplyRequest()
     lastEquipmentSignature = nil
+    pendingRoundStartNetworkLook = nil
+    pendingRoundStartNetworkCharacterKey = nil
     saveCharacterState(character)
     persistClientLook()
     if multiplayerClearRequested then
@@ -1928,23 +1979,20 @@ local function clearSavedLook()
     local multiplayerForgetRequested = requestServerForgetFashion()
     if character ~= nil then
         clearVisualOverride(character)
-        local key = characterStateKey(character)
-        if key ~= nil then
-            lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
-        end
     end
+    clearLocalPendingNetworkState(character)
+    clearCachedLocalNetworkState()
     savedLook = {}
     savedLookCaptured = false
     activeLook = false
     autoApplyLook = false
+    characterStates = {}
     lastServerAutoApplySignature = nil
     clearPendingServerApplyRequest()
     slotResults = {}
     lastEquipmentSignature = nil
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
-    pendingNetworkAppliesByCharacterId = {}
-    pendingNetworkClearsByCharacterId = {}
     saveCharacterState(character)
     clearPersistentClientLook()
     if multiplayerForgetRequested then
