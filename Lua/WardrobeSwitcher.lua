@@ -340,6 +340,9 @@ local getSlotItem
 local isInAnyWearableSlot
 local roundStartNoticeSent = false
 local lastServerAutoApplySignature = nil
+local pendingServerApplyRequestKey = nil
+local pendingServerApplyLastRequestTick = 0
+local pendingServerApplyAttempts = 0
 local globalTick = 0
 local initialEquipGateActive = false
 local initialEquipGateStartedTick = 0
@@ -360,6 +363,8 @@ local ensureWardrobePersistence
 
 local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
+local ServerApplyRetryTicks = 30
+local ServerApplyMaxAttempts = 10
 
 local function copyLookData(lookData)
     local copy = {}
@@ -1158,6 +1163,39 @@ local function equipmentSignature(character)
     return table.concat(parts, ";")
 end
 
+local function managedWearableSlotsAreEmpty(character)
+    if character == nil then return false end
+    for _, entry in ipairs(slots) do
+        local item = getSlotItem(character, entry.slot)
+        if item ~= nil and not isIgnoredWardrobeItem(item) then
+            return false
+        end
+    end
+    return true
+end
+
+local function serverAutoApplyRequestKey(character)
+    return tostring(characterStateKey(character) or "unknown") .. "|" .. equipmentSignature(character)
+end
+
+local function clearPendingServerApplyRequest()
+    pendingServerApplyRequestKey = nil
+    pendingServerApplyLastRequestTick = 0
+    pendingServerApplyAttempts = 0
+end
+
+local function markServerApplyRequested(character)
+    local requestKey = serverAutoApplyRequestKey(character)
+    if pendingServerApplyRequestKey ~= requestKey then
+        pendingServerApplyAttempts = 0
+    end
+    pendingServerApplyRequestKey = requestKey
+    pendingServerApplyLastRequestTick = globalTick
+    pendingServerApplyAttempts = pendingServerApplyAttempts + 1
+    lastServerAutoApplySignature = requestKey
+    return requestKey
+end
+
 local function resetInitialEquipGate()
     initialEquipGateActive = false
     initialEquipGateStartedTick = 0
@@ -1221,9 +1259,10 @@ local function initialEquipGateReady(character)
     local waitedTicks = globalTick - initialEquipGateStartedTick
     local quietAfterEquip = initialEquipGateSeenEquip and (globalTick - initialEquipGateLastEquipTick >= InitialEquipStableTicks)
     local stable = initialEquipGateStableTicks >= InitialEquipStableTicks
+    local emptyStable = not initialEquipGateSeenEquip and stable and managedWearableSlotsAreEmpty(character)
     local fallbackStable = waitedTicks >= InitialEquipFallbackTicks and stable
 
-    if (quietAfterEquip and stable) or fallbackStable then
+    if (quietAfterEquip and stable) or emptyStable or fallbackStable then
         resetInitialEquipGate()
         return true
     end
@@ -1407,6 +1446,13 @@ local function requestServerApplyFashion()
     return ok == true
 end
 
+local function requestServerApplyForCharacter(character)
+    if character == nil then return false end
+    if not requestServerApplyFashion() then return false end
+    markServerApplyRequested(character)
+    return true
+end
+
 local function requestServerClearFashion()
     if not isMultiplayerClient() or Networking == nil then return false end
     local ok = pcall(function()
@@ -1580,6 +1626,7 @@ local function saveFashionAndUnequip()
     activeLook = false
     autoApplyLook = true
     lastServerAutoApplySignature = nil
+    clearPendingServerApplyRequest()
     lastEquipmentSignature = nil
     clearVisualOverride(character)
 
@@ -1666,6 +1713,7 @@ local function applyFashionToCurrentEquipment(silent)
         if not silent then log("No saved look. Save an outfit first.") end
         activeLook = false
         lastEquipmentSignature = nil
+        clearPendingServerApplyRequest()
         return false
     end
 
@@ -1674,13 +1722,13 @@ local function applyFashionToCurrentEquipment(silent)
         if not silent then log(visualStatus) end
         activeLook = false
         lastEquipmentSignature = nil
+        clearPendingServerApplyRequest()
         return false
     end
 
-    if isMultiplayerClient() and requestServerApplyFashion() then
+    if isMultiplayerClient() and requestServerApplyForCharacter(character) then
         lastCharacter = character
         autoApplyLook = true
-        lastServerAutoApplySignature = equipmentSignature(character)
         saveCharacterState(character)
         persistClientLook()
         if not silent then log("Requested multiplayer wardrobe apply from the server.") end
@@ -1724,6 +1772,7 @@ local function clearActiveLook()
     activeLook = false
     autoApplyLook = false
     lastServerAutoApplySignature = nil
+    clearPendingServerApplyRequest()
     lastEquipmentSignature = nil
     saveCharacterState(character)
     persistClientLook()
@@ -1754,10 +1803,13 @@ end
 local function autoApplySavedLookIfNeeded(character)
     if character == nil or activeLook or not autoApplyLook or not hasSavedLook() then return end
     if isMultiplayerClient() then
-        local signature = equipmentSignature(character)
-        if lastServerAutoApplySignature == signature then return end
-        if requestServerApplyFashion() then
-            lastServerAutoApplySignature = signature
+        local requestKey = serverAutoApplyRequestKey(character)
+        local retryDue =
+            pendingServerApplyRequestKey == requestKey and
+            pendingServerApplyAttempts < ServerApplyMaxAttempts and
+            globalTick - pendingServerApplyLastRequestTick >= ServerApplyRetryTicks
+        if lastServerAutoApplySignature == requestKey and not retryDue then return end
+        if requestServerApplyForCharacter(character) then
             lastOperation = "Saved look needs to be applied again."
             saveCharacterState(character)
             persistClientLook()
@@ -1780,6 +1832,7 @@ local function handleNoControlledCharacter()
     activeLook = false
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
+    clearPendingServerApplyRequest()
     lastCharacter = nil
 
     if hasSavedLook() then
@@ -1806,6 +1859,7 @@ local function handleControlledCharacterChange(character)
         lastOperation = hasSavedLook() and "Saved look restored for this character." or "Controlled character changed."
     else
         lastServerAutoApplySignature = nil
+        clearPendingServerApplyRequest()
         if hasSavedLook() then
             autoApplyLook = true
             lastOperation = "Saved look needs to be applied again."
@@ -1826,6 +1880,7 @@ local function clearSavedLook()
     activeLook = false
     autoApplyLook = false
     lastServerAutoApplySignature = nil
+    clearPendingServerApplyRequest()
     slotResults = {}
     lastEquipmentSignature = nil
     saveCharacterState(character)
@@ -1875,6 +1930,7 @@ local function applyPendingRoundStartNetworkLook(character)
         slotResults[entry.key] = networkLook[entry.key] ~= nil and (applied and "Synced from server" or "Sync failed; dump debug log") or "Empty"
     end
     if applied then
+        clearPendingServerApplyRequest()
         lastOperation = "Saved look applied from multiplayer sync after initial equipment."
     else
         lastOperation = "Multiplayer wardrobe sync failed after initial equipment; dump debug log."
@@ -1910,6 +1966,7 @@ if Networking ~= nil then
                 slotResults[entry.key] = networkLook[entry.key] ~= nil and (applied and "Synced from server" or "Sync failed; dump debug log") or "Empty"
             end
             if applied then
+                clearPendingServerApplyRequest()
                 lastOperation = "Saved look applied from multiplayer sync."
             else
                 lastOperation = "Multiplayer wardrobe sync failed; make sure every client has the fashion items and C# scripting enabled."
@@ -1929,6 +1986,7 @@ if Networking ~= nil then
             activeLook = false
             autoApplyLook = false
             lastServerAutoApplySignature = nil
+            clearPendingServerApplyRequest()
             lastEquipmentSignature = nil
             pendingRoundStartNetworkLook = nil
             pendingRoundStartNetworkCharacterKey = nil
@@ -2116,6 +2174,7 @@ local function resetSavedLookForNewSession()
     lastNetworkApplyDiagnostics = {}
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
+    clearPendingServerApplyRequest()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
     persistentClientLookLoaded = false
@@ -2187,6 +2246,7 @@ Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
         activeLook = false
         lastEquipmentSignature = nil
         lastServerAutoApplySignature = nil
+        clearPendingServerApplyRequest()
     end
     sendRoundStartNotice()
 end)
@@ -2215,6 +2275,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     activeLook = false
     diagnosticsVisible = false
     lastServerAutoApplySignature = nil
+    clearPendingServerApplyRequest()
     lastEquipmentSignature = nil
     clearAllVisualOverrides()
     lastCharacter = nil

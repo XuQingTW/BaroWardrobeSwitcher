@@ -15,6 +15,10 @@ local Client = nil
 pcall(function()
     Client = LuaUserData.CreateStatic("Barotrauma.Networking.Client", true)
 end)
+local GameMain = nil
+pcall(function()
+    GameMain = LuaUserData.CreateStatic("Barotrauma.GameMain", true)
+end)
 local Environment = nil
 pcall(function()
     Environment = LuaUserData.CreateStatic("System.Environment", true)
@@ -362,6 +366,76 @@ local function sendLookState(client, state)
     Networking.Send(message, client.Connection)
 end
 
+local function addConnectedClient(clients, seen, client)
+    if client == nil or seen[client] then return end
+    seen[client] = true
+    clients[#clients + 1] = client
+end
+
+local function collectConnectedClientsFrom(source, clients, seen)
+    if source == nil then return end
+
+    local ok = pcall(function()
+        for client in source do
+            addConnectedClient(clients, seen, client)
+        end
+    end)
+    if ok then return end
+
+    ok = pcall(function()
+        for _, client in pairs(source) do
+            addConnectedClient(clients, seen, client)
+        end
+    end)
+    if ok then return end
+
+    pcall(function()
+        local count = tonumber(source.Count)
+        if count == nil then return end
+        for index = 0, count - 1 do
+            addConnectedClient(clients, seen, source[index])
+        end
+    end)
+end
+
+local function serverFromGameMain()
+    if GameMain == nil then return nil end
+    local ok, server = pcall(function()
+        return GameMain.Server
+    end)
+    if ok then return server end
+    return nil
+end
+
+local function serverFromGame()
+    local ok, server = pcall(function()
+        return Game ~= nil and Game.Server or nil
+    end)
+    if ok then return server end
+    return nil
+end
+
+local function connectedClients()
+    local clients = {}
+    local seen = {}
+
+    if Client ~= nil and Client.ClientList ~= nil then
+        collectConnectedClientsFrom(Client.ClientList, clients, seen)
+    end
+
+    local gameMainServer = serverFromGameMain()
+    if gameMainServer ~= nil then
+        collectConnectedClientsFrom(gameMainServer.ConnectedClients, clients, seen)
+    end
+
+    local gameServer = serverFromGame()
+    if gameServer ~= nil then
+        collectConnectedClientsFrom(gameServer.ConnectedClients, clients, seen)
+    end
+
+    return clients
+end
+
 local function syncActiveClientLook(client)
     local character = clientCharacter(client)
     local key = clientKey(client)
@@ -377,6 +451,12 @@ local function syncActiveClientLook(client)
     activeLooksByCharacterId[characterId] = true
     lastSyncedCharacterByClientKey[key] = characterId
     broadcastLookState(characterState)
+end
+
+local function syncAllActiveClientLooks()
+    for _, client in ipairs(connectedClients()) do
+        syncActiveClientLook(client)
+    end
 end
 
 local function broadcastClear(characterId)
@@ -443,6 +523,7 @@ Networking.Receive(NET_APPLY_REQUEST, function(_, client)
     if key ~= nil then
         savedLooksByClientKey[key] = state
         activeLooksByClientKey[key] = true
+        lastSyncedCharacterByClientKey[key] = characterId
     end
     broadcastLookState(characterState)
     persistLooks()
@@ -464,21 +545,20 @@ end)
 
 Hook.Add("client.connected", "barowardrobeswitcher.sync-connected", function(connectedClient)
     local connectedCharacter = clientCharacter(connectedClient)
-    local key = clientKey(connectedClient)
-    local syncedCharacterId = nil
-    if connectedCharacter ~= nil and key ~= nil and savedLooksByClientKey[key] ~= nil and activeLooksByClientKey[key] == true then
-        local state = cloneStateForCharacter(savedLooksByClientKey[key], connectedCharacter)
-        savedLooksByCharacterId[state.characterId] = state
-        activeLooksByCharacterId[state.characterId] = true
-        lastSyncedCharacterByClientKey[key] = state.characterId
-        syncedCharacterId = state.characterId
-        broadcastLookState(state)
-    end
+    local syncedCharacterId = connectedCharacter ~= nil and characterEntityId(connectedCharacter) or nil
+
+    syncActiveClientLook(connectedClient)
+    syncAllActiveClientLooks()
+
     for characterId, state in pairs(savedLooksByCharacterId) do
         if activeLooksByCharacterId[characterId] == true and characterId ~= syncedCharacterId then
             sendLookState(connectedClient, state)
         end
     end
+end)
+
+Hook.Add("roundStart", "barowardrobeswitcher.sync-round-start", function()
+    syncAllActiveClientLooks()
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.server-cleanup", function()
@@ -488,18 +568,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.server-cleanup", function()
 end)
 
 Hook.Add("think", "barowardrobeswitcher.persistent-sync", function()
-    if Client == nil or Client.ClientList == nil then return end
-    local ok = pcall(function()
-        for client in Client.ClientList do
-            syncActiveClientLook(client)
-        end
-    end)
-    if ok then return end
-    pcall(function()
-        for _, client in pairs(Client.ClientList) do
-            syncActiveClientLook(client)
-        end
-    end)
+    syncAllActiveClientLooks()
 end)
 
 loadPersistentLooks()
