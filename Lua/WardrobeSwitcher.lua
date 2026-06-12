@@ -1619,6 +1619,43 @@ local function captureFashionPayloadFromLook(character, lookData, diagnostics)
 
     local expectedItems = 0
     local capturedItems = 0
+    local processedItems = {}
+    local processedItemIds = {}
+    local processedPrefabIdentifiers = {}
+
+    local function normalizedSavedIdentifier(value)
+        return tostring(value or ""):lower():gsub("[^%w]", "")
+    end
+
+    local function rememberRealItem(item, savedItemId)
+        if item == nil then return false, "none" end
+
+        local runtimeId = tonumber(itemEntityId(item)) or 0
+        local rememberedId = runtimeId > 0 and runtimeId or (tonumber(savedItemId) or 0)
+        if processedItems[item] then
+            return true, "item instance"
+        end
+        if rememberedId > 0 then
+            if processedItemIds[rememberedId] then
+                return true, "itemId " .. tostring(rememberedId)
+            end
+            processedItemIds[rememberedId] = true
+        end
+
+        processedItems[item] = true
+        return false, rememberedId > 0 and ("itemId " .. tostring(rememberedId)) or "item instance"
+    end
+
+    local function rememberPrefabIdentifier(identifier)
+        local normalized = normalizedSavedIdentifier(identifier)
+        if normalized == "" then return false, "empty identifier" end
+        if processedPrefabIdentifiers[normalized] then
+            return true, normalized
+        end
+        processedPrefabIdentifiers[normalized] = true
+        return false, normalized
+    end
+
     for _, entry in ipairs(slots) do
         local data = lookData[entry.key]
         local itemId = data ~= nil and tonumber(data.itemId) or 0
@@ -1632,29 +1669,29 @@ local function captureFashionPayloadFromLook(character, lookData, diagnostics)
                 foundBy = item ~= nil and "character inventory identifier" or "none"
             end
             if item ~= nil then
-                local captured = captureVisualOverride(character, item)
-                if captured > 0 then
-                    capturedItems = capturedItems + 1
-                end
+                local duplicate, duplicateKey = rememberRealItem(item, itemId)
+                local captured = duplicate and 0 or captureVisualOverride(character, item)
+                if captured > 0 then capturedItems = capturedItems + 1 end
                 if diagnostics ~= nil then
                     diagnostics[#diagnostics + 1] =
                         entry.key .. ": identifier=" .. tostring(identifier) ..
                         ", itemId=" .. tostring(itemId) ..
                         ", savedName=" .. tostring(data.name) ..
                         ", found=" .. foundBy ..
+                        (duplicate and (", duplicate=reused real item " .. tostring(duplicateKey)) or "") ..
                         ", capturedSprites=" .. tostring(captured)
                 end
             else
-                local captured = captureVisualOverridePrefab(character, identifier)
-                if captured > 0 then
-                    capturedItems = capturedItems + 1
-                end
+                local duplicate, duplicateKey = rememberPrefabIdentifier(identifier)
+                local captured = duplicate and 0 or captureVisualOverridePrefab(character, identifier)
+                if captured > 0 then capturedItems = capturedItems + 1 end
                 if diagnostics ~= nil then
                     diagnostics[#diagnostics + 1] =
                         entry.key .. ": identifier=" .. tostring(identifier) ..
                         ", itemId=" .. tostring(itemId) ..
                         ", savedName=" .. tostring(data.name) ..
                         ", found=missing item instance" ..
+                        (duplicate and (", duplicate=reused prefab " .. tostring(duplicateKey)) or "") ..
                         ", prefabCapturedSprites=" .. tostring(captured)
                 end
             end

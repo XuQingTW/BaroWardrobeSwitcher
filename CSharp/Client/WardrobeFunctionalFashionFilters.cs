@@ -141,6 +141,7 @@ namespace BaroWardrobeSwitcher
 
             int captured = 0;
             int filtered = 0;
+            bool isSealedSuit = IsSealedSuit(item);
             foreach (ItemComponent component in item.Components)
             {
                 if (component?.statusEffectLists == null) { continue; }
@@ -151,7 +152,7 @@ namespace BaroWardrobeSwitcher
                     if (animations == null) { continue; }
                     foreach (object animationInfo in animations)
                     {
-                        if (IsLargeEquipmentMovementAnimation(animationInfo))
+                        if (ShouldFilterFashionAnimation(isSealedSuit, animationInfo))
                         {
                             filtered++;
                             continue;
@@ -355,6 +356,11 @@ namespace BaroWardrobeSwitcher
 
         private static bool ShouldPreserveSealedSuitMasks(Item item)
         {
+            return IsSealedSuit(item);
+        }
+
+        private static bool IsSealedSuit(Item item)
+        {
             return IsSealedSuitText(NormalizedItemText(item));
         }
 
@@ -449,19 +455,36 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static bool IsLargeEquipmentMovementAnimation(object animationInfo)
+        private static bool ShouldFilterFashionAnimation(bool isSealedSuit, object animationInfo)
+        {
+            return isSealedSuit
+                ? IsMovementAnimation(animationInfo)
+                : IsLargeEquipmentMovementAnimation(animationInfo);
+        }
+
+        private static bool IsMovementAnimation(object animationInfo)
         {
             if (animationInfo == null) { return false; }
             Type animationInfoType = animationInfo.GetType();
             try
             {
                 string animationType = animationInfoType.GetProperty("Type")?.GetValue(animationInfo)?.ToString();
-                if (!string.Equals(animationType, "Walk", StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(animationType, "Run", StringComparison.OrdinalIgnoreCase))
-                {
-                    return false;
-                }
+                return string.Equals(animationType, "Walk", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(animationType, "Run", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (Exception ex)
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to inspect functional fashion animation type: " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
 
+        private static bool IsLargeEquipmentMovementAnimation(object animationInfo)
+        {
+            if (!IsMovementAnimation(animationInfo)) { return false; }
+            Type animationInfoType = animationInfo.GetType();
+            try
+            {
                 string file = animationInfoType.GetProperty("File")?.GetValue(animationInfo)?.ToString() ?? string.Empty;
                 return file.IndexOf("Exosuit", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        file.IndexOf("DivingSuit", StringComparison.OrdinalIgnoreCase) >= 0;
