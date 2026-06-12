@@ -475,6 +475,7 @@ namespace BaroWardrobeSwitcher
             new Dictionary<Limb, List<WearableSprite>>();
         private static readonly Dictionary<string, PatchState> PatchStates =
             new Dictionary<string, PatchState>();
+        private static readonly MethodInfo OnWearablesChangedMethod = AccessTools.Method(typeof(Character), "OnWearablesChanged");
         private static readonly MethodInfo DrawWearableMethod = AccessTools.Method(
             typeof(Limb),
             "DrawWearable",
@@ -514,9 +515,6 @@ namespace BaroWardrobeSwitcher
         private static int drawOverrideHiddenEmptySlotCount;
         private static int drawOverrideHiddenSavedSlotCount;
         private static int fallbackDrawnFashionSpriteCount;
-        private static int wearableVisualRefreshCount;
-        private static int wearableVisualRefreshLogCount;
-        private static int wearableVisualRefreshErrorLogCount;
         private static int storedFashionDrawDepth;
 
         public static void ResetPatchStatus()
@@ -749,8 +747,6 @@ namespace BaroWardrobeSwitcher
                    ", hiddenEmptySlots=" + drawOverrideHiddenEmptySlotCount +
                    ", hiddenSavedSlots=" + drawOverrideHiddenSavedSlotCount +
                    ", fallbackDrawn=" + fallbackDrawnFashionSpriteCount +
-                   ", visualRefreshes=" + wearableVisualRefreshCount +
-                   ", visualRefreshErrors=" + wearableVisualRefreshErrorLogCount +
                    ", savedSlots=" + DescribeSavedSlots(character) +
                    ", emptySlots=" + DescribeEmptySlots(character) +
                    ", spriteSlots=" + DescribeFashionSprites(character) +
@@ -811,7 +807,7 @@ namespace BaroWardrobeSwitcher
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
             fallbackDrawnFashionSpriteCount = 0;
-            RefreshWearableVisualState(character);
+            RefreshWearables(character);
         }
 
         public static void ClearCharacter(Character character)
@@ -833,7 +829,7 @@ namespace BaroWardrobeSwitcher
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
-            RefreshWearableVisualState(character);
+            RefreshWearables(character);
         }
 
         public static void PruneStaleCharacters()
@@ -1023,7 +1019,7 @@ namespace BaroWardrobeSwitcher
             drawOverrideHiddenAfterDrawCount = 0;
             drawOverrideHiddenEmptySlotCount = 0;
             drawOverrideHiddenSavedSlotCount = 0;
-            RefreshWearableVisualState(character);
+            RefreshWearables(character);
             return true;
         }
 
@@ -2219,10 +2215,6 @@ namespace BaroWardrobeSwitcher
                 ClearMask(sprite);
                 count++;
             }
-            if (count > 0)
-            {
-                RefreshWearableVisualState(character);
-            }
             return count;
         }
 
@@ -2266,7 +2258,6 @@ namespace BaroWardrobeSwitcher
             foreach (Character character in OriginalSpriteMasksByCharacter.Keys.ToList())
             {
                 RestoreSpriteMasks(character);
-                RefreshWearableVisualState(character);
             }
             OriginalSpriteMasksByCharacter.Clear();
         }
@@ -2300,38 +2291,16 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static void RefreshWearableVisualState(Character character)
+        private static void RefreshWearables(Character character)
         {
-            if (character == null || IsCharacterStale(character)) { return; }
+            if (character == null) { return; }
             try
             {
-                Limb[] limbs = character.AnimController?.Limbs;
-                if (limbs == null || limbs.Length == 0) { return; }
-
-                int refreshedLimbs = 0;
-                foreach (Limb limb in limbs)
-                {
-                    if (limb == null) { continue; }
-                    limb.UpdateWearableTypesToHide();
-                    refreshedLimbs++;
-                }
-                wearableVisualRefreshCount++;
-                if (wearableVisualRefreshLogCount < 6)
-                {
-                    wearableVisualRefreshLogCount++;
-                    LuaCsLogger.Log(
-                        "[Baro Wardrobe Switcher] Refreshed wearable visual hide state for " +
-                        refreshedLimbs +
-                        " limb(s) without invoking Character.OnWearablesChanged.");
-                }
+                OnWearablesChangedMethod?.Invoke(character, null);
             }
             catch (Exception ex)
             {
-                wearableVisualRefreshErrorLogCount++;
-                if (wearableVisualRefreshErrorLogCount <= 6)
-                {
-                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to refresh wearable visual hide state: {ex.GetType().Name}: {ex.Message}");
-                }
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to refresh wearables: {ex.GetType().Name}: {ex.Message}");
             }
         }
 
