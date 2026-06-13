@@ -441,7 +441,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.3.21";
+        public const string Version = "0.3.22";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -1589,10 +1589,12 @@ namespace BaroWardrobeSwitcher
         private static void RegisterSuppressedEquipmentSounds(Character character, Item item)
         {
             if (character == null || item?.Components == null || SoundsField == null) { return; }
-            if (!HasAnyFashionSound(character))
-            {
-                return;
-            }
+            // When the saved look carries its own sounds we suppress every matching real
+            // equipment sound and replace it. When the look is silent we still have to
+            // silence looping real-equipment sounds (diving suits, exosuits, beeping
+            // headsets); otherwise they keep beeping while the look hides the gear, which
+            // mirrors how ShouldLoadTemporaryAnimation suppresses their movement animation.
+            bool hasFashionSound = HasAnyFashionSound(character);
             if (!SuppressedEquipmentSoundsByCharacter.TryGetValue(character, out HashSet<StatusEffect> suppressedSounds))
             {
                 suppressedSounds = new HashSet<StatusEffect>();
@@ -1607,6 +1609,7 @@ namespace BaroWardrobeSwitcher
                 {
                     if (!HasSounds(statusEffect)) { continue; }
                     if (IsFashionStatusSound(character, statusEffect)) { continue; }
+                    if (!hasFashionSound && !HasLoopingSound(statusEffect)) { continue; }
                     suppressedSounds.Add(statusEffect);
                     SuppressedEquipmentSoundOwners[statusEffect] = character;
                 }
@@ -1616,10 +1619,9 @@ namespace BaroWardrobeSwitcher
         private static void RegisterSuppressedEquipmentComponentSounds(Character character, Item item)
         {
             if (character == null || item?.Components == null || ComponentSoundsField == null) { return; }
-            if (!HasAnyFashionSound(character))
-            {
-                return;
-            }
+            // Same rule as the status-effect sounds above: a silent saved look still has to
+            // silence looping real-equipment item sounds so cosmetic gear stops beeping.
+            bool hasFashionSound = HasAnyFashionSound(character);
             if (!SuppressedEquipmentComponentSoundsByCharacter.TryGetValue(character, out HashSet<ItemComponent> suppressedComponents))
             {
                 suppressedComponents = new HashSet<ItemComponent>();
@@ -1630,6 +1632,7 @@ namespace BaroWardrobeSwitcher
             {
                 if (component == null || !HasComponentSounds(component)) { continue; }
                 if (IsFashionComponentSound(character, component)) { continue; }
+                if (!hasFashionSound && !HasAnyLoopingComponentSound(component)) { continue; }
                 suppressedComponents.Add(component);
                 SuppressedEquipmentComponentSoundOwners[component] = character;
             }
@@ -1952,6 +1955,16 @@ namespace BaroWardrobeSwitcher
             catch (Exception ex)
             {
                 LogSoundError($"Failed to inspect looping item component sounds: {ex.GetType().Name}: {ex.Message}");
+            }
+            return false;
+        }
+
+        private static bool HasAnyLoopingComponentSound(ItemComponent component)
+        {
+            if (component == null) { return false; }
+            foreach (ActionType actionType in GetComponentSoundTypes(component))
+            {
+                if (HasLoopingComponentSound(component, actionType)) { return true; }
             }
             return false;
         }
