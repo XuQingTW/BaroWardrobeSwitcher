@@ -1575,10 +1575,29 @@ local function requestServerSaveFashion()
     return ok == true
 end
 
-local function requestServerApplyFashion()
+local function writeClientLookPayload(message, lookData, captured)
+    if message == nil then return end
+    message.WriteBoolean(captured == true)
+    if captured ~= true then return end
+    lookData = lookData or {}
+    for _, entry in ipairs(slots) do
+        local data = lookData[entry.key]
+        local identifier = data ~= nil and tostring(data.identifier or "") or ""
+        local hasSlot = data ~= nil and identifier ~= ""
+        message.WriteBoolean(hasSlot)
+        if hasSlot then
+            message.WriteUInt16(tonumber(data.itemId) or 0)
+            message.WriteString(identifier)
+            message.WriteString(tostring(data.name or ""))
+        end
+    end
+end
+
+local function requestServerApplyFashion(lookData, captured)
     if not isMultiplayerClient() or Networking == nil then return false end
     local ok = pcall(function()
         local message = Networking.Start(NET_APPLY_REQUEST)
+        writeClientLookPayload(message, lookData, captured)
         Networking.Send(message)
     end)
     return ok == true
@@ -1586,7 +1605,7 @@ end
 
 local function requestServerApplyForCharacter(character)
     if character == nil then return false end
-    if not requestServerApplyFashion() then return false end
+    if not requestServerApplyFashion(savedLook, savedLookCaptured == true) then return false end
     markServerApplyRequested(character)
     return true
 end

@@ -441,7 +441,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.3.20";
+        public const string Version = "0.3.21";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -479,6 +479,8 @@ namespace BaroWardrobeSwitcher
         private static readonly Dictionary<Limb, List<WearableSprite>> InjectedFashionSpritesByLimb =
             new Dictionary<Limb, List<WearableSprite>>();
         private static readonly Dictionary<Limb, List<WearableSprite>> OriginalWearableOrderByLimb =
+            new Dictionary<Limb, List<WearableSprite>>();
+        private static readonly Dictionary<Limb, List<WearableSprite>> HiddenOriginalWearablesByLimb =
             new Dictionary<Limb, List<WearableSprite>>();
         private static readonly Dictionary<string, PatchState> PatchStates =
             new Dictionary<string, PatchState>();
@@ -806,6 +808,7 @@ namespace BaroWardrobeSwitcher
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
+            HiddenOriginalWearablesByLimb.Clear();
             EmptyFashionSlotsByCharacter.Clear();
             SavedFashionSlotsByCharacter.Clear();
         }
@@ -818,6 +821,7 @@ namespace BaroWardrobeSwitcher
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
+            HiddenOriginalWearablesByLimb.Clear();
             EmptyFashionSlotsByCharacter.Clear();
             SavedFashionSlotsByCharacter.Clear();
         }
@@ -835,6 +839,7 @@ namespace BaroWardrobeSwitcher
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
+            HiddenOriginalWearablesByLimb.Clear();
             fallbackDrawnFashionSpriteCount = 0;
             RefreshWearables(character);
         }
@@ -860,6 +865,7 @@ namespace BaroWardrobeSwitcher
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
+            HiddenOriginalWearablesByLimb.Clear();
             RefreshWearables(character);
         }
 
@@ -1181,13 +1187,15 @@ namespace BaroWardrobeSwitcher
             try
             {
                 if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return; }
-                if (!FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
-                    spritesBySlot.Count == 0)
-                {
-                    return;
-                }
+                bool hasFashionSprites =
+                    FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) &&
+                    spritesBySlot.Count > 0;
                 DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
-                InjectFashionSpritesForLimb(limb, spritesBySlot);
+                HideOriginalAttachmentsForLimb(limb);
+                if (hasFashionSprites)
+                {
+                    InjectFashionSpritesForLimb(limb, spritesBySlot);
+                }
             }
             catch (Exception ex)
             {
@@ -1213,6 +1221,7 @@ namespace BaroWardrobeSwitcher
                 if (wearingItems == null)
                 {
                     OriginalWearableOrderByLimb.Remove(limb);
+                    HiddenOriginalWearablesByLimb.Remove(limb);
                     DrawnFashionSpritesByLimb.Remove(limb);
                     return FinalizeLimbDrawException(limb, exception);
                 }
@@ -1222,6 +1231,16 @@ namespace BaroWardrobeSwitcher
                     List<WearableSprite> remainingWearables = wearingItems
                         .Where(wearable => wearable != null && !injectedSet.Contains(wearable))
                         .ToList();
+                    if (HiddenOriginalWearablesByLimb.TryGetValue(limb, out List<WearableSprite> hiddenWearables))
+                    {
+                        foreach (WearableSprite hiddenWearable in hiddenWearables)
+                        {
+                            if (hiddenWearable != null && !remainingWearables.Contains(hiddenWearable))
+                            {
+                                remainingWearables.Add(hiddenWearable);
+                            }
+                        }
+                    }
                     wearingItems.Clear();
                     foreach (WearableSprite originalWearable in originalOrder)
                     {
@@ -1240,6 +1259,16 @@ namespace BaroWardrobeSwitcher
                     }
                     OriginalWearableOrderByLimb.Remove(limb);
                 }
+                else if (HiddenOriginalWearablesByLimb.TryGetValue(limb, out List<WearableSprite> hiddenWearables))
+                {
+                    foreach (WearableSprite hiddenWearable in hiddenWearables)
+                    {
+                        if (hiddenWearable != null && !wearingItems.Contains(hiddenWearable))
+                        {
+                            wearingItems.Add(hiddenWearable);
+                        }
+                    }
+                }
                 else if (injectedSprites != null)
                 {
                     foreach (WearableSprite injectedSprite in injectedSprites)
@@ -1247,6 +1276,7 @@ namespace BaroWardrobeSwitcher
                         wearingItems.RemoveAll(wearable => wearable == injectedSprite);
                     }
                 }
+                HiddenOriginalWearablesByLimb.Remove(limb);
                 DrawnFashionSpritesByLimb.Remove(limb);
             }
             catch (Exception ex)
@@ -1256,10 +1286,44 @@ namespace BaroWardrobeSwitcher
                 {
                     OriginalWearableOrderByLimb.Remove(limb);
                     InjectedFashionSpritesByLimb.Remove(limb);
+                    HiddenOriginalWearablesByLimb.Remove(limb);
                     DrawnFashionSpritesByLimb.Remove(limb);
                 }
             }
             return FinalizeLimbDrawException(limb, exception);
+        }
+
+        private static void HideOriginalAttachmentsForLimb(Limb limb)
+        {
+            if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return; }
+            List<WearableSprite> wearingItems = limb.WearingItems;
+            if (wearingItems == null || wearingItems.Count == 0) { return; }
+
+            List<WearableSprite> hiddenWearables = wearingItems
+                .Where(wearable => ShouldHideAttachmentForFashion(limb.character, wearable))
+                .Distinct()
+                .ToList();
+            if (hiddenWearables.Count == 0) { return; }
+
+            if (!OriginalWearableOrderByLimb.ContainsKey(limb))
+            {
+                OriginalWearableOrderByLimb[limb] = wearingItems
+                    .Where(wearable => wearable != null)
+                    .ToList();
+            }
+            HiddenOriginalWearablesByLimb[limb] = hiddenWearables;
+            foreach (WearableSprite hiddenWearable in hiddenWearables)
+            {
+                wearingItems.RemoveAll(wearable => wearable == hiddenWearable);
+            }
+
+            drawOverrideHiddenAttachmentCount += hiddenWearables.Count;
+            if (drawOverrideLogCount < 12)
+            {
+                drawOverrideLogCount++;
+                string types = string.Join(",", hiddenWearables.Select(wearable => wearable.Type.ToString()).Distinct().OrderBy(type => type));
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Temporarily hid original attachment sprite(s) for fashion mask: limb={limb.type}, types={types}.");
+            }
         }
 
         private static void InjectFashionSpritesForLimb(
