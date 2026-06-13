@@ -14,6 +14,7 @@ LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored 
 - Empty outfits are valid saved looks. Saving while no managed gear is worn creates an empty visual look that can be applied over real equipment.
 - `Clear Look` restores real equipment visuals without deleting the saved look.
 - `Forget Saved Look` deletes the saved look. Scene transitions and round ends do not delete saved looks.
+- `Hide Hair` / `Show Hair` toggles whether the character's own hair, beard, and moustache are hidden while a saved look is active. Use it when a helmet or hat that does not declare its own hair mask leaves hair poking through. The toggle defaults to showing hair, takes effect immediately while a look is active, is remembered with the saved look across scenes and restarts, and applies client-side to your own character.
 
 ## Current flow
 
@@ -30,7 +31,7 @@ LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored 
 - The C# plugin is loaded by LuaCs from `CSharp/Client/WardrobeVisualOverridePlugin.cs`.
 - At the start of each round, the mod posts an English in-game notice that the wardrobe control panel opens with `F8`.
 - A successful C# load prints:
-  - `[Baro Wardrobe Switcher] C# visual override v0.3.19 initializing.`
+  - `[Baro Wardrobe Switcher] C# visual override v0.3.20 initializing.`
   - `[Baro Wardrobe Switcher] C# visual override loaded: ready.`
 - If the panel says `C#: unavailable` or `C#: missing required hooks`, enable C# scripting in LuaCs, accept this mod's C# prompt, and reload before saving or applying a look.
 - Client saved looks are stored outside the mod folder under the user's Barotrauma local app data, then migrated from the old `PersistentClientLook.txt` file when present. Saved looks are restored across campaigns: a look saved in one campaign session is reloaded and reapplied when another campaign or a reloaded save starts.
@@ -38,7 +39,7 @@ LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored 
 - The visual override is draw-only. It explicitly patches `Limb.DrawWearable` and `Limb.Draw` when those targets are available, and does not mutate `Wearable.wearableSprites`, because changing those arrays can break unequip/swap logic.
 - Real combat equipment masking flags are cleared while the look is active. Saved fashion sprites hide only the hair/beard/moustache/face attachment types they declare in their wearable definition, and only while the look is active, so saved helmets cover hair correctly without leaving the character bald after the look is cleared.
 - Saved bag and health-interface/exosuit sprites are drawn on a recessed wardrobe layer so they do not float over arm movement or hair after the look is applied.
-- Only `WearableType.Item` sprites are replaced. Character hair, beard, moustache, and face attachments are still drawn by the original character renderer, except when the active saved look declares that it hides them.
+- Only `WearableType.Item` sprites are replaced. Character hair, beard, moustache, and face attachments are still drawn by the original character renderer, except when the active saved look declares that it hides them or the `Hide Hair` toggle is enabled. The toggle force-hides hair, beard, and moustache (face attachments are left visible) while the look is active.
 - Masking flags on the real equipped item sprites are temporarily cleared for the active character while the override is active, then restored on clear/reload. This keeps gloves, shoes, sleeves, and similar partial gear from hiding the original body parts underneath the visual override.
 - Fashion item `<TriggerAnimation>` effects from `OnWearing` status effects are replayed after the real outfit updates while the look is active, so decorative movement takes priority over the real combat outfit.
 - Fashion item sounds replace matching real-equipment sounds while the look is active. The C# hook covers both `OnWearing <Sound>` status effects and item component `<sound type="...">` playback, can replace across those two sound sources when mods define the fashion and real gear differently, and keeps looping saved-fashion sounds alive even when the real equipment has no matching sound. Looping real-equipment sounds (diving suits, exosuits, beeping headsets) are silenced rather than re-triggered through one-shot fashion sounds, which previously caused continuous beeping while the look was active.

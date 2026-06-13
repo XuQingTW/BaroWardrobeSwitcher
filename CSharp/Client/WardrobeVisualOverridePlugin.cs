@@ -159,6 +159,7 @@ namespace BaroWardrobeSwitcher
                         Captured = false,
                         Active = false,
                         AutoApply = false,
+                        HideHair = false,
                         SessionKey = null,
                         Slots = new Dictionary<string, WardrobeSlotDocument>()
                     });
@@ -249,6 +250,7 @@ namespace BaroWardrobeSwitcher
                 Captured = GetBoolean(parts, "captured"),
                 Active = GetBoolean(parts, "active"),
                 AutoApply = GetBoolean(parts, "auto"),
+                HideHair = GetBoolean(parts, "hidehair"),
                 SessionKey = parts.TryGetValue("session", out string encodedSessionKey) ? Unescape(encodedSessionKey) : null,
                 Slots = ParseSlots(parts)
             };
@@ -285,7 +287,8 @@ namespace BaroWardrobeSwitcher
             {
                 "captured=" + document.Captured.ToString().ToLowerInvariant(),
                 "active=" + document.Active.ToString().ToLowerInvariant(),
-                "auto=" + document.AutoApply.ToString().ToLowerInvariant()
+                "auto=" + document.AutoApply.ToString().ToLowerInvariant(),
+                "hidehair=" + document.HideHair.ToString().ToLowerInvariant()
             };
             if (!string.IsNullOrWhiteSpace(document.SessionKey))
             {
@@ -417,6 +420,7 @@ namespace BaroWardrobeSwitcher
             public bool Captured { get; set; }
             public bool Active { get; set; }
             public bool AutoApply { get; set; }
+            public bool HideHair { get; set; }
             public string SessionKey { get; set; }
             public Dictionary<string, WardrobeSlotDocument> Slots { get; set; }
         }
@@ -437,7 +441,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.3.19";
+        public const string Version = "0.3.20";
 
         private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
             new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
@@ -461,6 +465,7 @@ namespace BaroWardrobeSwitcher
             new Dictionary<Character, int>();
         private static readonly Dictionary<Character, HashSet<WearableType>> FashionHiddenWearableTypesByCharacter =
             new Dictionary<Character, HashSet<WearableType>>();
+        private static readonly HashSet<Character> ForceHideHairCharacters = new HashSet<Character>();
         private static readonly HashSet<Character> EmptyFashionCharacters = new HashSet<Character>();
         private static readonly Dictionary<Character, HashSet<InvSlotType>> EmptyFashionSlotsByCharacter =
             new Dictionary<Character, HashSet<InvSlotType>>();
@@ -512,6 +517,13 @@ namespace BaroWardrobeSwitcher
             WearableType.Beard,
             WearableType.Moustache,
             WearableType.FaceAttachment
+        };
+        // Attachment types hidden when the player opts to hide hair while a look is active.
+        private static readonly WearableType[] HairAttachmentTypes =
+        {
+            WearableType.Hair,
+            WearableType.Beard,
+            WearableType.Moustache
         };
         private static int drawOverrideLogCount;
         private static int virtualDrawErrorLogCount;
@@ -741,6 +753,7 @@ namespace BaroWardrobeSwitcher
                 : 0;
             return "active=" + ActiveCharacters.Contains(character) +
                    ", empty=" + EmptyFashionCharacters.Contains(character) +
+                   ", hideHair=" + ForceHideHairCharacters.Contains(character) +
                    ", sprites=" + spriteCount +
                    ", animations=" + animationCount +
                    ", sounds=" + soundCount +
@@ -770,6 +783,7 @@ namespace BaroWardrobeSwitcher
             RestoreAllSpriteMasks();
             FashionSpritesByCharacter.Clear();
             FashionHiddenWearableTypesByCharacter.Clear();
+            ForceHideHairCharacters.Clear();
             FashionAnimationsByCharacter.Clear();
             FashionSoundsByCharacter.Clear();
             FashionComponentSoundsByCharacter.Clear();
@@ -800,6 +814,7 @@ namespace BaroWardrobeSwitcher
         {
             RestoreAllSpriteMasks();
             ActiveCharacters.Clear();
+            ForceHideHairCharacters.Clear();
             DrawnFashionSpritesByLimb.Clear();
             InjectedFashionSpritesByLimb.Clear();
             OriginalWearableOrderByLimb.Clear();
@@ -814,6 +829,7 @@ namespace BaroWardrobeSwitcher
             ClearSuppressedEquipmentSounds(character);
             ClearSuppressedEquipmentComponentSounds(character);
             ActiveCharacters.Remove(character);
+            ForceHideHairCharacters.Remove(character);
             EmptyFashionSlotsByCharacter.Remove(character);
             SavedFashionSlotsByCharacter.Remove(character);
             DrawnFashionSpritesByLimb.Clear();
@@ -829,6 +845,7 @@ namespace BaroWardrobeSwitcher
             RestoreSpriteMasks(character);
             FashionSpritesByCharacter.Remove(character);
             FashionHiddenWearableTypesByCharacter.Remove(character);
+            ForceHideHairCharacters.Remove(character);
             FashionAnimationsByCharacter.Remove(character);
             FashionSoundsByCharacter.Remove(character);
             FashionComponentSoundsByCharacter.Remove(character);
@@ -850,6 +867,7 @@ namespace BaroWardrobeSwitcher
         {
             List<Character> characters = FashionSpritesByCharacter.Keys
                 .Concat(FashionHiddenWearableTypesByCharacter.Keys)
+                .Concat(ForceHideHairCharacters)
                 .Concat(FashionAnimationsByCharacter.Keys)
                 .Concat(FashionSoundsByCharacter.Keys)
                 .Concat(FashionComponentSoundsByCharacter.Keys)
@@ -867,6 +885,7 @@ namespace BaroWardrobeSwitcher
                 RestoreSpriteMasks(character);
                 FashionSpritesByCharacter.Remove(character);
                 FashionHiddenWearableTypesByCharacter.Remove(character);
+                ForceHideHairCharacters.Remove(character);
                 FashionAnimationsByCharacter.Remove(character);
                 FashionSoundsByCharacter.Remove(character);
                 FashionComponentSoundsByCharacter.Remove(character);
@@ -989,6 +1008,23 @@ namespace BaroWardrobeSwitcher
                 ", empty=" +
                 DescribeEmptySlots(character) +
                 ".");
+            return true;
+        }
+
+        // Opt-in hiding of the character's own hair/beard/moustache while a saved look
+        // is active, so helmets and hats that do not declare HideWearablesOfType no longer
+        // leave hair poking through. Only takes visible effect while the look is active.
+        public static bool SetHideHair(Character character, bool hideHair)
+        {
+            if (character == null) { return false; }
+            bool changed = hideHair
+                ? ForceHideHairCharacters.Add(character)
+                : ForceHideHairCharacters.Remove(character);
+            if (changed)
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion hair visibility set: hideHair=" + hideHair + ".");
+                RefreshWearables(character);
+            }
             return true;
         }
 
@@ -2205,10 +2241,14 @@ namespace BaroWardrobeSwitcher
 
         private static bool ShouldHideAttachmentForFashion(Character character, WearableSprite original)
         {
-            return character != null &&
-                   original != null &&
-                   FashionHiddenWearableTypesByCharacter.TryGetValue(character, out HashSet<WearableType> hiddenTypes) &&
-                   hiddenTypes.Contains(original.Type);
+            if (character == null || original == null) { return false; }
+            if (FashionHiddenWearableTypesByCharacter.TryGetValue(character, out HashSet<WearableType> hiddenTypes) &&
+                hiddenTypes.Contains(original.Type))
+            {
+                return true;
+            }
+            return ForceHideHairCharacters.Contains(character) &&
+                   HairAttachmentTypes.Contains(original.Type);
         }
 
         private static string DescribeFashionHiddenTypes(Character character)
