@@ -140,11 +140,6 @@ local function prefixedClientKey(prefix, value)
     return prefix .. ":" .. text
 end
 
-local function isPersistentClientKey(key)
-    local prefix = tostring(key or ""):match("^([%a_][%w_%-]*):")
-    return prefix == "steam" or prefix == "account"
-end
-
 local function normalizePersistentClientKey(rawKey)
     local text = stableIdentityValue(rawKey)
     if text == nil then return nil, true end
@@ -237,7 +232,7 @@ local function characterEntityId(character)
     return 0
 end
 
-local function persistentClientKey(client)
+local function clientKey(client)
     if client == nil then return nil end
     local candidates = {
         { prefix = "steam", getter = function() return client.SteamID end },
@@ -253,35 +248,6 @@ local function persistentClientKey(client)
         end
     end
     return nil
-end
-
-local function runtimeClientKey(client)
-    if client == nil then return nil end
-    local connection = userDataMember(client, "Connection")
-    local candidates = {
-        { prefix = "runtime_session", getter = function() return userDataMember(client, "SessionId") or userDataMember(client, "SessionID") end },
-        { prefix = "runtime_id", getter = function() return userDataMember(client, "ID") or userDataMember(client, "Id") end },
-        { prefix = "runtime_endpoint", getter = function()
-            return userDataMember(connection, "EndpointString") or
-                userDataMember(connection, "EndPointString") or
-                userDataMember(connection, "RemoteEndPoint") or
-                userDataMember(connection, "EndPoint") or
-                userDataMember(connection, "Address")
-        end },
-        { prefix = "runtime_name", getter = function() return userDataMember(client, "Name") end }
-    }
-    for _, candidate in ipairs(candidates) do
-        local ok, value = pcall(candidate.getter)
-        if ok then
-            local key = prefixedClientKey(candidate.prefix, value)
-            if key ~= nil then return key end
-        end
-    end
-    return nil
-end
-
-local function clientKey(client)
-    return persistentClientKey(client) or runtimeClientKey(client)
 end
 
 local function getSlotItem(character, slot)
@@ -433,7 +399,6 @@ end
 
 local function savedLookBelongsToCurrentSession(key)
     if key == nil then return false end
-    if not isPersistentClientKey(key) then return true end
     if legacySavedLookByClientKey[key] == true then return false end
     local savedSessionKey = savedLookSessionByClientKey[key]
     if savedSessionKey == nil then return true end
@@ -450,22 +415,20 @@ local function persistLooks()
         return
     end
     for key, state in pairs(savedLooksByClientKey) do
-        if isPersistentClientKey(key) then
-            local isLegacy = legacySavedLookByClientKey[key] == true
-            local sessionKey = isLegacy and nil or (savedLookSessionByClientKey[key] or currentServerSessionKey())
-            local active = not isLegacy and activeLooksByClientKey[key] == true and savedLookBelongsToCurrentSession(key)
-            local parts = { "key=" .. escape(key), "active=" .. tostring(active) }
-            if sessionKey ~= nil then
-                parts[#parts + 1] = "session=" .. escape(sessionKey)
-            end
-            for _, entry in ipairs(slots) do
-                local slotState = state.slots[entry.key]
-                if slotState ~= nil then
-                    parts[#parts + 1] = entry.key .. "=" .. escape(slotState.identifier or "") .. "," .. escape(slotState.name or "")
-                end
-            end
-            file:write(table.concat(parts, "|") .. "\n")
+        local isLegacy = legacySavedLookByClientKey[key] == true
+        local sessionKey = isLegacy and nil or (savedLookSessionByClientKey[key] or currentServerSessionKey())
+        local active = not isLegacy and activeLooksByClientKey[key] == true and savedLookBelongsToCurrentSession(key)
+        local parts = { "key=" .. escape(key), "active=" .. tostring(active) }
+        if sessionKey ~= nil then
+            parts[#parts + 1] = "session=" .. escape(sessionKey)
         end
+        for _, entry in ipairs(slots) do
+            local slotState = state.slots[entry.key]
+            if slotState ~= nil then
+                parts[#parts + 1] = entry.key .. "=" .. escape(slotState.identifier or "") .. "," .. escape(slotState.name or "")
+            end
+        end
+        file:write(table.concat(parts, "|") .. "\n")
     end
     file:close()
 end
@@ -531,34 +494,6 @@ local function writeLookState(message, state)
             message.WriteString(slotState.name or "")
         end
     end
-end
-
-local function readApplyLookPayload(message, character)
-    if message == nil then return nil end
-    local ok, state = pcall(function()
-        if message.ReadBoolean() ~= true then return nil end
-        local payload = {
-            characterId = characterEntityId(character),
-            slots = {}
-        }
-        for _, entry in ipairs(slots) do
-            if message.ReadBoolean() then
-                local itemId = tonumber(message.ReadUInt16()) or 0
-                local identifier = tostring(message.ReadString() or "")
-                local name = tostring(message.ReadString() or "")
-                if identifier ~= "" then
-                    payload.slots[entry.key] = {
-                        itemId = itemId,
-                        identifier = identifier,
-                        name = name
-                    }
-                end
-            end
-        end
-        return payload
-    end)
-    if ok then return state end
-    return nil
 end
 
 local function broadcastLookState(state)
@@ -896,14 +831,13 @@ Networking.Receive(NET_SAVE_REQUEST, function(_, client)
     persistLooks()
 end)
 
-Networking.Receive(NET_APPLY_REQUEST, function(message, client)
+Networking.Receive(NET_APPLY_REQUEST, function(_, client)
     local character = clientCharacter(client)
     if character == nil then return end
 
     local characterId = characterEntityId(character)
     local key = clientKey(client)
-    local payloadState = readApplyLookPayload(message, character)
-    local state = payloadState or (key ~= nil and savedLooksByClientKey[key] or savedLooksByCharacterId[characterId])
+    local state = key ~= nil and savedLooksByClientKey[key] or savedLooksByCharacterId[characterId]
     if state == nil then return end
     -- Explicit apply requests restore saved looks from any campaign session;
     -- the session gate only limits server-initiated auto-resurrection.
@@ -911,14 +845,9 @@ Networking.Receive(NET_APPLY_REQUEST, function(message, client)
     local characterState = cloneStateForCharacter(state, character)
     markActiveClientCharacter(key, characterId, characterState, true, nil)
     if key ~= nil then
-        savedLooksByClientKey[key] = cloneStateForCharacter(state, character)
-        if isPersistentClientKey(key) then
-            savedLookSessionByClientKey[key] = currentServerSessionKey()
-            legacySavedLookByClientKey[key] = false
-        else
-            savedLookSessionByClientKey[key] = nil
-            legacySavedLookByClientKey[key] = nil
-        end
+        savedLooksByClientKey[key] = state
+        savedLookSessionByClientKey[key] = currentServerSessionKey()
+        legacySavedLookByClientKey[key] = false
         activeLooksByClientKey[key] = true
     end
     broadcastSyncedLookState(key, characterState, true)
