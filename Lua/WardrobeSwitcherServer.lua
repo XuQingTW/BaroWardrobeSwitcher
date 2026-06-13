@@ -839,7 +839,8 @@ Networking.Receive(NET_APPLY_REQUEST, function(_, client)
     local key = clientKey(client)
     local state = key ~= nil and savedLooksByClientKey[key] or savedLooksByCharacterId[characterId]
     if state == nil then return end
-    if key ~= nil and not savedLookBelongsToCurrentSession(key) then return end
+    -- Explicit apply requests restore saved looks from any campaign session;
+    -- the session gate only limits server-initiated auto-resurrection.
 
     local characterState = cloneStateForCharacter(state, character)
     markActiveClientCharacter(key, characterId, characterState, true, nil)

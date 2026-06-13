@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 
-<contentpackage name="Wardrobe(beta)" modversion="0.4.27" corepackage="False" steamworkshopid="3737903001" gameversion="1.12.7.0">
+<contentpackage name="Wardrobe(beta)" modversion="0.4.28" corepackage="False" steamworkshopid="3737903001" gameversion="1.12.7.0">
 
   <Text file="%ModDir%/Texts.xml" />
   <Item file="%ModDir%/MultiplayerSyncMarker.xml" />

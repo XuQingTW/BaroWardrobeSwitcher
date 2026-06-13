@@ -653,15 +653,8 @@ local function restorePersistentClientLookLine(line, source)
     if sessionKey == nil then
         return false
     end
-    if restoredSessionKey == nil or restoredSessionKey == "" then
-        persistentClientLookLoaded = true
-        debugLog("Ignored persistent client wardrobe look without a session key from " .. tostring(source or "C# persistence") .. ".")
-        return false
-    end
-    if restoredSessionKey ~= sessionKey then
-        persistentClientLookLoaded = true
-        debugLog("Ignored persistent client wardrobe look for another session from " .. tostring(source or "C# persistence") .. ".")
-        return false
+    if restoredSessionKey ~= nil and restoredSessionKey ~= "" and restoredSessionKey ~= sessionKey then
+        debugLog("Restoring persistent client wardrobe look saved in another campaign session from " .. tostring(source or "C# persistence") .. ".")
     end
 
     if not lookDataHasSavedLook(restoredLook, captured) then return false end
