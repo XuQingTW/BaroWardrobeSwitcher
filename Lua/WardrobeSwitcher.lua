@@ -68,6 +68,8 @@ local translations = {
         ["button.apply"] = "Apply Saved Look",
         ["button.clear"] = "Clear Look",
         ["button.forget"] = "Forget Saved Look",
+        ["button.hide_hair"] = "Hide Hair",
+        ["button.show_hair"] = "Show Hair",
         ["button.diagnostics"] = "Diagnostics",
         ["button.hide_diagnostics"] = "Hide Diagnostics",
         ["button.dump_debug"] = "Dump Debug Log",
@@ -121,6 +123,8 @@ local translations = {
         ["button.apply"] = "套用已保存外观",
         ["button.clear"] = "清除外观",
         ["button.forget"] = "忘记已保存外观",
+        ["button.hide_hair"] = "隐藏头发",
+        ["button.show_hair"] = "显示头发",
         ["button.diagnostics"] = "诊断",
         ["button.hide_diagnostics"] = "隐藏诊断",
         ["button.dump_debug"] = "输出诊断到日志",
@@ -174,6 +178,8 @@ local translations = {
         ["button.apply"] = "套用已儲存外觀",
         ["button.clear"] = "清除外觀",
         ["button.forget"] = "忘記已儲存外觀",
+        ["button.hide_hair"] = "隱藏頭髮",
+        ["button.show_hair"] = "顯示頭髮",
         ["button.diagnostics"] = "診斷",
         ["button.hide_diagnostics"] = "隱藏診斷",
         ["button.dump_debug"] = "輸出診斷到日誌",
@@ -323,6 +329,7 @@ local savedLook = {}
 local savedLookCaptured = false
 local activeLook = false
 local autoApplyLook = false
+local hideHair = false
 local characterStates = {}
 local lastOperation = "Ready."
 local diagnosticsVisible = false
@@ -589,7 +596,8 @@ local function encodePersistentClientLook()
     local parts = {
         "captured=" .. tostring(savedLookCaptured == true),
         "active=" .. tostring(activeLook == true),
-        "auto=" .. tostring(autoApplyLook == true)
+        "auto=" .. tostring(autoApplyLook == true),
+        "hidehair=" .. tostring(hideHair == true)
     }
     local sessionKey = currentSessionKey()
     if sessionKey ~= nil then
@@ -625,6 +633,7 @@ local function restorePersistentClientLookLine(line, source)
     local captured = false
     local active = false
     local auto = false
+    local restoredHideHair = false
     local restoredSessionKey = nil
     for part in tostring(line):gmatch("[^|]+") do
         local name, value = part:match("^([^=]+)=(.*)$")
@@ -634,6 +643,8 @@ local function restorePersistentClientLookLine(line, source)
             active = value == "true"
         elseif name == "auto" then
             auto = value == "true"
+        elseif name == "hidehair" then
+            restoredHideHair = value == "true"
         elseif name == "session" then
             restoredSessionKey = unescapePersistentValue(value)
         elseif name ~= nil then
@@ -663,6 +674,7 @@ local function restorePersistentClientLookLine(line, source)
     savedLookCaptured = true
     activeLook = false
     autoApplyLook = active == true or auto == true
+    hideHair = restoredHideHair == true
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
     slotResults = {}
@@ -1512,6 +1524,14 @@ local function setFashionSlotMask(character, lookData)
     return ok and result == true
 end
 
+local function setHideHairVisual(character)
+    if ensureVisualOverride() == nil or character == nil then return false end
+    local ok, result = pcall(function()
+        return VisualOverride.SetHideHair(character, hideHair == true)
+    end)
+    return ok and result == true
+end
+
 local function applyVisualOverrideToItem(character, item, carrier)
     if ensureVisualOverride() == nil or character == nil or item == nil then return false end
     local ok, result = pcall(function()
@@ -1722,6 +1742,9 @@ local function applyCapturedFashionToCharacterEquipment(character, lookData, rec
         restoreItemVisuals(character)
     end
     setFashionSlotMask(character, look)
+    if character == controlled() then
+        setHideHairVisual(character)
+    end
 
     local current = snapshot(character)
     local equippedItems = {}
@@ -2432,6 +2455,14 @@ buildWindow = function()
 
     addButton(list, tr("button.save"), function() saveFashionAndUnequip() end, true, overrideState.ready)
     addButton(list, tr("button.apply"), function() applyFashionToCurrentEquipment(false) end, true, canApply)
+    addButton(list, hideHair and tr("button.show_hair") or tr("button.hide_hair"), function()
+        hideHair = not hideHair
+        local character = controlled()
+        if character ~= nil then
+            setHideHairVisual(character)
+        end
+        persistClientLook()
+    end, true, overrideState.ready)
     addButton(list, tr("button.clear"), function() clearActiveLook() end)
     addButton(list, tr("button.forget"), function() clearSavedLook() end, true, hasSavedLook())
     addButton(list, diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
@@ -2487,6 +2518,7 @@ local function resetSavedLookForNewSession()
     savedLookCaptured = false
     activeLook = false
     autoApplyLook = false
+    hideHair = false
     characterStates = {}
     slotResults = {}
     lastNetworkApplyDiagnostics = {}
