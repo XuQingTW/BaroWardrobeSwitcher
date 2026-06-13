@@ -1529,7 +1529,15 @@ local function setHideHairVisual(character)
     local ok, result = pcall(function()
         return VisualOverride.SetHideHair(character, hideHair == true)
     end)
-    return ok and result == true
+    if not ok then
+        -- Surface the failure instead of swallowing it: a missing SetHideHair
+        -- method (stale LuaCs assembly cache after an update) is the usual reason
+        -- the Hide Hair button appears to "do nothing". Reloading the mod so the
+        -- C# plugin recompiles resolves it.
+        log("Hide Hair toggle failed: " .. tostring(result) .. ". Reload the mod so LuaCs recompiles the C# plugin.")
+        return false
+    end
+    return result == true
 end
 
 local function applyVisualOverrideToItem(character, item, carrier)
@@ -1575,10 +1583,35 @@ local function requestServerSaveFashion()
     return ok == true
 end
 
-local function requestServerApplyFashion()
+-- Cross-campaign/cross-server apply: the server may no longer hold this client's
+-- saved look (different server, wiped ServerLooks.txt, or a fresh process before
+-- the player re-saved). Send the locally saved visual identifiers along with the
+-- apply request so the server can always rebuild and broadcast the look, even when
+-- its own stored state is missing or stale. The leading boolean lets the server
+-- detect whether any payload follows, keeping the message backwards compatible.
+local function writeClientLookPayload(message, lookData, captured)
+    if message == nil then return end
+    message.WriteBoolean(captured == true)
+    if captured ~= true then return end
+    lookData = lookData or {}
+    for _, entry in ipairs(slots) do
+        local data = lookData[entry.key]
+        local identifier = data ~= nil and tostring(data.identifier or "") or ""
+        local hasSlot = data ~= nil and identifier ~= ""
+        message.WriteBoolean(hasSlot)
+        if hasSlot then
+            message.WriteUInt16(tonumber(data.itemId) or 0)
+            message.WriteString(identifier)
+            message.WriteString(tostring(data.name or ""))
+        end
+    end
+end
+
+local function requestServerApplyFashion(lookData, captured)
     if not isMultiplayerClient() or Networking == nil then return false end
     local ok = pcall(function()
         local message = Networking.Start(NET_APPLY_REQUEST)
+        writeClientLookPayload(message, lookData, captured)
         Networking.Send(message)
     end)
     return ok == true
@@ -1586,7 +1619,7 @@ end
 
 local function requestServerApplyForCharacter(character)
     if character == nil then return false end
-    if not requestServerApplyFashion() then return false end
+    if not requestServerApplyFashion(savedLook, savedLookCaptured == true) then return false end
     markServerApplyRequested(character)
     return true
 end

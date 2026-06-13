@@ -496,6 +496,39 @@ local function writeLookState(message, state)
     end
 end
 
+-- Reads the optional saved-look payload a client may attach to an apply request.
+-- The leading boolean signals whether identifiers follow; when absent (older
+-- clients or an empty look) this returns nil so the handler falls back to the
+-- server's own stored state. Letting the client supply identifiers is what makes
+-- cross-campaign / cross-server apply work even when the server lost the look.
+local function readApplyLookPayload(message, character)
+    if message == nil then return nil end
+    local ok, state = pcall(function()
+        if message.ReadBoolean() ~= true then return nil end
+        local payload = {
+            characterId = characterEntityId(character),
+            slots = {}
+        }
+        for _, entry in ipairs(slots) do
+            if message.ReadBoolean() then
+                local itemId = tonumber(message.ReadUInt16()) or 0
+                local identifier = tostring(message.ReadString() or "")
+                local name = tostring(message.ReadString() or "")
+                if identifier ~= "" then
+                    payload.slots[entry.key] = {
+                        itemId = itemId,
+                        identifier = identifier,
+                        name = name
+                    }
+                end
+            end
+        end
+        return payload
+    end)
+    if ok then return state end
+    return nil
+end
+
 local function broadcastLookState(state)
     local message = Networking.Start(NET_LOOK_APPLY)
     writeLookState(message, state)
@@ -831,13 +864,18 @@ Networking.Receive(NET_SAVE_REQUEST, function(_, client)
     persistLooks()
 end)
 
-Networking.Receive(NET_APPLY_REQUEST, function(_, client)
+Networking.Receive(NET_APPLY_REQUEST, function(message, client)
     local character = clientCharacter(client)
     if character == nil then return end
 
     local characterId = characterEntityId(character)
     local key = clientKey(client)
-    local state = key ~= nil and savedLooksByClientKey[key] or savedLooksByCharacterId[characterId]
+    -- Prefer the identifiers the client attached to the request. This lets a look
+    -- apply across campaigns and servers even when the server no longer holds (or
+    -- never held) this client's saved state. Fall back to stored state for older
+    -- clients that send no payload.
+    local payloadState = readApplyLookPayload(message, character)
+    local state = payloadState or (key ~= nil and savedLooksByClientKey[key] or savedLooksByCharacterId[characterId])
     if state == nil then return end
     -- Explicit apply requests restore saved looks from any campaign session;
     -- the session gate only limits server-initiated auto-resurrection.
@@ -845,7 +883,9 @@ Networking.Receive(NET_APPLY_REQUEST, function(_, client)
     local characterState = cloneStateForCharacter(state, character)
     markActiveClientCharacter(key, characterId, characterState, true, nil)
     if key ~= nil then
-        savedLooksByClientKey[key] = state
+        -- Persist the resolved identifiers so later round-start auto-syncs can
+        -- rebuild the look without another client round-trip.
+        savedLooksByClientKey[key] = cloneStateForCharacter(state, character)
         savedLookSessionByClientKey[key] = currentServerSessionKey()
         legacySavedLookByClientKey[key] = false
         activeLooksByClientKey[key] = true
