@@ -1,12 +1,14 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 
-<contentpackage name="Wardrobe(beta)" modversion="0.4.31" corepackage="False" steamworkshopid="3737903001" gameversion="1.12.7.0">
+<contentpackage name="Wardrobe(beta)" modversion="0.5.0" corepackage="False" steamworkshopid="3737903001" gameversion="1.13.4.0">
 
   <Text file="%ModDir%/Texts.xml" />
   <Item file="%ModDir%/MultiplayerSyncMarker.xml" />
   <Other file="%ModDir%/ModConfig.xml" />
+  <Other file="%ModDir%/Lua/WardrobeCore.lua" />
   <Other file="%ModDir%/Lua/WardrobeSwitcher.lua" />
   <Other file="%ModDir%/Lua/WardrobeSwitcherServer.lua" />
+  <Other file="%ModDir%/CSharp/Client/WardrobeRendering.cs" />
   <Other file="%ModDir%/CSharp/Client/WardrobeVisualOverridePlugin.cs" />
   <Other file="%ModDir%/CSharp/Client/WardrobeFunctionalFashionFilters.cs" />
 </contentpackage>

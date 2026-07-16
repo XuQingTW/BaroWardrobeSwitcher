@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <OutputPath>../../artifacts/tools/LuaSyntaxCheck/</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="MoonSharp.Interpreter">
+      <HintPath>$(BarotraumaInstallDir)/MoonSharp.Interpreter.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="ValidateMoonSharpReference" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(BarotraumaInstallDir)' == ''" Text="Set BarotraumaInstallDir to the Barotrauma installation." />
+    <Error Condition="!Exists('$(BarotraumaInstallDir)/MoonSharp.Interpreter.dll')" Text="MoonSharp.Interpreter.dll was not found in BarotraumaInstallDir." />
+  </Target>
+</Project>

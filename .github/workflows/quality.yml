@@ -1,0 +1,30 @@
+name: quality
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  source-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify metadata and source-only package
+        run: python scripts/verify_package.py
+      - name: Run renderer crash characterization contracts
+        shell: pwsh
+        run: ./scripts/Test-RendererContracts.ps1
+      - name: Install Lua parser
+        run: sudo apt-get update && sudo apt-get install --yes lua5.4
+      - name: Parse all Lua sources
+        run: find Lua -type f -name '*.lua' -print0 | xargs -0 -n1 luac -p
+      - name: Run pure Lua contract tests
+        run: |
+          if [ -d Lua/Tests ]; then
+            for test_file in Lua/Tests/*Tests.lua; do
+              [ -f "$test_file" ] && lua "$test_file"
+            done
+          fi

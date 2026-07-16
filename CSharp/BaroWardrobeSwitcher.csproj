@@ -3,58 +3,61 @@
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>BaroWardrobeSwitcher</AssemblyName>
     <RootNamespace>BaroWardrobeSwitcher</RootNamespace>
+    <Version>0.5.0</Version>
+    <AssemblyVersion>0.5.0.0</AssemblyVersion>
+    <FileVersion>0.5.0.0</FileVersion>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
-    <OutputPath>../bin/Client/Windows/</OutputPath>
+    <OutputPath>../artifacts/bin/$(Configuration)/</OutputPath>
   </PropertyGroup>
 
   <PropertyGroup>
-    <BarotraumaInstallDir Condition="'$(BarotraumaInstallDir)' == '' And Exists('C:\Program Files (x86)\Steam\steamapps\common\Barotrauma\Barotrauma.dll')">C:\Program Files (x86)\Steam\steamapps\common\Barotrauma</BarotraumaInstallDir>
-    <LuaCsPublicizedDir Condition="'$(LuaCsPublicizedDir)' == '' And Exists('$(BarotraumaInstallDir)\LocalMods\LuaCsForBarotrauma\Publicized\Barotrauma.dll')">$(BarotraumaInstallDir)\LocalMods\LuaCsForBarotrauma\Publicized</LuaCsPublicizedDir>
-    <LuaCsPublicizedDir Condition="'$(LuaCsPublicizedDir)' == '' And Exists('$(BarotraumaInstallDir)\Publicized\Barotrauma.dll')">$(BarotraumaInstallDir)\Publicized</LuaCsPublicizedDir>
+    <MonoGameAssemblyPath Condition="'$(MonoGameAssemblyPath)' == '' And Exists('$(BarotraumaInstallDir)/MonoGame.Framework.Windows.NetStandard.dll')">$(BarotraumaInstallDir)/MonoGame.Framework.Windows.NetStandard.dll</MonoGameAssemblyPath>
+    <MonoGameAssemblyPath Condition="'$(MonoGameAssemblyPath)' == '' And Exists('$(BarotraumaInstallDir)/MonoGame.Framework.Linux.NetStandard.dll')">$(BarotraumaInstallDir)/MonoGame.Framework.Linux.NetStandard.dll</MonoGameAssemblyPath>
+    <MonoGameAssemblyPath Condition="'$(MonoGameAssemblyPath)' == '' And Exists('$(BarotraumaInstallDir)/MonoGame.Framework.dll')">$(BarotraumaInstallDir)/MonoGame.Framework.dll</MonoGameAssemblyPath>
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="obj/**" />
-    <Compile Remove="../bin.disabled-precompiled-20260603/**" />
-  </ItemGroup>
-
-  <ItemGroup>
     <Reference Include="Barotrauma">
-      <HintPath Condition="'$(LuaCsPublicizedDir)' != ''">$(LuaCsPublicizedDir)\Barotrauma.dll</HintPath>
-      <HintPath Condition="'$(LuaCsPublicizedDir)' == ''">../../LuaCsForBarotrauma/Publicized/Barotrauma.dll</HintPath>
+      <HintPath>$(LuaCsPublicizedDir)/Barotrauma.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="BarotraumaCore">
-      <HintPath Condition="'$(LuaCsPublicizedDir)' != ''">$(LuaCsPublicizedDir)\BarotraumaCore.dll</HintPath>
-      <HintPath Condition="'$(LuaCsPublicizedDir)' == ''">../../LuaCsForBarotrauma/Publicized/BarotraumaCore.dll</HintPath>
+      <HintPath>$(LuaCsPublicizedDir)/BarotraumaCore.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath Condition="'$(BarotraumaInstallDir)' != ''">$(BarotraumaInstallDir)\0Harmony.dll</HintPath>
-      <HintPath Condition="'$(BarotraumaInstallDir)' == ''">../../../0Harmony.dll</HintPath>
+      <HintPath>$(BarotraumaInstallDir)/0Harmony.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="MoonSharp.Interpreter">
-      <HintPath Condition="'$(BarotraumaInstallDir)' != ''">$(BarotraumaInstallDir)\MoonSharp.Interpreter.dll</HintPath>
-      <HintPath Condition="'$(BarotraumaInstallDir)' == ''">../../../MoonSharp.Interpreter.dll</HintPath>
+      <HintPath>$(BarotraumaInstallDir)/MoonSharp.Interpreter.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="XNATypes">
-      <HintPath Condition="'$(BarotraumaInstallDir)' != ''">$(BarotraumaInstallDir)\XNATypes.dll</HintPath>
-      <HintPath Condition="'$(BarotraumaInstallDir)' == ''">../../../XNATypes.dll</HintPath>
+      <HintPath>$(BarotraumaInstallDir)/XNATypes.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="MonoGame.Framework.Windows.NetStandard" Condition="'$(BarotraumaInstallDir)' != '' And Exists('$(BarotraumaInstallDir)\MonoGame.Framework.Windows.NetStandard.dll')">
-      <HintPath>$(BarotraumaInstallDir)\MonoGame.Framework.Windows.NetStandard.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="MonoGame.Framework.Windows.NetStandard" Condition="'$(BarotraumaInstallDir)' != '' And Exists('$(BarotraumaInstallDir)/MonoGame.Framework.Windows.NetStandard.dll')">
-      <HintPath>$(BarotraumaInstallDir)/MonoGame.Framework.Windows.NetStandard.dll</HintPath>
+    <Reference Include="MonoGame.Framework">
+      <HintPath>$(MonoGameAssemblyPath)</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
+
+  <Target Name="ValidateBarotraumaReferences" BeforeTargets="ResolveReferences">
+    <Error Condition="'$(BarotraumaInstallDir)' == ''" Text="Set BarotraumaInstallDir to a Barotrauma 1.13.4.0 installation." />
+    <Error Condition="'$(LuaCsPublicizedDir)' == ''" Text="Set LuaCsPublicizedDir to the LuaCs Publicized assembly directory." />
+    <Error Condition="!Exists('$(LuaCsPublicizedDir)/Barotrauma.dll')" Text="Barotrauma.dll was not found in LuaCsPublicizedDir." />
+    <Error Condition="!Exists('$(LuaCsPublicizedDir)/BarotraumaCore.dll')" Text="BarotraumaCore.dll was not found in LuaCsPublicizedDir." />
+    <Error Condition="!Exists('$(BarotraumaInstallDir)/0Harmony.dll')" Text="0Harmony.dll was not found in BarotraumaInstallDir." />
+    <Error Condition="!Exists('$(BarotraumaInstallDir)/MoonSharp.Interpreter.dll')" Text="MoonSharp.Interpreter.dll was not found in BarotraumaInstallDir." />
+    <Error Condition="!Exists('$(BarotraumaInstallDir)/XNATypes.dll')" Text="XNATypes.dll was not found in BarotraumaInstallDir." />
+    <Error Condition="'$(MonoGameAssemblyPath)' == '' Or !Exists('$(MonoGameAssemblyPath)')" Text="Set MonoGameAssemblyPath when the platform-specific MonoGame assembly cannot be detected." />
+  </Target>
 </Project>

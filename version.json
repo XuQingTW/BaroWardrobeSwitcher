@@ -1,0 +1,10 @@
+{
+  "modVersion": "0.5.0",
+  "protocolVersion": 2,
+  "persistenceVersion": 2,
+  "barotraumaGameVersion": "1.13.4.0",
+  "declaredGameVersion": "1.13.4.0",
+  "compatibilityStatus": "verified",
+  "barotraumaSourceCommit": "a589d2cee3ff2214c99a7ea30c46f16a5406a01d",
+  "luaCsCommit": "0d380afcd1feeb842c0c86290d46bcaf198cd5e4"
+}

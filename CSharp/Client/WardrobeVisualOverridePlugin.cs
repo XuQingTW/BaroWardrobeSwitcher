@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Barotrauma;
 using Barotrauma.Items.Components;
 using Barotrauma.LuaCs;
@@ -44,10 +46,14 @@ namespace BaroWardrobeSwitcher
 
     public static class WardrobePersistence
     {
-        private const int PersistenceVersion = 1;
+        public const string Version = "0.5.0";
+        private const int PersistenceVersion = 2;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
-        private const string ServerLooksFileName = "ServerLooks.json";
+        internal const string TestStorageRootAppContextKey =
+            "BaroWardrobeSwitcher.PersistenceProbe.StorageRoot";
+        internal const string TestFailurePointAppContextKey =
+            "BaroWardrobeSwitcher.PersistenceProbe.FailurePoint";
         private static readonly string[] SlotKeys =
         {
             "Head",
@@ -59,30 +65,38 @@ namespace BaroWardrobeSwitcher
         };
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
-            WriteIndented = true
+            WriteIndented = true,
+            PropertyNameCaseInsensitive = true
         };
+        private static string lastError = string.Empty;
+
+        public static string GetVersion()
+        {
+            return Version;
+        }
+
+        public static string GetLastError()
+        {
+            return lastError ?? string.Empty;
+        }
 
         public static string GetStorageDirectory()
         {
-            try
+            string testStorageRoot = GetPersistenceProbeStorageRoot();
+            if (testStorageRoot != null) { return testStorageRoot; }
+
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localAppData))
             {
-                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                if (string.IsNullOrWhiteSpace(localAppData))
-                {
-                    localAppData = AppContext.BaseDirectory;
-                }
-                return Path.Combine(
-                    localAppData,
-                    "Daedalic Entertainment GmbH",
-                    "Barotrauma",
-                    "ModData",
-                    ModFolderName);
+                throw new InvalidOperationException(
+                    "LocalApplicationData is unavailable; client wardrobe persistence is disabled for this session.");
             }
-            catch (Exception ex)
-            {
-                LogPersistenceError("Failed to resolve storage directory", ex);
-                return Path.Combine(AppContext.BaseDirectory, "ModData", ModFolderName);
-            }
+            return Path.Combine(
+                localAppData,
+                "Daedalic Entertainment GmbH",
+                "Barotrauma",
+                "ModData",
+                ModFolderName);
         }
 
         public static string GetClientLookPath()
@@ -90,23 +104,36 @@ namespace BaroWardrobeSwitcher
             return Path.Combine(GetStorageDirectory(), ClientLookFileName);
         }
 
-        public static string GetServerLooksPath()
-        {
-            return Path.Combine(GetStorageDirectory(), ServerLooksFileName);
-        }
-
         public static string LoadClientLook()
         {
+            ClearLastError();
             try
             {
                 string path = GetClientLookPath();
                 if (!File.Exists(path)) { return string.Empty; }
-                ClientLookDocument document = ReadJson<ClientLookDocument>(path);
+                ClientLookDocument document = ReadClientDocument(path, out bool migrated);
+                if (migrated)
+                {
+                    string backupPath = path + ".v1.bak";
+                    File.Copy(path, backupPath, overwrite: true);
+                    WriteJson(path, document);
+                    LogPersistenceInfo("Migrated client wardrobe persistence to schema v2.");
+                }
                 if (document == null || !HasAnySlot(document.Slots) && !document.Captured)
                 {
                     return string.Empty;
                 }
                 return EncodeClientLook(document);
+            }
+            catch (JsonException ex)
+            {
+                QuarantineCorruptFile(GetClientLookPath(), ex);
+                return string.Empty;
+            }
+            catch (InvalidDataException ex)
+            {
+                QuarantineCorruptFile(GetClientLookPath(), ex);
+                return string.Empty;
             }
             catch (Exception ex)
             {
@@ -117,6 +144,7 @@ namespace BaroWardrobeSwitcher
 
         public static bool ClientLookFileExists()
         {
+            ClearLastError();
             try
             {
                 return File.Exists(GetClientLookPath());
@@ -130,6 +158,7 @@ namespace BaroWardrobeSwitcher
 
         public static bool SaveClientLook(string encodedLook)
         {
+            ClearLastError();
             try
             {
                 ClientLookDocument document = ParseClientLook(encodedLook);
@@ -137,6 +166,7 @@ namespace BaroWardrobeSwitcher
                 {
                     return ClearClientLook();
                 }
+                ValidateDocument(document);
                 WriteJson(GetClientLookPath(), document);
                 return true;
             }
@@ -147,8 +177,68 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        public static bool SaveMigratedClientLook(string encodedLook, string legacyPath)
+        {
+            if (!SaveClientLook(encodedLook)) { return false; }
+            try
+            {
+                if (string.IsNullOrWhiteSpace(legacyPath) || !File.Exists(legacyPath)) { return true; }
+                if (!string.Equals(
+                        Path.GetFileName(legacyPath),
+                        "PersistentClientLook.txt",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("Refusing to archive an unexpected legacy persistence file.");
+                }
+
+                string backupPath = legacyPath + ".v1.bak";
+                File.Copy(legacyPath, backupPath, overwrite: true);
+                File.Delete(legacyPath);
+                LogPersistenceInfo(
+                    "Migrated PersistentClientLook.txt to schema v2 and retained " +
+                    Path.GetFileName(backupPath) + ".");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Saved schema v2 but failed to archive legacy client look", ex);
+                return false;
+            }
+        }
+
+        public static bool QuarantineLegacyClientLook(string legacyPath)
+        {
+            ClearLastError();
+            try
+            {
+                if (string.IsNullOrWhiteSpace(legacyPath) || !File.Exists(legacyPath)) { return true; }
+                if (!string.Equals(
+                        Path.GetFileName(legacyPath),
+                        "PersistentClientLook.txt",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("Refusing to quarantine an unexpected legacy persistence file.");
+                }
+
+                string quarantinePath = legacyPath + "." +
+                                        DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ") +
+                                        ".corrupt";
+                File.Move(legacyPath, quarantinePath);
+                LogPersistenceInfo(
+                    "Quarantined unreadable legacy client wardrobe persistence as " +
+                    Path.GetFileName(quarantinePath) + ".");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to quarantine legacy client look", ex);
+                return false;
+            }
+        }
+
         public static bool ClearClientLook()
         {
+            ClearLastError();
             try
             {
                 WriteJson(
@@ -157,11 +247,8 @@ namespace BaroWardrobeSwitcher
                     {
                         Version = PersistenceVersion,
                         Captured = false,
-                        Active = false,
-                        AutoApply = false,
                         HideHair = false,
-                        SessionKey = null,
-                        Slots = new Dictionary<string, WardrobeSlotDocument>()
+                        Slots = CreateEmptySlots()
                     });
                 return true;
             }
@@ -172,52 +259,32 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        public static string LoadServerLooks()
-        {
-            try
-            {
-                string path = GetServerLooksPath();
-                if (!File.Exists(path)) { return string.Empty; }
-                ServerLooksDocument document = ReadJson<ServerLooksDocument>(path);
-                if (document?.Looks == null || document.Looks.Count == 0)
-                {
-                    return string.Empty;
-                }
-
-                List<string> lines = new List<string>();
-                foreach (KeyValuePair<string, ServerLookDocument> pair in document.Looks)
-                {
-                    if (string.IsNullOrWhiteSpace(pair.Key) || pair.Value == null) { continue; }
-                    lines.Add(EncodeServerLook(pair.Key, pair.Value));
-                }
-                return string.Join("\n", lines);
-            }
-            catch (Exception ex)
-            {
-                LogPersistenceError("Failed to load server looks", ex);
-                return string.Empty;
-            }
-        }
-
-        public static bool SaveServerLooks(string encodedLooks)
-        {
-            try
-            {
-                ServerLooksDocument document = ParseServerLooks(encodedLooks);
-                WriteJson(GetServerLooksPath(), document);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                LogPersistenceError("Failed to save server looks", ex);
-                return false;
-            }
-        }
-
-        private static T ReadJson<T>(string path)
+        private static ClientLookDocument ReadClientDocument(string path, out bool migrated)
         {
             string json = File.ReadAllText(path, Encoding.UTF8);
-            return JsonSerializer.Deserialize<T>(json, JsonOptions);
+            using JsonDocument parsed = JsonDocument.Parse(json);
+            JsonElement root = parsed.RootElement;
+            int version = ReadSchemaVersion(root);
+            if (version == PersistenceVersion)
+            {
+                if (!IsCanonicalDocument(root))
+                {
+                    throw new InvalidDataException(
+                        "Schema v2 client wardrobe persistence is not canonical.");
+                }
+                migrated = false;
+                ClientLookDocument current = JsonSerializer.Deserialize<ClientLookDocument>(json, JsonOptions);
+                ValidateDocument(current);
+                return current;
+            }
+            if (version == 0 || version == 1)
+            {
+                ClientLookDocument migratedDocument = MigrateLegacyDocument(root);
+                ValidateDocument(migratedDocument);
+                migrated = true;
+                return migratedDocument;
+            }
+            throw new InvalidDataException("Unsupported client wardrobe persistence schema: " + version);
         }
 
         private static void WriteJson<T>(string path, T value)
@@ -228,16 +295,45 @@ namespace BaroWardrobeSwitcher
                 Directory.CreateDirectory(directory);
             }
 
-            string tempPath = path + ".tmp";
+            string tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string backupPath = path + ".bak";
             string json = JsonSerializer.Serialize(value, JsonOptions);
-            File.WriteAllText(tempPath, json, Encoding.UTF8);
-            if (File.Exists(path))
+            try
             {
-                File.Replace(tempPath, path, null);
+                using (FileStream stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (StreamWriter writer = new StreamWriter(stream, new UTF8Encoding(false)))
+                {
+                    writer.Write(json);
+                    writer.Flush();
+                    stream.Flush(true);
+                }
+                ThrowPersistenceProbeFailure("BeforeReplace");
+                if (File.Exists(path))
+                {
+                    try
+                    {
+                        File.Replace(tempPath, path, backupPath, ignoreMetadataErrors: true);
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        ReplaceWithPortableFallback(tempPath, path, backupPath);
+                    }
+                    catch (IOException)
+                    {
+                        ReplaceWithPortableFallback(tempPath, path, backupPath);
+                    }
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
             }
-            else
+            finally
             {
-                File.Move(tempPath, path);
+                if (File.Exists(tempPath))
+                {
+                    try { File.Delete(tempPath); } catch { }
+                }
             }
         }
 
@@ -248,36 +344,9 @@ namespace BaroWardrobeSwitcher
             {
                 Version = PersistenceVersion,
                 Captured = GetBoolean(parts, "captured"),
-                Active = GetBoolean(parts, "active"),
-                AutoApply = GetBoolean(parts, "auto"),
                 HideHair = GetBoolean(parts, "hidehair"),
-                SessionKey = parts.TryGetValue("session", out string encodedSessionKey) ? Unescape(encodedSessionKey) : null,
                 Slots = ParseSlots(parts)
             };
-            return document;
-        }
-
-        private static ServerLooksDocument ParseServerLooks(string encodedLooks)
-        {
-            ServerLooksDocument document = new ServerLooksDocument
-            {
-                Version = PersistenceVersion,
-                Looks = new Dictionary<string, ServerLookDocument>()
-            };
-
-            foreach (string rawLine in SplitLines(encodedLooks))
-            {
-                Dictionary<string, string> parts = ParseParts(rawLine);
-                if (!parts.TryGetValue("key", out string encodedKey)) { continue; }
-                string key = Unescape(encodedKey);
-                if (string.IsNullOrWhiteSpace(key)) { continue; }
-                document.Looks[key] = new ServerLookDocument
-                {
-                    Active = GetBoolean(parts, "active"),
-                    Slots = ParseSlots(parts)
-                };
-            }
-
             return document;
         }
 
@@ -286,56 +355,38 @@ namespace BaroWardrobeSwitcher
             List<string> parts = new List<string>
             {
                 "captured=" + document.Captured.ToString().ToLowerInvariant(),
-                "active=" + document.Active.ToString().ToLowerInvariant(),
-                "auto=" + document.AutoApply.ToString().ToLowerInvariant(),
+                // Activation is runtime state, not persistence. A successfully loaded
+                // captured look is returned to Lua as auto-apply intent.
+                "active=false",
+                "auto=" + document.Captured.ToString().ToLowerInvariant(),
                 "hidehair=" + document.HideHair.ToString().ToLowerInvariant()
             };
-            if (!string.IsNullOrWhiteSpace(document.SessionKey))
-            {
-                parts.Add("session=" + Escape(document.SessionKey));
-            }
             AppendEncodedSlots(parts, document.Slots);
             return string.Join("|", parts);
         }
 
-        private static string EncodeServerLook(string key, ServerLookDocument document)
-        {
-            List<string> parts = new List<string>
-            {
-                "key=" + Escape(key),
-                "active=" + document.Active.ToString().ToLowerInvariant()
-            };
-            AppendEncodedSlots(parts, document.Slots);
-            return string.Join("|", parts);
-        }
-
-        private static void AppendEncodedSlots(List<string> parts, Dictionary<string, WardrobeSlotDocument> slots)
+        private static void AppendEncodedSlots(List<string> parts, Dictionary<string, string> slots)
         {
             if (parts == null || slots == null) { return; }
             foreach (string slotKey in SlotKeys)
             {
-                if (!slots.TryGetValue(slotKey, out WardrobeSlotDocument slot) || slot == null) { continue; }
-                if (string.IsNullOrWhiteSpace(slot.Identifier)) { continue; }
-                parts.Add(slotKey + "=" + Escape(slot.Identifier) + "," + Escape(slot.Name));
+                if (!slots.TryGetValue(slotKey, out string identifier) || string.IsNullOrWhiteSpace(identifier)) { continue; }
+                // Display names and runtime item ids are intentionally not persisted in
+                // schema v2. The Lua facade still receives the legacy comma separator.
+                parts.Add(slotKey + "=" + Escape(identifier) + ",");
             }
         }
 
-        private static Dictionary<string, WardrobeSlotDocument> ParseSlots(Dictionary<string, string> parts)
+        private static Dictionary<string, string> ParseSlots(Dictionary<string, string> parts)
         {
-            Dictionary<string, WardrobeSlotDocument> slots = new Dictionary<string, WardrobeSlotDocument>();
+            Dictionary<string, string> slots = CreateEmptySlots();
             foreach (string slotKey in SlotKeys)
             {
                 if (!parts.TryGetValue(slotKey, out string encodedValue)) { continue; }
                 int commaIndex = encodedValue.IndexOf(',');
-                if (commaIndex < 0) { continue; }
-                string identifier = Unescape(encodedValue.Substring(0, commaIndex));
+                string identifier = Unescape(commaIndex < 0 ? encodedValue : encodedValue.Substring(0, commaIndex));
                 if (string.IsNullOrWhiteSpace(identifier)) { continue; }
-                string name = Unescape(encodedValue.Substring(commaIndex + 1));
-                slots[slotKey] = new WardrobeSlotDocument
-                {
-                    Identifier = identifier,
-                    Name = name ?? string.Empty
-                };
+                slots[slotKey] = identifier;
             }
             return slots;
         }
@@ -355,19 +406,6 @@ namespace BaroWardrobeSwitcher
             return parts;
         }
 
-        private static IEnumerable<string> SplitLines(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text)) { yield break; }
-            string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
-            foreach (string line in normalized.Split('\n'))
-            {
-                if (!string.IsNullOrWhiteSpace(line))
-                {
-                    yield return line;
-                }
-            }
-        }
-
         private static bool GetBoolean(Dictionary<string, string> parts, string key)
         {
             return parts != null &&
@@ -375,10 +413,257 @@ namespace BaroWardrobeSwitcher
                    string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool HasAnySlot(Dictionary<string, WardrobeSlotDocument> slots)
+        private static bool HasAnySlot(Dictionary<string, string> slots)
         {
             return slots != null &&
-                   slots.Values.Any(slot => slot != null && !string.IsNullOrWhiteSpace(slot.Identifier));
+                   slots.Values.Any(identifier => !string.IsNullOrWhiteSpace(identifier));
+        }
+
+        private static int ReadSchemaVersion(JsonElement root)
+        {
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("Client wardrobe persistence root is not an object.");
+            }
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                if (!string.Equals(property.Name, "schemaVersion", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(property.Name, "version", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (property.Value.ValueKind == JsonValueKind.Number && property.Value.TryGetInt32(out int version))
+                {
+                    return version;
+                }
+                throw new InvalidDataException("Client wardrobe persistence schema version is invalid.");
+            }
+            return 0;
+        }
+
+        private static bool IsCanonicalDocument(JsonElement root)
+        {
+            if (root.ValueKind != JsonValueKind.Object) { return false; }
+            HashSet<string> expectedProperties = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "schemaVersion",
+                "captured",
+                "hideHair",
+                "slots"
+            };
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                if (!expectedProperties.Remove(property.Name)) { return false; }
+            }
+            if (expectedProperties.Count != 0 ||
+                !root.TryGetProperty("schemaVersion", out JsonElement version) ||
+                version.ValueKind != JsonValueKind.Number ||
+                !version.TryGetInt32(out int schemaVersion) ||
+                schemaVersion != PersistenceVersion ||
+                !root.TryGetProperty("captured", out JsonElement captured) ||
+                !IsBooleanKind(captured) ||
+                !root.TryGetProperty("hideHair", out JsonElement hideHair) ||
+                !IsBooleanKind(hideHair) ||
+                !root.TryGetProperty("slots", out JsonElement slots) ||
+                slots.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            HashSet<string> expectedSlots = new HashSet<string>(SlotKeys, StringComparer.Ordinal);
+            foreach (JsonProperty slot in slots.EnumerateObject())
+            {
+                if (!expectedSlots.Remove(slot.Name) ||
+                    slot.Value.ValueKind != JsonValueKind.String &&
+                    slot.Value.ValueKind != JsonValueKind.Null)
+                {
+                    return false;
+                }
+            }
+            return expectedSlots.Count == 0;
+        }
+
+        private static ClientLookDocument MigrateLegacyDocument(JsonElement root)
+        {
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("Legacy client wardrobe document is empty.");
+            }
+
+            Dictionary<string, string> slots = CreateEmptySlots();
+            if (TryGetPropertyIgnoreCase(root, "slots", out JsonElement legacySlots))
+            {
+                if (legacySlots.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidDataException("Legacy client wardrobe slots are invalid.");
+                }
+                foreach (JsonProperty slot in legacySlots.EnumerateObject())
+                {
+                    string canonicalKey = SlotKeys.FirstOrDefault(
+                        key => string.Equals(key, slot.Name, StringComparison.OrdinalIgnoreCase));
+                    if (canonicalKey == null) { continue; }
+                    string identifier = ReadLegacyIdentifier(slot.Value);
+                    if (!string.IsNullOrWhiteSpace(identifier)) { slots[canonicalKey] = identifier; }
+                }
+            }
+
+            bool captured = ReadBoolean(root, "captured") ||
+                            ReadBoolean(root, "active") ||
+                            ReadBoolean(root, "autoApply") ||
+                            ReadBoolean(root, "auto") ||
+                            HasAnySlot(slots);
+            return new ClientLookDocument
+            {
+                Version = PersistenceVersion,
+                Captured = captured,
+                HideHair = ReadBoolean(root, "hideHair"),
+                Slots = slots
+            };
+        }
+
+        private static string ReadLegacyIdentifier(JsonElement value)
+        {
+            if (value.ValueKind == JsonValueKind.Null) { return null; }
+            if (value.ValueKind == JsonValueKind.String) { return value.GetString(); }
+            if (value.ValueKind == JsonValueKind.Object &&
+                TryGetPropertyIgnoreCase(value, "identifier", out JsonElement identifier) &&
+                (identifier.ValueKind == JsonValueKind.String || identifier.ValueKind == JsonValueKind.Null))
+            {
+                return identifier.ValueKind == JsonValueKind.Null ? null : identifier.GetString();
+            }
+            throw new InvalidDataException("Legacy client wardrobe slot identifier is invalid.");
+        }
+
+        private static bool ReadBoolean(JsonElement root, string name)
+        {
+            if (!TryGetPropertyIgnoreCase(root, name, out JsonElement value)) { return false; }
+            if (value.ValueKind == JsonValueKind.True) { return true; }
+            if (value.ValueKind == JsonValueKind.False || value.ValueKind == JsonValueKind.Null) { return false; }
+            return value.ValueKind == JsonValueKind.String &&
+                   bool.TryParse(value.GetString(), out bool parsed) &&
+                   parsed;
+        }
+
+        private static bool TryGetPropertyIgnoreCase(JsonElement root, string name, out JsonElement value)
+        {
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = property.Value;
+                    return true;
+                }
+            }
+            value = default;
+            return false;
+        }
+
+        private static bool IsBooleanKind(JsonElement value)
+        {
+            return value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False;
+        }
+
+        private static Dictionary<string, string> CreateEmptySlots()
+        {
+            Dictionary<string, string> slots = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (string key in SlotKeys)
+            {
+                slots[key] = null;
+            }
+            return slots;
+        }
+
+        private static void ValidateDocument(ClientLookDocument document)
+        {
+            if (document == null) { throw new InvalidDataException("Client wardrobe document is empty."); }
+            if (document.Version != PersistenceVersion)
+            {
+                throw new InvalidDataException("Client wardrobe schema mismatch: " + document.Version);
+            }
+            document.Slots ??= CreateEmptySlots();
+            foreach (string key in document.Slots.Keys.ToList())
+            {
+                if (!SlotKeys.Contains(key, StringComparer.Ordinal))
+                {
+                    document.Slots.Remove(key);
+                    continue;
+                }
+                string identifier = document.Slots[key]?.Trim();
+                if (string.IsNullOrWhiteSpace(identifier))
+                {
+                    document.Slots[key] = null;
+                    continue;
+                }
+                if (Encoding.UTF8.GetByteCount(identifier) > 256)
+                {
+                    throw new InvalidDataException("Wardrobe identifier exceeds 256 UTF-8 bytes for slot " + key + ".");
+                }
+                document.Slots[key] = identifier;
+            }
+            foreach (string key in SlotKeys)
+            {
+                if (!document.Slots.ContainsKey(key)) { document.Slots[key] = null; }
+            }
+        }
+
+        private static string GetPersistenceProbeStorageRoot()
+        {
+            object configuredRoot = AppContext.GetData(TestStorageRootAppContextKey);
+            if (configuredRoot == null) { return null; }
+            EnsurePersistenceProbeHost();
+            if (!(configuredRoot is string root) || string.IsNullOrWhiteSpace(root))
+            {
+                throw new InvalidOperationException("Persistence probe storage root is invalid.");
+            }
+            return Path.GetFullPath(root);
+        }
+
+        private static void ThrowPersistenceProbeFailure(string point)
+        {
+            object configuredPoint = AppContext.GetData(TestFailurePointAppContextKey);
+            if (configuredPoint == null) { return; }
+            EnsurePersistenceProbeHost();
+            if (configuredPoint is string failurePoint &&
+                string.Equals(failurePoint, point, StringComparison.Ordinal))
+            {
+                throw new IOException("Injected persistence probe failure at " + point + ".");
+            }
+        }
+
+        private static void EnsurePersistenceProbeHost()
+        {
+            string entryAssemblyName = Assembly.GetEntryAssembly()?.GetName().Name;
+            if (!string.Equals(entryAssemblyName, "PersistenceProbe", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Persistence test seams are disabled outside the PersistenceProbe executable.");
+            }
+        }
+
+        private static void ReplaceWithPortableFallback(string tempPath, string path, string backupPath)
+        {
+            if (File.Exists(path))
+            {
+                File.Copy(path, backupPath, overwrite: true);
+            }
+            File.Move(tempPath, path, overwrite: true);
+        }
+
+        private static void QuarantineCorruptFile(string path, Exception reason)
+        {
+            try
+            {
+                if (!File.Exists(path)) { return; }
+                string quarantinePath = path + "." + DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ") + ".corrupt";
+                File.Move(path, quarantinePath);
+                LogPersistenceInfo(
+                    "Quarantined unreadable client wardrobe persistence as " +
+                    Path.GetFileName(quarantinePath) + ": " + reason.GetType().Name + ": " + reason.Message);
+            }
+            catch (Exception ex)
+            {
+                LogPersistenceError("Failed to quarantine unreadable client wardrobe persistence", ex);
+            }
         }
 
         private static string Escape(string value)
@@ -405,92 +690,75 @@ namespace BaroWardrobeSwitcher
 
         private static void LogPersistenceError(string message, Exception ex)
         {
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] " + message + ": " + ex.GetType().Name + ": " + ex.Message);
+            lastError = message + ": " + ex.GetType().Name + ": " + ex.Message;
+            LogPersistenceInfo(lastError);
         }
 
-        private sealed class WardrobeSlotDocument
+        private static void ClearLastError()
         {
-            public string Identifier { get; set; }
-            public string Name { get; set; }
+            lastError = string.Empty;
+        }
+
+        private static void LogPersistenceInfo(string message)
+        {
+            try
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] " + message);
+            }
+            catch
+            {
+                // Persistence must not depend on the game logger being initialized. This
+                // also keeps the isolated PersistenceProbe free of game startup state.
+            }
         }
 
         private sealed class ClientLookDocument
         {
+            [JsonPropertyName("schemaVersion")]
             public int Version { get; set; }
+            [JsonPropertyName("captured")]
             public bool Captured { get; set; }
-            public bool Active { get; set; }
-            public bool AutoApply { get; set; }
+            [JsonPropertyName("hideHair")]
             public bool HideHair { get; set; }
-            public string SessionKey { get; set; }
-            public Dictionary<string, WardrobeSlotDocument> Slots { get; set; }
-        }
-
-        private sealed class ServerLookDocument
-        {
-            public bool Active { get; set; }
-            public Dictionary<string, WardrobeSlotDocument> Slots { get; set; }
-        }
-
-        private sealed class ServerLooksDocument
-        {
-            public int Version { get; set; }
-            public Dictionary<string, ServerLookDocument> Looks { get; set; }
+            [JsonPropertyName("slots")]
+            public Dictionary<string, string> Slots { get; set; }
         }
     }
 
     public static class VisualOverride
     {
 
-        public const string Version = "0.3.22";
+        public const string Version = "0.5.0";
 
-        private static readonly Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>> FashionSpritesByCharacter =
-            new Dictionary<Character, Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>>();
-        private static readonly Dictionary<Character, List<object>> FashionAnimationsByCharacter =
-            new Dictionary<Character, List<object>>();
-        private static readonly Dictionary<Character, List<FashionSoundEffect>> FashionSoundsByCharacter =
-            new Dictionary<Character, List<FashionSoundEffect>>();
-        private static readonly Dictionary<Character, List<FashionComponentSound>> FashionComponentSoundsByCharacter =
-            new Dictionary<Character, List<FashionComponentSound>>();
-        private static readonly Dictionary<Character, HashSet<StatusEffect>> SuppressedEquipmentSoundsByCharacter =
-            new Dictionary<Character, HashSet<StatusEffect>>();
-        private static readonly Dictionary<StatusEffect, Character> SuppressedEquipmentSoundOwners =
-            new Dictionary<StatusEffect, Character>();
-        private static readonly Dictionary<Character, HashSet<ItemComponent>> SuppressedEquipmentComponentSoundsByCharacter =
-            new Dictionary<Character, HashSet<ItemComponent>>();
-        private static readonly Dictionary<ItemComponent, Character> SuppressedEquipmentComponentSoundOwners =
-            new Dictionary<ItemComponent, Character>();
-        private static readonly Dictionary<Character, int> FashionSoundCursorByCharacter =
-            new Dictionary<Character, int>();
-        private static readonly Dictionary<Character, int> FashionComponentSoundCursorByCharacter =
-            new Dictionary<Character, int>();
-        private static readonly Dictionary<Character, HashSet<WearableType>> FashionHiddenWearableTypesByCharacter =
-            new Dictionary<Character, HashSet<WearableType>>();
-        private static readonly HashSet<Character> ForceHideHairCharacters = new HashSet<Character>();
-        private static readonly HashSet<Character> EmptyFashionCharacters = new HashSet<Character>();
-        private static readonly Dictionary<Character, HashSet<InvSlotType>> EmptyFashionSlotsByCharacter =
-            new Dictionary<Character, HashSet<InvSlotType>>();
-        private static readonly Dictionary<Character, HashSet<InvSlotType>> SavedFashionSlotsByCharacter =
-            new Dictionary<Character, HashSet<InvSlotType>>();
-        private static readonly HashSet<Character> ActiveCharacters = new HashSet<Character>();
-        private static readonly Dictionary<Character, Dictionary<WearableSprite, SpriteMaskState>> OriginalSpriteMasksByCharacter =
-            new Dictionary<Character, Dictionary<WearableSprite, SpriteMaskState>>();
-        private static readonly Dictionary<Limb, HashSet<WearableSprite>> DrawnFashionSpritesByLimb =
-            new Dictionary<Limb, HashSet<WearableSprite>>();
-        private static readonly Dictionary<Limb, List<WearableSprite>> InjectedFashionSpritesByLimb =
-            new Dictionary<Limb, List<WearableSprite>>();
-        private static readonly Dictionary<Limb, List<WearableSprite>> OriginalWearableOrderByLimb =
-            new Dictionary<Limb, List<WearableSprite>>();
+        public static string GetVersion()
+        {
+            return Version;
+        }
+
+        private static readonly Dictionary<Character, RenderSession> RenderSessions =
+            new Dictionary<Character, RenderSession>();
         private static readonly Dictionary<string, PatchState> PatchStates =
             new Dictionary<string, PatchState>();
         private static readonly MethodInfo OnWearablesChangedMethod = AccessTools.Method(typeof(Character), "OnWearablesChanged");
+        private static readonly MethodInfo LimbDrawMethod = AccessTools.Method(
+            typeof(Limb),
+            "Draw",
+            new[] { typeof(SpriteBatch), typeof(Camera), typeof(Color?), typeof(bool) });
         private static readonly MethodInfo DrawWearableMethod = AccessTools.Method(
             typeof(Limb),
             "DrawWearable",
             new[] { typeof(WearableSprite), typeof(float), typeof(SpriteBatch), typeof(Color), typeof(float), typeof(SpriteEffects) });
-        private static readonly MethodInfo TryLoadTemporaryAnimationMethod =
-            AccessTools.Method(typeof(AnimController), "TryLoadTemporaryAnimation");
-        private static readonly MethodInfo PlaySoundMethod =
-            AccessTools.Method(typeof(StatusEffect), "PlaySound");
+        private static readonly MethodInfo UpdateAnimationsMethod =
+            AccessTools.Method(typeof(AnimController), "UpdateAnimations", new[] { typeof(float) });
+        private static readonly Type AnimLoadInfoType =
+            typeof(StatusEffect).GetNestedType("AnimLoadInfo", BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly MethodInfo TryLoadTemporaryAnimationMethod = AnimLoadInfoType == null
+            ? null
+            : AccessTools.Method(typeof(AnimController), "TryLoadTemporaryAnimation", new[] { AnimLoadInfoType, typeof(bool) });
+        private static readonly MethodInfo PlaySoundMethod = AccessTools.Method(
+            typeof(StatusEffect),
+            "PlaySound",
+            new[] { typeof(Entity), typeof(Hull), typeof(Vector2) });
         private static readonly MethodInfo ItemComponentPlaySoundMethod =
             AccessTools.Method(typeof(ItemComponent), "PlaySound", new[] { typeof(ActionType), typeof(Character) });
         private static readonly FieldInfo AnimationsToTriggerField =
@@ -505,7 +773,6 @@ namespace BaroWardrobeSwitcher
             AccessTools.Field(typeof(StatusEffect), "loopSound");
         private static readonly FieldInfo ItemSoundLoopField =
             AccessTools.Field("Barotrauma.Items.Components.ItemSound:Loop");
-        private static readonly MethodInfo MemberwiseCloneMethod = AccessTools.Method(typeof(object), "MemberwiseClone");
         private static readonly PropertyInfo CharacterRemovedProperty = AccessTools.Property(typeof(Character), "Removed");
         private const float DrawDepthStep = 0.000001f;
         private const int DefaultFallbackDepthPadding = 8;
@@ -537,7 +804,6 @@ namespace BaroWardrobeSwitcher
         private static int drawOverrideHiddenSavedSlotCount;
         private static int drawOverrideHiddenAttachmentCount;
         private static int fallbackDrawnFashionSpriteCount;
-        private static int storedFashionDrawDepth;
 
         public static void ResetPatchStatus()
         {
@@ -567,11 +833,17 @@ namespace BaroWardrobeSwitcher
                 "Limb.DrawWearable",
                 DrawWearableMethod,
                 prefix: AccessTools.Method(typeof(LimbDrawWearablePatch), "Prefix"));
-            PatchLimbDrawTargets(harmony);
+            PatchTarget(
+                harmony,
+                "Limb.Draw",
+                LimbDrawMethod,
+                prefix: AccessTools.Method(typeof(LimbDrawPatch), "Prefix"),
+                postfix: AccessTools.Method(typeof(LimbDrawPatch), "Postfix"),
+                finalizer: AccessTools.Method(typeof(LimbDrawPatch), "Finalizer"));
             PatchTarget(
                 harmony,
                 "AnimController.UpdateAnimations",
-                AccessTools.Method(typeof(AnimController), "UpdateAnimations"),
+                UpdateAnimationsMethod,
                 postfix: AccessTools.Method(typeof(AnimControllerUpdateAnimationsPatch), "Postfix"),
                 required: false);
             PatchTarget(
@@ -600,6 +872,37 @@ namespace BaroWardrobeSwitcher
             return PatchStates.Values.Where(state => state.Required).All(state => state.Applied);
         }
 
+        public static bool HasCapability(string name)
+        {
+            if (PatchStates.Count == 0) { ResetPatchStatus(); }
+            switch ((name ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "renderer":
+                    return PatchApplied("Limb.Draw") &&
+                           PatchApplied("Limb.DrawWearable") &&
+                           LimbDrawMethod != null &&
+                           DrawWearableMethod != null;
+                case "animation":
+                    return PatchApplied("AnimController.UpdateAnimations") &&
+                           PatchApplied("AnimController.TryLoadTemporaryAnimation") &&
+                           UpdateAnimationsMethod != null &&
+                           TryLoadTemporaryAnimationMethod != null &&
+                           AnimationsToTriggerField != null;
+                case "statussound":
+                case "status-sound":
+                    return PatchApplied("StatusEffect.PlaySound") &&
+                           PlaySoundMethod != null &&
+                           SoundsField != null;
+                case "itemsound":
+                case "item-sound":
+                    return PatchApplied("ItemComponent.PlaySound") &&
+                           ItemComponentPlaySoundMethod != null &&
+                           ComponentSoundsField != null;
+                default:
+                    return false;
+            }
+        }
+
         public static string GetReadinessStatus()
         {
             if (PatchStates.Count == 0) { ResetPatchStatus(); }
@@ -612,16 +915,26 @@ namespace BaroWardrobeSwitcher
                 .Select(pair => pair.Key + " (" + pair.Value.Error + ")")
                 .ToList();
 
+            string capabilities = "capabilities(renderer=" + HasCapability("renderer") +
+                                  ",animation=" + HasCapability("animation") +
+                                  ",statusSound=" + HasCapability("statusSound") +
+                                  ",itemSound=" + HasCapability("itemSound") + ")";
+
             if (missingRequired.Count == 0)
             {
                 return missingOptional.Count == 0
-                    ? "ready"
-                    : "ready; optional hook unavailable: " + string.Join(", ", missingOptional);
+                    ? "ready; " + capabilities
+                    : "ready; " + capabilities + "; optional hook unavailable: " + string.Join(", ", missingOptional);
             }
 
             bool hasAnyRequired = PatchStates.Values.Any(state => state.Required && state.Applied);
             return (hasAnyRequired ? "degraded; missing " : "missing required hooks: ") +
-                   string.Join(", ", missingRequired);
+                   string.Join(", ", missingRequired) + "; " + capabilities;
+        }
+
+        private static bool PatchApplied(string name)
+        {
+            return PatchStates.TryGetValue(name, out PatchState state) && state.Applied;
         }
 
         private static void PatchTarget(
@@ -677,91 +990,31 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static void PatchLimbDrawTargets(Harmony harmony)
-        {
-            const string name = "Limb.Draw";
-            if (!PatchStates.TryGetValue(name, out PatchState state))
-            {
-                state = new PatchState(required: true);
-                PatchStates[name] = state;
-            }
-
-            List<MethodInfo> targets = FindLimbDrawMethods().ToList();
-            if (targets.Count == 0)
-            {
-                state.Fail("target missing");
-                return;
-            }
-
-            MethodInfo prefix = AccessTools.Method(typeof(LimbDrawPatch), "Prefix");
-            MethodInfo postfix = AccessTools.Method(typeof(LimbDrawPatch), "Postfix");
-            MethodInfo finalizer = AccessTools.Method(typeof(LimbDrawPatch), "Finalizer");
-            List<string> errors = new List<string>();
-            int patched = 0;
-
-            foreach (MethodInfo target in targets)
-            {
-                try
-                {
-                    PatchProcessor processor = harmony.CreateProcessor(target);
-                    processor.AddPrefix(new HarmonyMethod(prefix));
-                    processor.AddPostfix(new HarmonyMethod(postfix));
-                    processor.AddFinalizer(new HarmonyMethod(finalizer));
-                    processor.Patch();
-                    patched++;
-                }
-                catch (Exception ex)
-                {
-                    errors.Add(DescribeMethod(target) + ": " + ex.GetType().Name + ": " + ex.Message);
-                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to patch {name} overload {DescribeMethod(target)}: {ex.GetType().Name}: {ex.Message}");
-                }
-            }
-
-            if (patched > 0)
-            {
-                state.Applied = true;
-                state.Error = errors.Count == 0
-                    ? "patched " + patched + " overload(s)"
-                    : "patched " + patched + " overload(s); failed " + errors.Count + " overload(s)";
-            }
-            else
-            {
-                state.Fail(string.Join("; ", errors));
-            }
-        }
-
         public static string GetCharacterDebugStatus(Character character)
         {
             if (character == null) { return "character=nil"; }
-            int spriteCount = FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot)
-                ? spritesBySlot.Values.Sum(spriteList => spriteList.Count)
-                : 0;
-            int animationCount = FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos)
-                ? animationInfos.Count
-                : 0;
-            int soundCount = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> soundEffects)
-                ? soundEffects.Count
-                : 0;
-            int componentSoundCount = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds)
-                ? componentSounds.Count
-                : 0;
-            int suppressedSoundCount = SuppressedEquipmentSoundsByCharacter.TryGetValue(character, out HashSet<StatusEffect> suppressedSounds)
-                ? suppressedSounds.Count
-                : 0;
-            int suppressedComponentSoundCount = SuppressedEquipmentComponentSoundsByCharacter.TryGetValue(character, out HashSet<ItemComponent> suppressedComponentSounds)
-                ? suppressedComponentSounds.Count
-                : 0;
-            return "active=" + ActiveCharacters.Contains(character) +
-                   ", empty=" + EmptyFashionCharacters.Contains(character) +
-                   ", hideHair=" + ForceHideHairCharacters.Contains(character) +
+            RenderSessions.TryGetValue(character, out RenderSession session);
+            int spriteCount = session?.SpriteCount ?? 0;
+            int animationCount = session?.FashionAnimations.Count ?? 0;
+            int soundCount = session?.FashionSounds.Count ?? 0;
+            int componentSoundCount = session?.FashionComponentSounds.Count ?? 0;
+            int suppressedSoundCount = session?.SuppressedEquipmentSounds.Count ?? 0;
+            int suppressedComponentSoundCount = session?.SuppressedEquipmentComponentSounds.Count ?? 0;
+            string status = "active=" + (session?.IsActive ?? false) +
+                   ", valid=" + (session?.IsValid ?? false) +
+                   ", committed=" + (session?.IsCommitted ?? false) +
+                   ", pending=" + (session?.HasPendingCapture ?? false) +
+                   ", sessionError=" + (session?.Error ?? "none") +
+                   ", empty=" + (session?.EmptyLook ?? false) +
+                   ", hideHair=" + (session?.HideHair ?? false) +
                    ", sprites=" + spriteCount +
                    ", animations=" + animationCount +
                    ", sounds=" + soundCount +
                    ", itemSounds=" + componentSoundCount +
                    ", suppressedSounds=" + suppressedSoundCount +
                    ", suppressedItemSounds=" + suppressedComponentSoundCount +
-                   ", drawPatchTarget=" + (FindLimbDrawMethod() != null) +
-                   ", drawPatchTargets=" + FindLimbDrawMethods().Count() +
+                   ", drawPatchTarget=" + (LimbDrawMethod != null) +
+                   ", drawPatchTargets=" + (LimbDrawMethod == null ? 0 : 1) +
                    ", drawWearableTarget=" + (DrawWearableMethod != null) +
                    ", lastInjected=" + lastInjectedSpriteCount +
                    ", drawHits=" + drawOverrideHitCount +
@@ -775,66 +1028,47 @@ namespace BaroWardrobeSwitcher
                    ", savedSlots=" + DescribeSavedSlots(character) +
                    ", emptySlots=" + DescribeEmptySlots(character) +
                    ", spriteSlots=" + DescribeFashionSprites(character) +
-                   ", spriteLayers=" + DescribeFashionSpriteLayers(character);
+                   ", spriteLayers=" + DescribeFashionSpriteLayers(character) +
+                   ", spriteSources=" + DescribeFashionSpriteSources(character);
+            return session?.EffectPolicy.AppendDebugStatus(status) ?? status;
         }
 
         public static void ClearAll()
         {
-            RestoreAllSpriteMasks();
-            FashionSpritesByCharacter.Clear();
-            FashionHiddenWearableTypesByCharacter.Clear();
-            ForceHideHairCharacters.Clear();
-            FashionAnimationsByCharacter.Clear();
-            FashionSoundsByCharacter.Clear();
-            FashionComponentSoundsByCharacter.Clear();
-            SuppressedEquipmentSoundsByCharacter.Clear();
-            SuppressedEquipmentSoundOwners.Clear();
-            SuppressedEquipmentComponentSoundsByCharacter.Clear();
-            SuppressedEquipmentComponentSoundOwners.Clear();
-            FashionSoundCursorByCharacter.Clear();
-            FashionComponentSoundCursorByCharacter.Clear();
-            EmptyFashionCharacters.Clear();
-            EmptyFashionSlotsByCharacter.Clear();
-            SavedFashionSlotsByCharacter.Clear();
-            ActiveCharacters.Clear();
-            SuppressedEquipmentSoundsByCharacter.Clear();
-            SuppressedEquipmentSoundOwners.Clear();
-            SuppressedEquipmentComponentSoundsByCharacter.Clear();
-            SuppressedEquipmentComponentSoundOwners.Clear();
-            FashionSoundCursorByCharacter.Clear();
-            FashionComponentSoundCursorByCharacter.Clear();
-            DrawnFashionSpritesByLimb.Clear();
-            InjectedFashionSpritesByLimb.Clear();
-            OriginalWearableOrderByLimb.Clear();
-            EmptyFashionSlotsByCharacter.Clear();
-            SavedFashionSlotsByCharacter.Clear();
+            foreach (RenderSession session in RenderSessions.Values.ToList())
+            {
+                session.Dispose();
+            }
+            RenderSessions.Clear();
         }
 
         public static void RestoreItemVisuals()
         {
-            RestoreAllSpriteMasks();
-            ActiveCharacters.Clear();
-            ForceHideHairCharacters.Clear();
-            DrawnFashionSpritesByLimb.Clear();
-            InjectedFashionSpritesByLimb.Clear();
-            OriginalWearableOrderByLimb.Clear();
-            EmptyFashionSlotsByCharacter.Clear();
-            SavedFashionSlotsByCharacter.Clear();
+            foreach (RenderSession session in RenderSessions.Values)
+            {
+                session.IsActive = false;
+                session.HideHair = false;
+                session.EmptySlots.Clear();
+                session.SavedSlots.Clear();
+                session.EquipmentMasksToSanitize.Clear();
+            }
         }
 
         public static void RestoreCharacterItemVisuals(Character character)
         {
             if (character == null) { return; }
-            RestoreSpriteMasks(character);
             ClearSuppressedEquipmentSounds(character);
             ClearSuppressedEquipmentComponentSounds(character);
-            ActiveCharacters.Remove(character);
-            ForceHideHairCharacters.Remove(character);
-            EmptyFashionSlotsByCharacter.Remove(character);
-            SavedFashionSlotsByCharacter.Remove(character);
-            DrawnFashionSpritesByLimb.Clear();
-            InjectedFashionSpritesByLimb.Clear();
-            OriginalWearableOrderByLimb.Clear();
+            if (RenderSessions.TryGetValue(character, out RenderSession session))
+            {
+                session.SuppressedEquipmentSounds.Clear();
+                session.SuppressedEquipmentComponentSounds.Clear();
+                session.IsActive = false;
+                session.HideHair = false;
+                session.EmptySlots.Clear();
+                session.SavedSlots.Clear();
+                session.EquipmentMasksToSanitize.Clear();
+            }
             fallbackDrawnFashionSpriteCount = 0;
             RefreshWearables(character);
         }
@@ -842,108 +1076,203 @@ namespace BaroWardrobeSwitcher
         public static void ClearCharacter(Character character)
         {
             if (character == null) { return; }
-            RestoreSpriteMasks(character);
-            FashionSpritesByCharacter.Remove(character);
-            FashionHiddenWearableTypesByCharacter.Remove(character);
-            ForceHideHairCharacters.Remove(character);
-            FashionAnimationsByCharacter.Remove(character);
-            FashionSoundsByCharacter.Remove(character);
-            FashionComponentSoundsByCharacter.Remove(character);
-            ClearSuppressedEquipmentSounds(character);
-            ClearSuppressedEquipmentComponentSounds(character);
-            FashionSoundCursorByCharacter.Remove(character);
-            FashionComponentSoundCursorByCharacter.Remove(character);
-            EmptyFashionCharacters.Remove(character);
-            EmptyFashionSlotsByCharacter.Remove(character);
-            SavedFashionSlotsByCharacter.Remove(character);
-            ActiveCharacters.Remove(character);
-            DrawnFashionSpritesByLimb.Clear();
-            InjectedFashionSpritesByLimb.Clear();
-            OriginalWearableOrderByLimb.Clear();
+            if (RenderSessions.TryGetValue(character, out RenderSession session))
+            {
+                session.Dispose();
+                RenderSessions.Remove(character);
+            }
             RefreshWearables(character);
         }
 
         public static void PruneStaleCharacters()
         {
-            List<Character> characters = FashionSpritesByCharacter.Keys
-                .Concat(FashionHiddenWearableTypesByCharacter.Keys)
-                .Concat(ForceHideHairCharacters)
-                .Concat(FashionAnimationsByCharacter.Keys)
-                .Concat(FashionSoundsByCharacter.Keys)
-                .Concat(FashionComponentSoundsByCharacter.Keys)
-                .Concat(SuppressedEquipmentSoundsByCharacter.Keys)
-                .Concat(SuppressedEquipmentComponentSoundsByCharacter.Keys)
-                .Concat(EmptyFashionCharacters)
-                .Concat(ActiveCharacters)
-                .Concat(OriginalSpriteMasksByCharacter.Keys)
-                .Where(IsCharacterStale)
-                .Distinct()
-                .ToList();
+            List<Character> characters = RenderSessions.Keys.Where(IsCharacterStale).ToList();
 
             foreach (Character character in characters)
             {
-                RestoreSpriteMasks(character);
-                FashionSpritesByCharacter.Remove(character);
-                FashionHiddenWearableTypesByCharacter.Remove(character);
-                ForceHideHairCharacters.Remove(character);
-                FashionAnimationsByCharacter.Remove(character);
-                FashionSoundsByCharacter.Remove(character);
-                FashionComponentSoundsByCharacter.Remove(character);
-                ClearSuppressedEquipmentSounds(character);
-                ClearSuppressedEquipmentComponentSounds(character);
-                FashionSoundCursorByCharacter.Remove(character);
-                FashionComponentSoundCursorByCharacter.Remove(character);
-                EmptyFashionCharacters.Remove(character);
-                EmptyFashionSlotsByCharacter.Remove(character);
-                SavedFashionSlotsByCharacter.Remove(character);
-                ActiveCharacters.Remove(character);
-                OriginalSpriteMasksByCharacter.Remove(character);
+                if (RenderSessions.TryGetValue(character, out RenderSession session))
+                {
+                    session.Dispose();
+                    RenderSessions.Remove(character);
+                }
             }
+        }
+
+        private static RenderSession GetOrCreateSession(Character character)
+        {
+            if (character == null) { return null; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session))
+            {
+                session = new RenderSession(character);
+                RenderSessions[character] = session;
+            }
+            return session;
+        }
+
+        private static RenderSession GetCaptureSession(Character character)
+        {
+            return GetOrCreateSession(character)?.CaptureTarget;
+        }
+
+        public static bool BeginFashionTransaction(Character character)
+        {
+            if (character == null || !HasCapability("renderer")) { return false; }
+            try
+            {
+                GetOrCreateSession(character).BeginPendingCapture();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LuaCsLogger.Log(
+                    "[Baro Wardrobe Switcher] Failed to begin fashion capture transaction: " +
+                    ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        public static bool CommitFashionTransaction(Character character)
+        {
+            if (character == null || !RenderSessions.TryGetValue(character, out RenderSession current)) { return false; }
+            RenderSession staged = current.DetachPendingCapture();
+            if (staged == null) { return false; }
+
+            string error = null;
+            if (!staged.Validate(out error) || !HasFashionPayload(staged))
+            {
+                staged.Dispose();
+                LuaCsLogger.Log(
+                    "[Baro Wardrobe Switcher] Fashion capture transaction rejected; previous session preserved: " +
+                    (error ?? "staged session contains no fashion payload") + ".");
+                return false;
+            }
+
+            staged.MarkCommitted();
+            RenderSessions[character] = staged;
+            current.Dispose();
+            LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion capture transaction committed atomically.");
+            return true;
+        }
+
+        public static bool CanReuseCapturedFashion(Character character)
+        {
+            if (character == null || !HasCapability("renderer")) { return false; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !session.IsCommitted ||
+                session.HasPendingCapture ||
+                !HasFashionPayload(session))
+            {
+                return false;
+            }
+            return session.Validate(out _);
+        }
+
+        public static bool AbortFashionTransaction(Character character)
+        {
+            if (character == null || !RenderSessions.TryGetValue(character, out RenderSession current)) { return false; }
+            bool aborted = current.AbortPendingCapture();
+            if (aborted)
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion capture transaction aborted; previous session preserved.");
+            }
+            return aborted;
         }
 
         public static int CaptureFashionItem(Character character, Item item)
         {
-            if (character == null || item == null) { return 0; }
+            return CaptureFashionItemCore(character, item, takeOwnership: false, out _);
+        }
 
-            EmptyFashionCharacters.Remove(character);
-            int animationCount = CaptureFashionAnimations(character, item);
-            int soundCount = CaptureFashionSounds(character, item);
-            int itemSoundCount = CaptureFashionComponentSounds(character, item);
+        private static int CaptureFashionItemCore(
+            Character character,
+            Item item,
+            bool takeOwnership,
+            out bool capturedSuccessfully)
+        {
+            capturedSuccessfully = false;
+            if (character == null || item == null || !HasCapability("renderer")) { return 0; }
+
+            RenderSession session = GetCaptureSession(character);
+            session.EmptyLook = false;
+            session.IsActive = false;
             Wearable wearable = item.GetComponent<Wearable>();
-            if (wearable?.wearableSprites == null || wearable.wearableSprites.Length == 0)
+            if (wearable == null)
             {
-                drawOverrideLogCount = 0;
-                ActiveCharacters.Remove(character);
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Captured 0 wearable sprites, {animationCount} animation triggers, {soundCount} status sound triggers, and {itemSoundCount} item sound components from fashion item without wearable sprites: {item.Name}.");
+                string failure = "Fashion item has no Wearable component: " +
+                                 (item.Prefab?.Identifier.ToString() ?? item.Name.ToString());
+                session.MarkInvalid(failure);
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                 return 0;
             }
-
-            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot))
+            List<FashionSpriteDescriptor> stagedDescriptors = new List<FashionSpriteDescriptor>();
+            if (wearable?.wearableSprites != null)
             {
-                spritesBySlot = new Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>>();
-                FashionSpritesByCharacter[character] = spritesBySlot;
+                foreach (WearableSprite source in wearable.wearableSprites.Where(sprite => sprite != null && IsEquipmentSprite(sprite)))
+                {
+                    bool preserveMasks = session.EffectPolicy.ShouldPreserveSealedSuitMasks(item);
+                    if (!FashionSpriteDescriptor.TryCreate(
+                            character,
+                            item,
+                            source,
+                            preserveMasks,
+                            out FashionSpriteDescriptor descriptor,
+                            out string error))
+                    {
+                        foreach (FashionSpriteDescriptor staged in stagedDescriptors) { staged.Dispose(); }
+                        string failure = "Failed to create initialized fashion sprite for " +
+                                         (item.Prefab?.Identifier.ToString() ?? item.Name.ToString()) + ": " + error;
+                        session.MarkInvalid(failure);
+                        LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
+                        return 0;
+                    }
+                    stagedDescriptors.Add(descriptor);
+                }
             }
 
-            int count = 0;
-            foreach (WearableSprite sprite in wearable.wearableSprites.Where(sprite => sprite != null))
+            int animationCount;
+            int soundCount;
+            int itemSoundCount;
+            try
             {
-                if (!IsEquipmentSprite(sprite))
+                animationCount = CaptureFashionAnimations(session, item);
+                soundCount = CaptureFashionSounds(session, item);
+                itemSoundCount = CaptureFashionComponentSounds(session, item);
+
+                foreach (FashionSpriteDescriptor descriptor in stagedDescriptors)
                 {
-                    continue;
+                    session.Add(descriptor);
+                    LuaCsLogger.Log(
+                        "[Baro Wardrobe Switcher] Captured fashion sprite source: identifier=" +
+                        descriptor.SourceIdentifier +
+                        ", contentPackage=" +
+                        descriptor.SourceContentPackage +
+                        ", resolvedSpritePath=" +
+                        descriptor.ResolvedSpritePath +
+                        ".");
                 }
-                CaptureFashionHiddenWearableTypes(character, sprite);
-                Tuple<WearableType, LimbType> key = Tuple.Create(sprite.Type, sprite.Limb);
-                if (!spritesBySlot.TryGetValue(key, out List<WearableSprite> spriteList))
+                foreach (WearableSprite source in wearable?.wearableSprites?.Where(sprite => sprite != null && IsEquipmentSprite(sprite)) ?? Enumerable.Empty<WearableSprite>())
                 {
-                    spriteList = new List<WearableSprite>();
-                    spritesBySlot[key] = spriteList;
+                    // Capture attachment hiding intent from the source before descriptor
+                    // mask sanitization removes it.
+                    CaptureFashionHiddenWearableTypes(session, source);
                 }
-                spriteList.Add(CreateFashionSpriteClone(character, sprite));
-                count++;
+                if (takeOwnership)
+                {
+                    session.AddOwnedTemporaryItem(item);
+                }
             }
+            catch (Exception ex)
+            {
+                foreach (FashionSpriteDescriptor staged in stagedDescriptors) { staged.Dispose(); }
+                string failure = "Fashion capture transaction failed: " + ex.GetType().Name + ": " + ex.Message;
+                session.MarkInvalid(failure);
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
+                return 0;
+            }
+            int count = stagedDescriptors.Count;
             drawOverrideLogCount = 0;
-            ActiveCharacters.Remove(character);
             LuaCsLogger.Log($"[Baro Wardrobe Switcher] Captured {count} wearable sprites, {animationCount} animation triggers, {soundCount} status sound triggers, and {itemSoundCount} item sound components from fashion item: {item.Name}.");
+            capturedSuccessfully = true;
             return count;
         }
 
@@ -956,7 +1285,9 @@ namespace BaroWardrobeSwitcher
                 Identifier prefabIdentifier = new Identifier(identifier);
                 if (!ItemPrefab.Prefabs.TryGet(prefabIdentifier, out ItemPrefab prefab) || prefab == null)
                 {
-                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] Could not find fashion prefab by identifier: {identifier}.");
+                    string failure = "Could not find fashion prefab by identifier: " + identifier;
+                    GetCaptureSession(character).MarkInvalid(failure);
+                    LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                     return 0;
                 }
 
@@ -964,7 +1295,11 @@ namespace BaroWardrobeSwitcher
                 try
                 {
                     tempItem = new Item(prefab, Vector2.Zero, null, 0, false);
-                    int captured = CaptureFashionItem(character, tempItem);
+                    int captured = CaptureFashionItemCore(character, tempItem, takeOwnership: true, out bool succeeded);
+                    if (!succeeded) { return 0; }
+                    // Ownership was transferred to the render session. It must outlive
+                    // descriptors and captured effects and is removed by session.Dispose.
+                    tempItem = null;
                     LuaCsLogger.Log($"[Baro Wardrobe Switcher] Captured {captured} wearable sprite(s) from fashion prefab fallback: {identifier}.");
                     return captured;
                 }
@@ -982,16 +1317,19 @@ namespace BaroWardrobeSwitcher
             }
             catch (Exception ex)
             {
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Fashion prefab fallback failed for {identifier}: {ex.GetType().Name}: {ex.Message}");
+                string failure = $"Fashion prefab fallback failed for {identifier}: {ex.GetType().Name}: {ex.Message}";
+                GetCaptureSession(character).MarkInvalid(failure);
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] " + failure + ". Activation refused.");
                 return 0;
             }
         }
 
         public static bool CaptureEmptyFashion(Character character)
         {
-            if (character == null) { return false; }
-            EmptyFashionCharacters.Add(character);
-            ActiveCharacters.Remove(character);
+            if (character == null || !HasCapability("renderer")) { return false; }
+            RenderSession session = GetCaptureSession(character);
+            session.EmptyLook = true;
+            session.IsActive = false;
             drawOverrideLogCount = 0;
             LuaCsLogger.Log("[Baro Wardrobe Switcher] Captured empty fashion look.");
             return true;
@@ -1000,8 +1338,9 @@ namespace BaroWardrobeSwitcher
         public static bool SetFashionSlots(Character character, string savedSlotsCsv, string emptySlotsCsv)
         {
             if (character == null) { return false; }
-            SavedFashionSlotsByCharacter[character] = ParseSlotCsv(savedSlotsCsv);
-            EmptyFashionSlotsByCharacter[character] = ParseSlotCsv(emptySlotsCsv);
+            RenderSession session = GetCaptureSession(character);
+            session.SavedSlots = ParseSlotCsv(savedSlotsCsv);
+            session.EmptySlots = ParseSlotCsv(emptySlotsCsv);
             LuaCsLogger.Log(
                 "[Baro Wardrobe Switcher] Fashion slot mask: saved=" +
                 DescribeSavedSlots(character) +
@@ -1017,9 +1356,9 @@ namespace BaroWardrobeSwitcher
         public static bool SetHideHair(Character character, bool hideHair)
         {
             if (character == null) { return false; }
-            bool changed = hideHair
-                ? ForceHideHairCharacters.Add(character)
-                : ForceHideHairCharacters.Remove(character);
+            RenderSession session = GetCaptureSession(character);
+            bool changed = session.HideHair != hideHair;
+            session.HideHair = hideHair;
             if (changed)
             {
                 LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion hair visibility set: hideHair=" + hideHair + ".");
@@ -1030,14 +1369,14 @@ namespace BaroWardrobeSwitcher
 
         public static bool ApplyFashionItemVisual(Character character, Item item, bool carrier)
         {
-            if (character == null || item == null) { return false; }
+            if (character == null || item == null || !HasCapability("renderer")) { return false; }
             if (!HasFashionPayload(character))
             {
                 return false;
             }
 
-            RegisterSuppressedEquipmentSounds(character, item);
-            RegisterSuppressedEquipmentComponentSounds(character, item);
+            if (HasCapability("statusSound")) { RegisterSuppressedEquipmentSounds(character, item); }
+            if (HasCapability("itemSound")) { RegisterSuppressedEquipmentComponentSounds(character, item); }
 
             Wearable wearable = item.GetComponent<Wearable>();
             if (wearable?.wearableSprites == null || wearable.wearableSprites.Length == 0)
@@ -1045,13 +1384,16 @@ namespace BaroWardrobeSwitcher
                 return ActivateFashionVisual(character);
             }
 
-            int sanitized = SanitizeEquippedItemMasks(character, wearable);
+            RenderSession session = GetOrCreateSession(character);
+            int sanitized = 0;
+            foreach (WearableSprite sprite in wearable.wearableSprites.Where(sprite => IsEquipmentSprite(sprite)))
+            {
+                if (session.EquipmentMasksToSanitize.Add(sprite)) { sanitized++; }
+            }
             bool activated = ActivateFashionVisual(character);
             if (carrier)
             {
-                int capturedSprites = FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot)
-                    ? spritesBySlot.Values.Sum(spriteList => spriteList.Count)
-                    : 0;
+                int capturedSprites = session.SpriteCount;
                 LuaCsLogger.Log($"[Baro Wardrobe Switcher] Enabled draw-only fashion override through carrier: {item.Name}, capturedSprites={capturedSprites}, sanitizedSprites={sanitized}.");
             }
             drawOverrideLogCount = 0;
@@ -1060,8 +1402,14 @@ namespace BaroWardrobeSwitcher
 
         public static bool ActivateFashionVisual(Character character)
         {
-            if (character == null || !HasFashionPayload(character)) { return false; }
-            ActiveCharacters.Add(character);
+            if (character == null || !HasCapability("renderer") || !HasFashionPayload(character)) { return false; }
+            string error = "render session missing";
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) || !session.Validate(out error))
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion activation refused: " + (error ?? "render session missing") + ".");
+                return false;
+            }
+            session.IsActive = true;
             drawOverrideLogCount = 0;
             virtualDrawErrorLogCount = 0;
             animationOverrideErrorLogCount = 0;
@@ -1082,8 +1430,17 @@ namespace BaroWardrobeSwitcher
             replacement = null;
             skipOriginal = false;
             if (limb == null || original == null) { return false; }
-            if (limb.character == null || !ActiveCharacters.Contains(limb.character)) { return false; }
-            if (storedFashionDrawDepth > 0) { return false; }
+            if (limb.character == null ||
+                !HasCapability("renderer") ||
+                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                !session.IsActive ||
+                !session.TryGetDrawContext(limb, out object context) ||
+                !(context is LimbRenderTransaction transaction) ||
+                !transaction.IsOwner)
+            {
+                return false;
+            }
+            if (transaction.IsDrawingStoredFashion) { return false; }
             if (!IsEquipmentSprite(original))
             {
                 if (ShouldHideAttachmentForFashion(limb.character, original))
@@ -1099,12 +1456,8 @@ namespace BaroWardrobeSwitcher
                 }
                 return false;
             }
-            if (!DrawnFashionSpritesByLimb.TryGetValue(limb, out HashSet<WearableSprite> drawnSprites))
-            {
-                drawnSprites = new HashSet<WearableSprite>();
-                DrawnFashionSpritesByLimb[limb] = drawnSprites;
-            }
-            if (IsInjectedFashionSprite(limb, original))
+            HashSet<WearableSprite> drawnSprites = transaction.DrawnSprites;
+            if (transaction.InjectedSprites.Contains(original))
             {
                 drawnSprites.Add(original);
                 drawOverrideHitCount++;
@@ -1176,159 +1529,77 @@ namespace BaroWardrobeSwitcher
             return false;
         }
 
-        internal static void BeginLimbDraw(Limb limb)
+        internal static LimbRenderTransaction BeginLimbDraw(Limb limb)
         {
+            LimbRenderTransaction transaction = new LimbRenderTransaction(limb);
             try
             {
-                if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return; }
-                if (!FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
-                    spritesBySlot.Count == 0)
+                if (limb?.character == null ||
+                    !HasCapability("renderer") ||
+                    !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                    !session.IsActive ||
+                    !session.Validate(out string validationError))
                 {
-                    return;
+                    return transaction;
                 }
-                DrawnFashionSpritesByLimb[limb] = new HashSet<WearableSprite>();
-                InjectFashionSpritesForLimb(limb, spritesBySlot);
+                if (!session.TryEnterDraw(limb, transaction))
+                {
+                    return transaction;
+                }
+                transaction.Begin(session);
+                return transaction;
             }
             catch (Exception ex)
             {
                 LogVirtualDrawError($"Failed to begin fashion limb draw: {ex.GetType().Name}: {ex.Message}");
+                try
+                {
+                    transaction.Cleanup();
+                }
+                catch (Exception cleanupException)
+                {
+                    LogVirtualDrawError(
+                        "Fashion limb draw begin failed and cleanup also failed: " +
+                        cleanupException.GetType().Name + ": " + cleanupException.Message);
+                }
+                if (limb?.character != null && RenderSessions.TryGetValue(limb.character, out RenderSession session))
+                {
+                    session.MarkInvalid("render transaction failed: " + ex.GetType().Name + ": " + ex.Message);
+                }
+                return transaction;
             }
         }
 
-        internal static Exception EndLimbDraw(Limb limb, Exception exception = null)
+        internal static Exception EndLimbDraw(Limb limb, LimbRenderTransaction transaction, Exception exception = null)
         {
+            Exception cleanupException = null;
             try
             {
-                if (limb == null) { return exception; }
-                List<WearableSprite> injectedSprites = null;
-                if (InjectedFashionSpritesByLimb.TryGetValue(limb, out injectedSprites))
-                {
-                    InjectedFashionSpritesByLimb.Remove(limb);
-                }
-                HashSet<WearableSprite> injectedSet = injectedSprites == null
-                    ? new HashSet<WearableSprite>()
-                    : new HashSet<WearableSprite>(injectedSprites);
-
-                List<WearableSprite> wearingItems = limb.WearingItems;
-                if (wearingItems == null)
-                {
-                    OriginalWearableOrderByLimb.Remove(limb);
-                    DrawnFashionSpritesByLimb.Remove(limb);
-                    return FinalizeLimbDrawException(limb, exception);
-                }
-
-                if (OriginalWearableOrderByLimb.TryGetValue(limb, out List<WearableSprite> originalOrder))
-                {
-                    List<WearableSprite> remainingWearables = wearingItems
-                        .Where(wearable => wearable != null && !injectedSet.Contains(wearable))
-                        .ToList();
-                    wearingItems.Clear();
-                    foreach (WearableSprite originalWearable in originalOrder)
-                    {
-                        if (originalWearable == null || !remainingWearables.Contains(originalWearable) || wearingItems.Contains(originalWearable))
-                        {
-                            continue;
-                        }
-                        wearingItems.Add(originalWearable);
-                    }
-                    foreach (WearableSprite remainingWearable in remainingWearables)
-                    {
-                        if (remainingWearable != null && !wearingItems.Contains(remainingWearable))
-                        {
-                            wearingItems.Add(remainingWearable);
-                        }
-                    }
-                    OriginalWearableOrderByLimb.Remove(limb);
-                }
-                else if (injectedSprites != null)
-                {
-                    foreach (WearableSprite injectedSprite in injectedSprites)
-                    {
-                        wearingItems.RemoveAll(wearable => wearable == injectedSprite);
-                    }
-                }
-                DrawnFashionSpritesByLimb.Remove(limb);
+                transaction?.Cleanup();
             }
             catch (Exception ex)
             {
+                cleanupException = ex;
                 LogVirtualDrawError($"Failed to end fashion limb draw: {ex.GetType().Name}: {ex.Message}");
-                if (limb != null)
-                {
-                    OriginalWearableOrderByLimb.Remove(limb);
-                    InjectedFashionSpritesByLimb.Remove(limb);
-                    DrawnFashionSpritesByLimb.Remove(limb);
-                }
             }
-            return FinalizeLimbDrawException(limb, exception);
+            // Harmony finalizers suppress an exception only when they return null. The
+            // original draw exception always wins and is returned by reference unchanged;
+            // a cleanup failure is propagated only when there was no draw failure.
+            return exception ?? cleanupException;
         }
 
-        private static void InjectFashionSpritesForLimb(
+        internal static void DrawMissingFashionSprites(
             Limb limb,
-            Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot)
+            LimbRenderTransaction transaction,
+            SpriteBatch spriteBatch,
+            Color? overrideColor)
         {
-            if (limb == null || spritesBySlot == null || spritesBySlot.Count == 0) { return; }
-
-            List<WearableSprite> wearingItems = limb.WearingItems;
-            if (wearingItems == null) { return; }
-
-            List<WearableSprite> spritesToInject = EnumerateFashionSpritesForLimb(spritesBySlot, limb.type)
-                .Select(pair => pair.Value)
-                .Where(sprite => sprite != null && !wearingItems.Contains(sprite))
-                .Distinct()
-                .ToList();
-            if (spritesToInject.Count == 0) { return; }
-
-            if (!OriginalWearableOrderByLimb.ContainsKey(limb))
-            {
-                OriginalWearableOrderByLimb[limb] = wearingItems
-                    .Where(wearable => wearable != null)
-                    .ToList();
-            }
-
-            if (!InjectedFashionSpritesByLimb.TryGetValue(limb, out List<WearableSprite> injectedSprites))
-            {
-                injectedSprites = new List<WearableSprite>();
-                InjectedFashionSpritesByLimb[limb] = injectedSprites;
-            }
-
-            foreach (WearableSprite sprite in spritesToInject)
-            {
-                wearingItems.Add(sprite);
-                injectedSprites.Add(sprite);
-            }
-
-            SortWearablesForDraw(wearingItems);
-            lastInjectedSpriteCount = spritesToInject.Count;
-        }
-
-        private static bool IsInjectedFashionSprite(Limb limb, WearableSprite sprite)
-        {
-            return limb != null &&
-                   sprite != null &&
-                   InjectedFashionSpritesByLimb.TryGetValue(limb, out List<WearableSprite> injectedSprites) &&
-                   injectedSprites.Contains(sprite);
-        }
-
-        private static Exception FinalizeLimbDrawException(Limb limb, Exception exception)
-        {
-            if (exception == null) { return null; }
-            if (limb?.character == null || !ActiveCharacters.Contains(limb.character)) { return exception; }
-            if (exception is ArgumentNullException argumentNullException &&
-                string.Equals(argumentNullException.ParamName, "source", StringComparison.Ordinal))
-            {
-                LogVirtualDrawError($"Suppressed wardrobe Limb.Draw transition exception for limb={limb.type}: {exception.GetType().Name}: {exception.Message}");
-                return null;
-            }
-            return exception;
-        }
-
-        internal static void DrawMissingFashionSprites(Limb limb, SpriteBatch spriteBatch, Color? overrideColor)
-        {
+            if (limb?.character == null || spriteBatch == null || transaction == null || !transaction.IsOwner) { return; }
             try
             {
-                if (limb?.character == null || spriteBatch == null || !ActiveCharacters.Contains(limb.character)) { return; }
-                if (!FashionSpritesByCharacter.TryGetValue(limb.character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
-                    spritesBySlot.Count == 0)
+                if (!RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                    !session.IsActive ||
+                    session.SpritesBySlot.Count == 0)
                 {
                     return;
                 }
@@ -1338,56 +1609,54 @@ namespace BaroWardrobeSwitcher
                     return;
                 }
 
-                if (!DrawnFashionSpritesByLimb.TryGetValue(limb, out HashSet<WearableSprite> drawnSprites))
-                {
-                    drawnSprites = new HashSet<WearableSprite>();
-                }
+                HashSet<WearableSprite> drawnSprites = transaction.DrawnSprites;
 
                 int defaultDepthIndex = Math.Max((limb.WearingItems?.Count ?? 0) + DefaultFallbackDepthPadding, DefaultFallbackDepthPadding);
                 int recessedDepthIndex = RecessedFallbackDepthStart;
-                foreach (KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite> pair in EnumerateFashionSpritesForLimb(spritesBySlot, limb.type))
+                foreach (KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor> pair in EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type))
                 {
-                    if (drawnSprites.Contains(pair.Value)) { continue; }
-                    if (!ShouldFallbackDrawMissingFashionSprite(pair.Value, limb.type)) { continue; }
+                    WearableSprite sprite = pair.Value?.Sprite;
+                    if (sprite == null || drawnSprites.Contains(sprite)) { continue; }
+                    if (!ShouldFallbackDrawMissingFashionSprite(sprite, limb.type)) { continue; }
 
-                    drawnSprites.Add(pair.Value);
+                    drawnSprites.Add(sprite);
                     fallbackDrawnFashionSpriteCount++;
                     int depthIndex = UsesRecessedFashionLayer(pair.Value) ? recessedDepthIndex++ : defaultDepthIndex++;
-                    DrawFashionWearable(limb, pair.Value, depthIndex, spriteBatch, overrideColor);
+                    DrawFashionWearable(limb, transaction, sprite, depthIndex, spriteBatch, overrideColor);
                 }
             }
             catch (Exception ex)
             {
                 LogVirtualDrawError($"Failed to draw missing fashion sprites: {ex.GetType().Name}: {ex.Message}");
-            }
-            finally
-            {
-                if (limb != null)
-                {
-                    DrawnFashionSpritesByLimb.Remove(limb);
-                }
+                throw;
             }
         }
 
-        private static void DrawFashionWearable(Limb limb, WearableSprite wearable, int depthIndex, SpriteBatch spriteBatch, Color? overrideColor)
+        private static void DrawFashionWearable(
+            Limb limb,
+            LimbRenderTransaction transaction,
+            WearableSprite wearable,
+            int depthIndex,
+            SpriteBatch spriteBatch,
+            Color? overrideColor)
         {
+            Color color = overrideColor.GetValueOrDefault(Color.White);
+            color *= limb.Alpha;
+            if (color.A <= 0) { return; }
+
+            SpriteEffects spriteEffect = limb.Dir > 0.0f ? SpriteEffects.None : SpriteEffects.FlipHorizontally;
+            if (limb.Params.MirrorHorizontally)
+            {
+                spriteEffect = spriteEffect == SpriteEffects.None ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
+            }
+            if (limb.Params.MirrorVertically)
+            {
+                spriteEffect |= SpriteEffects.FlipVertically;
+            }
+
+            transaction.EnterStoredFashionDraw();
             try
             {
-                Color color = overrideColor.GetValueOrDefault(Color.White);
-                color *= limb.Alpha;
-                if (color.A <= 0) { return; }
-
-                SpriteEffects spriteEffect = limb.Dir > 0.0f ? SpriteEffects.None : SpriteEffects.FlipHorizontally;
-                if (limb.Params.MirrorHorizontally)
-                {
-                    spriteEffect = spriteEffect == SpriteEffects.None ? SpriteEffects.FlipHorizontally : SpriteEffects.None;
-                }
-                if (limb.Params.MirrorVertically)
-                {
-                    spriteEffect |= SpriteEffects.FlipVertically;
-                }
-
-                storedFashionDrawDepth++;
                 try
                 {
                     DrawWearableMethod.Invoke(
@@ -1402,14 +1671,15 @@ namespace BaroWardrobeSwitcher
                             spriteEffect
                         });
                 }
-                finally
+                catch (TargetInvocationException ex) when (ex.InnerException != null)
                 {
-                    storedFashionDrawDepth--;
+                    ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+                    throw;
                 }
             }
-            catch (Exception ex)
+            finally
             {
-                LogVirtualDrawError($"Failed to draw stored fashion sprite: {ex.GetType().Name}: {ex.Message}");
+                transaction.ExitStoredFashionDraw();
             }
         }
 
@@ -1422,10 +1692,9 @@ namespace BaroWardrobeSwitcher
         internal static bool ShouldLoadTemporaryAnimation(AnimController animController, object animationInfo)
         {
             Character character = animController?.Character;
-            if (character == null || !ActiveCharacters.Contains(character)) { return true; }
-
-            bool hasFashionAnimations = FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos) &&
-                                        animationInfos.Count > 0;
+            if (!IsCharacterActive(character) || !HasCapability("animation")) { return true; }
+            bool hasFashionAnimations = RenderSessions.TryGetValue(character, out RenderSession session) &&
+                                        session.FashionAnimations.Count > 0;
             if (hasFashionAnimations) { return true; }
 
             return !IsLargeEquipmentMovementAnimation(animationInfo);
@@ -1434,15 +1703,15 @@ namespace BaroWardrobeSwitcher
         private static void KeepFashionAnimationsAlive(AnimController animController)
         {
             Character character = animController?.Character;
-            if (character == null || !ActiveCharacters.Contains(character)) { return; }
-            if (!FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos) || animationInfos.Count == 0) { return; }
+            if (!IsCharacterActive(character) || !HasCapability("animation")) { return; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) || session.FashionAnimations.Count == 0) { return; }
             if (TryLoadTemporaryAnimationMethod == null)
             {
                 LogAnimationError("AnimController.TryLoadTemporaryAnimation method was not found.");
                 return;
             }
 
-            foreach (object animationInfo in animationInfos)
+            foreach (object animationInfo in session.FashionAnimations)
             {
                 try
                 {
@@ -1458,57 +1727,57 @@ namespace BaroWardrobeSwitcher
         private static void KeepFashionSoundsAlive(AnimController animController)
         {
             Character character = animController?.Character;
-            if (character == null || !ActiveCharacters.Contains(character)) { return; }
+            if (!IsCharacterActive(character)) { return; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return; }
 
-            if (FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds))
+            foreach (FashionSoundEffect fashionSound in session.FashionSounds)
             {
-                foreach (FashionSoundEffect fashionSound in statusSounds)
-                {
-                    if (fashionSound?.StatusEffect == null || !HasLoopingSound(fashionSound.StatusEffect)) { continue; }
-                    TryPlaySpecificFashionSound(
-                        character,
-                        fashionSound.StatusEffect,
-                        character,
-                        character.CurrentHull,
-                        character.WorldPosition);
-                }
+                if (fashionSound?.StatusEffect == null || !HasLoopingSound(fashionSound.StatusEffect)) { continue; }
+                TryPlaySpecificFashionSound(
+                    character,
+                    fashionSound.StatusEffect,
+                    character,
+                    character.CurrentHull,
+                    character.WorldPosition);
             }
 
-            if (FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds))
+            foreach (FashionComponentSound fashionSound in session.FashionComponentSounds)
             {
-                foreach (FashionComponentSound fashionSound in componentSounds)
-                {
-                    if (fashionSound?.Component == null || !HasLoopingComponentSound(fashionSound.Component, fashionSound.ActionType)) { continue; }
-                    TryPlaySpecificFashionComponentSound(character, fashionSound.Component, fashionSound.ActionType, character);
-                }
+                if (fashionSound?.Component == null || !HasLoopingComponentSound(fashionSound.Component, fashionSound.ActionType)) { continue; }
+                TryPlaySpecificFashionComponentSound(character, fashionSound.Component, fashionSound.ActionType, character);
             }
         }
 
         private static bool HasFashionPayload(Character character)
         {
-            if (character == null) { return false; }
-            bool hasEmptyLook = EmptyFashionCharacters.Contains(character);
-            bool hasSprites = FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) &&
-                              spritesBySlot.Values.Sum(spriteList => spriteList.Count) > 0;
-            bool hasAnimations = FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos) &&
-                                 animationInfos.Count > 0;
-            bool hasSounds = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> soundEffects) &&
-                             soundEffects.Count > 0;
-            bool hasComponentSounds = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds) &&
-                                      componentSounds.Count > 0;
-            return hasEmptyLook || hasSprites || hasAnimations || hasSounds || hasComponentSounds;
+            return character != null &&
+                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   HasFashionPayload(session);
         }
 
-        private static int CaptureFashionAnimations(Character character, Item item)
+        private static bool HasFashionPayload(RenderSession session)
         {
-            if (character == null || item?.Components == null) { return 0; }
-            if (AnimationsToTriggerField == null) { return 0; }
+            return session != null &&
+                   (session.EmptyLook ||
+                    session.SpriteCount > 0 ||
+                    session.FashionAnimations.Count > 0 ||
+                    session.FashionSounds.Count > 0 ||
+                    session.FashionComponentSounds.Count > 0);
+        }
 
-            if (!FashionAnimationsByCharacter.TryGetValue(character, out List<object> animationInfos))
-            {
-                animationInfos = new List<object>();
-                FashionAnimationsByCharacter[character] = animationInfos;
-            }
+        private static bool IsCharacterActive(Character character)
+        {
+            return character != null &&
+                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   session.IsActive &&
+                   session.IsValid;
+        }
+
+        private static int CaptureFashionAnimations(RenderSession session, Item item)
+        {
+            if (session == null || item?.Components == null) { return 0; }
+            if (!HasCapability("animation") || AnimationsToTriggerField == null) { return 0; }
+            List<object> animationInfos = session.FashionAnimations;
 
             int count = 0;
             foreach (ItemComponent component in item.Components)
@@ -1521,6 +1790,7 @@ namespace BaroWardrobeSwitcher
                     if (animations == null) { continue; }
                     foreach (object animationInfo in animations)
                     {
+                        if (!session.EffectPolicy.ShouldCaptureAnimation(item, animationInfo)) { continue; }
                         object boostedAnimationInfo = BoostFashionAnimationPriority(animationInfo);
                         if (boostedAnimationInfo == null || animationInfos.Contains(boostedAnimationInfo)) { continue; }
                         animationInfos.Add(boostedAnimationInfo);
@@ -1532,16 +1802,16 @@ namespace BaroWardrobeSwitcher
             return count;
         }
 
-        private static int CaptureFashionSounds(Character character, Item item)
+        private static int CaptureFashionSounds(RenderSession session, Item item)
         {
-            if (character == null || item?.Components == null) { return 0; }
-            if (SoundsField == null) { return 0; }
-
-            if (!FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> soundEffects))
+            if (session == null || item?.Components == null) { return 0; }
+            if (!HasCapability("statusSound") ||
+                SoundsField == null ||
+                !session.EffectPolicy.ShouldCaptureStatusSounds(item))
             {
-                soundEffects = new List<FashionSoundEffect>();
-                FashionSoundsByCharacter[character] = soundEffects;
+                return 0;
             }
+            List<FashionSoundEffect> soundEffects = session.FashionSounds;
 
             int count = 0;
             foreach (ItemComponent component in item.Components)
@@ -1551,6 +1821,7 @@ namespace BaroWardrobeSwitcher
                 foreach (StatusEffect statusEffect in statusEffects)
                 {
                     if (!HasSounds(statusEffect)) { continue; }
+                    if (!session.EffectPolicy.ShouldCaptureStatusSound(item, statusEffect)) { continue; }
                     if (soundEffects.Any(soundEffect => ReferenceEquals(soundEffect.StatusEffect, statusEffect))) { continue; }
 
                     soundEffects.Add(new FashionSoundEffect(statusEffect));
@@ -1561,15 +1832,17 @@ namespace BaroWardrobeSwitcher
             return count;
         }
 
-        private static int CaptureFashionComponentSounds(Character character, Item item)
+        private static int CaptureFashionComponentSounds(RenderSession session, Item item)
         {
-            if (character == null || item?.Components == null || ComponentSoundsField == null) { return 0; }
-
-            if (!FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds))
+            if (session == null ||
+                item?.Components == null ||
+                !HasCapability("itemSound") ||
+                ComponentSoundsField == null ||
+                !session.EffectPolicy.ShouldCaptureComponentSounds(item))
             {
-                componentSounds = new List<FashionComponentSound>();
-                FashionComponentSoundsByCharacter[character] = componentSounds;
+                return 0;
             }
+            List<FashionComponentSound> componentSounds = session.FashionComponentSounds;
 
             int count = 0;
             foreach (ItemComponent component in item.Components)
@@ -1589,17 +1862,13 @@ namespace BaroWardrobeSwitcher
         private static void RegisterSuppressedEquipmentSounds(Character character, Item item)
         {
             if (character == null || item?.Components == null || SoundsField == null) { return; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return; }
             // When the saved look carries its own sounds we suppress every matching real
             // equipment sound and replace it. When the look is silent we still have to
             // silence looping real-equipment sounds (diving suits, exosuits, beeping
             // headsets); otherwise they keep beeping while the look hides the gear, which
             // mirrors how ShouldLoadTemporaryAnimation suppresses their movement animation.
             bool hasFashionSound = HasAnyFashionSound(character);
-            if (!SuppressedEquipmentSoundsByCharacter.TryGetValue(character, out HashSet<StatusEffect> suppressedSounds))
-            {
-                suppressedSounds = new HashSet<StatusEffect>();
-                SuppressedEquipmentSoundsByCharacter[character] = suppressedSounds;
-            }
 
             foreach (ItemComponent component in item.Components)
             {
@@ -1609,9 +1878,16 @@ namespace BaroWardrobeSwitcher
                 {
                     if (!HasSounds(statusEffect)) { continue; }
                     if (IsFashionStatusSound(character, statusEffect)) { continue; }
+                    // Conditional/required-item sounds are gameplay feedback, not
+                    // ambience. Keep them on the real item so Barotrauma starts and
+                    // stops oxygen alarms with the actual suit/tank lifecycle.
+                    if (FashionEffectPolicy.IsFunctionalEquipmentAlarm(statusEffect))
+                    {
+                        session.SuppressedEquipmentSounds.Remove(statusEffect);
+                        continue;
+                    }
                     if (!hasFashionSound && !HasLoopingSound(statusEffect)) { continue; }
-                    suppressedSounds.Add(statusEffect);
-                    SuppressedEquipmentSoundOwners[statusEffect] = character;
+                    session.SuppressedEquipmentSounds.Add(statusEffect);
                 }
             }
         }
@@ -1619,56 +1895,49 @@ namespace BaroWardrobeSwitcher
         private static void RegisterSuppressedEquipmentComponentSounds(Character character, Item item)
         {
             if (character == null || item?.Components == null || ComponentSoundsField == null) { return; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return; }
             // Same rule as the status-effect sounds above: a silent saved look still has to
             // silence looping real-equipment item sounds so cosmetic gear stops beeping.
             bool hasFashionSound = HasAnyFashionSound(character);
-            if (!SuppressedEquipmentComponentSoundsByCharacter.TryGetValue(character, out HashSet<ItemComponent> suppressedComponents))
-            {
-                suppressedComponents = new HashSet<ItemComponent>();
-                SuppressedEquipmentComponentSoundsByCharacter[character] = suppressedComponents;
-            }
 
             foreach (ItemComponent component in item.Components)
             {
                 if (component == null || !HasComponentSounds(component)) { continue; }
                 if (IsFashionComponentSound(character, component)) { continue; }
                 if (!hasFashionSound && !HasAnyLoopingComponentSound(component)) { continue; }
-                suppressedComponents.Add(component);
-                SuppressedEquipmentComponentSoundOwners[component] = character;
+                session.SuppressedEquipmentComponentSounds.Add(component);
             }
         }
 
         private static void ClearSuppressedEquipmentSounds(Character character)
         {
-            if (character == null) { return; }
-            if (SuppressedEquipmentSoundsByCharacter.TryGetValue(character, out HashSet<StatusEffect> suppressedSounds))
+            if (character != null && RenderSessions.TryGetValue(character, out RenderSession session))
             {
-                foreach (StatusEffect statusEffect in suppressedSounds.ToList())
-                {
-                    SuppressedEquipmentSoundOwners.Remove(statusEffect);
-                }
-                SuppressedEquipmentSoundsByCharacter.Remove(character);
+                session.SuppressedEquipmentSounds.Clear();
             }
         }
 
         private static void ClearSuppressedEquipmentComponentSounds(Character character)
         {
-            if (character == null) { return; }
-            if (SuppressedEquipmentComponentSoundsByCharacter.TryGetValue(character, out HashSet<ItemComponent> suppressedComponents))
+            if (character != null && RenderSessions.TryGetValue(character, out RenderSession session))
             {
-                foreach (ItemComponent component in suppressedComponents.ToList())
-                {
-                    SuppressedEquipmentComponentSoundOwners.Remove(component);
-                }
-                SuppressedEquipmentComponentSoundsByCharacter.Remove(character);
+                session.SuppressedEquipmentComponentSounds.Clear();
             }
         }
 
         internal static bool ShouldPlayOriginalStatusEffectSound(StatusEffect statusEffect, Entity entity, Hull hull, Vector2 worldPosition)
         {
             if (statusEffect == null) { return true; }
-            if (!SuppressedEquipmentSoundOwners.TryGetValue(statusEffect, out Character character)) { return true; }
-            if (character == null || !ActiveCharacters.Contains(character)) { return true; }
+            RenderSession session = RenderSessions.Values.FirstOrDefault(
+                candidate => candidate.SuppressedEquipmentSounds.Contains(statusEffect));
+            Character character = session?.Character;
+            if (character == null) { return true; }
+            if (!IsCharacterActive(character) || !HasCapability("statusSound")) { return true; }
+            if (FashionEffectPolicy.IsFunctionalEquipmentAlarm(statusEffect))
+            {
+                session.SuppressedEquipmentSounds.Remove(statusEffect);
+                return true;
+            }
             if (!HasAnyFashionSound(character))
             {
                 return false;
@@ -1681,11 +1950,14 @@ namespace BaroWardrobeSwitcher
                 return false;
             }
 
-            bool played = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> fashionSounds) &&
-                          TryPlayReplacementFashionSound(character, fashionSounds, entity, hull, worldPosition);
-            if (!played && FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds))
+            bool played = TryPlayReplacementFashionSound(session, session.FashionSounds, entity, hull, worldPosition);
+            if (!played)
             {
-                played = TryPlayReplacementFashionComponentSound(character, componentSounds, ActionType.OnWearing, character);
+                played = TryPlayReplacementFashionComponentSound(
+                    session,
+                    session.FashionComponentSounds,
+                    ActionType.OnWearing,
+                    character);
             }
             if (!played)
             {
@@ -1697,8 +1969,11 @@ namespace BaroWardrobeSwitcher
         internal static bool ShouldPlayOriginalItemComponentSound(ItemComponent component, ActionType actionType, Character user)
         {
             if (component == null) { return true; }
-            if (!SuppressedEquipmentComponentSoundOwners.TryGetValue(component, out Character character)) { return true; }
-            if (character == null || !ActiveCharacters.Contains(character)) { return true; }
+            RenderSession session = RenderSessions.Values.FirstOrDefault(
+                candidate => candidate.SuppressedEquipmentComponentSounds.Contains(component));
+            Character character = session?.Character;
+            if (character == null) { return true; }
+            if (!IsCharacterActive(character) || !HasCapability("itemSound")) { return true; }
             if (user != null && character != user) { return true; }
             if (!HasAnyFashionSound(character))
             {
@@ -1711,13 +1986,16 @@ namespace BaroWardrobeSwitcher
                 return false;
             }
 
-            bool played = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> fashionSounds) &&
-                          TryPlayReplacementFashionComponentSound(character, fashionSounds, actionType, user ?? character);
-            if (!played && FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds))
+            bool played = TryPlayReplacementFashionComponentSound(
+                session,
+                session.FashionComponentSounds,
+                actionType,
+                user ?? character);
+            if (!played)
             {
                 played = TryPlayReplacementFashionSound(
-                    character,
-                    statusSounds,
+                    session,
+                    session.FashionSounds,
                     user ?? character,
                     character.CurrentHull,
                     character.WorldPosition);
@@ -1731,50 +2009,48 @@ namespace BaroWardrobeSwitcher
 
         private static bool HasAnyFashionSound(Character character)
         {
-            if (character == null) { return false; }
-            bool hasStatusSounds = FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds) &&
-                                   statusSounds.Count > 0;
-            bool hasComponentSounds = FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds) &&
-                                      componentSounds.Count > 0;
-            return hasStatusSounds || hasComponentSounds;
+            return character != null &&
+                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   (session.FashionSounds.Count > 0 || session.FashionComponentSounds.Count > 0);
         }
 
         private static bool IsFashionStatusSound(Character character, StatusEffect statusEffect)
         {
             return character != null &&
                    statusEffect != null &&
-                   FashionSoundsByCharacter.TryGetValue(character, out List<FashionSoundEffect> statusSounds) &&
-                   statusSounds.Any(sound => ReferenceEquals(sound.StatusEffect, statusEffect));
+                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   session.FashionSounds.Any(sound => ReferenceEquals(sound.StatusEffect, statusEffect));
         }
 
         private static bool IsFashionComponentSound(Character character, ItemComponent component)
         {
             return character != null &&
                    component != null &&
-                   FashionComponentSoundsByCharacter.TryGetValue(character, out List<FashionComponentSound> componentSounds) &&
-                   componentSounds.Any(sound => ReferenceEquals(sound.Component, component));
+                   RenderSessions.TryGetValue(character, out RenderSession session) &&
+                   session.FashionComponentSounds.Any(sound => ReferenceEquals(sound.Component, component));
         }
 
         private static bool TryPlayReplacementFashionSound(
-            Character character,
+            RenderSession session,
             List<FashionSoundEffect> fashionSounds,
             Entity entity,
             Hull hull,
             Vector2 worldPosition)
         {
+            Character character = session?.Character;
             if (character == null || fashionSounds == null || fashionSounds.Count == 0 || PlaySoundMethod == null)
             {
                 return false;
             }
 
-            int cursor = FashionSoundCursorByCharacter.TryGetValue(character, out int storedCursor) ? storedCursor : 0;
+            int cursor = session.FashionSoundCursor;
             for (int offset = 0; offset < fashionSounds.Count; offset++)
             {
                 int index = (cursor + offset) % fashionSounds.Count;
                 FashionSoundEffect fashionSound = fashionSounds[index];
                 if (fashionSound?.StatusEffect == null) { continue; }
 
-                FashionSoundCursorByCharacter[character] = (index + 1) % fashionSounds.Count;
+                session.FashionSoundCursor = (index + 1) % fashionSounds.Count;
                 return TryPlaySpecificFashionSound(
                     character,
                     fashionSound.StatusEffect,
@@ -1841,14 +2117,15 @@ namespace BaroWardrobeSwitcher
         }
 
         private static bool TryPlayReplacementFashionComponentSound(
-            Character character,
+            RenderSession session,
             List<FashionComponentSound> fashionSounds,
             ActionType actionType,
             Character user)
         {
+            Character character = session?.Character;
             if (character == null || fashionSounds == null || fashionSounds.Count == 0) { return false; }
 
-            int cursor = FashionComponentSoundCursorByCharacter.TryGetValue(character, out int storedCursor) ? storedCursor : 0;
+            int cursor = session.FashionComponentSoundCursor;
             for (int pass = 0; pass < 2; pass++)
             {
                 for (int offset = 0; offset < fashionSounds.Count; offset++)
@@ -1858,7 +2135,7 @@ namespace BaroWardrobeSwitcher
                     if (fashionSound?.Component == null) { continue; }
                     if (pass == 0 && fashionSound.ActionType != actionType) { continue; }
 
-                    FashionComponentSoundCursorByCharacter[character] = (index + 1) % fashionSounds.Count;
+                    session.FashionComponentSoundCursor = (index + 1) % fashionSounds.Count;
                     return TryPlaySpecificFashionComponentSound(
                         character,
                         fashionSound.Component,
@@ -1992,8 +2269,8 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static IEnumerable<KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite>> EnumerateFashionSpritesForLimb(
-            Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot,
+        private static IEnumerable<KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor>> EnumerateFashionSpritesForLimb(
+            Dictionary<Tuple<WearableType, LimbType>, List<FashionSpriteDescriptor>> spritesBySlot,
             LimbType limbType)
         {
             return spritesBySlot
@@ -2001,10 +2278,10 @@ namespace BaroWardrobeSwitcher
                     pair.Value != null &&
                     (pair.Key.Item2 == limbType || pair.Key.Item2 == LimbType.None))
                 .SelectMany(pair => pair.Value
-                    .Where(sprite => SpriteBelongsToLimb(sprite, pair.Key.Item2, limbType))
-                    .Select(sprite => new KeyValuePair<Tuple<WearableType, LimbType>, WearableSprite>(pair.Key, sprite)))
+                    .Where(descriptor => descriptor?.Sprite != null && SpriteBelongsToLimb(descriptor.Sprite, pair.Key.Item2, limbType))
+                    .Select(descriptor => new KeyValuePair<Tuple<WearableType, LimbType>, FashionSpriteDescriptor>(pair.Key, descriptor)))
                 .OrderBy(pair => GetFashionLayerSortKey(pair.Value))
-                .ThenByDescending(pair => pair.Value.Sprite?.Depth ?? 0.0f);
+                .ThenByDescending(pair => pair.Value.Sprite?.Sprite?.Depth ?? 0.0f);
         }
 
         private static void SortWearablesForDraw(List<WearableSprite> wearingItems)
@@ -2034,10 +2311,28 @@ namespace BaroWardrobeSwitcher
             return 5;
         }
 
+        private static int GetFashionLayerSortKey(FashionSpriteDescriptor descriptor)
+        {
+            if (descriptor == null) { return 0; }
+            if (descriptor.AllowedSlots.Contains(InvSlotType.Bag)) { return 2; }
+            if (descriptor.AllowedSlots.Contains(InvSlotType.HealthInterface)) { return 3; }
+            if (descriptor.AllowedSlots.Contains(InvSlotType.InnerClothes)) { return 4; }
+            if (descriptor.AllowedSlots.Contains(InvSlotType.Head) || descriptor.AllowedSlots.Contains(InvSlotType.Headset)) { return 5; }
+            if (descriptor.AllowedSlots.Contains(InvSlotType.OuterClothes)) { return 6; }
+            return 5;
+        }
+
         private static bool UsesRecessedFashionLayer(WearableSprite sprite)
         {
             return SlotContains(sprite, InvSlotType.Bag) ||
                    SlotContains(sprite, InvSlotType.HealthInterface);
+        }
+
+        private static bool UsesRecessedFashionLayer(FashionSpriteDescriptor descriptor)
+        {
+            return descriptor != null &&
+                   (descriptor.AllowedSlots.Contains(InvSlotType.Bag) ||
+                    descriptor.AllowedSlots.Contains(InvSlotType.HealthInterface));
         }
 
         private static string GetFashionLayerName(WearableSprite sprite)
@@ -2187,22 +2482,7 @@ namespace BaroWardrobeSwitcher
 
         internal static MethodInfo FindLimbDrawMethod()
         {
-            return FindLimbDrawMethods().FirstOrDefault();
-        }
-
-        private static IEnumerable<MethodInfo> FindLimbDrawMethods()
-        {
-            return AccessTools.GetDeclaredMethods(typeof(Limb))
-                .Where(method =>
-                    method.Name == "Draw" &&
-                    method.GetParameters().Any(parameter => parameter.ParameterType == typeof(SpriteBatch)));
-        }
-
-        private static string DescribeMethod(MethodInfo method)
-        {
-            if (method == null) { return "null"; }
-            string parameters = string.Join(",", method.GetParameters().Select(parameter => parameter.ParameterType.Name));
-            return method.Name + "(" + parameters + ")";
+            return LimbDrawMethod;
         }
 
         private static bool IsEquipmentSprite(WearableSprite sprite)
@@ -2229,61 +2509,56 @@ namespace BaroWardrobeSwitcher
         private static bool ShouldHideOriginalForEmptySavedSlot(Character character, WearableSprite original)
         {
             if (character == null || original?.WearableComponent?.AllowedSlots == null) { return false; }
-            if (!EmptyFashionSlotsByCharacter.TryGetValue(character, out HashSet<InvSlotType> emptySlots) || emptySlots.Count == 0)
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) || session.EmptySlots.Count == 0)
             {
                 return false;
             }
 
-            return original.WearableComponent.AllowedSlots.Any(slot => emptySlots.Contains(slot));
+            return original.WearableComponent.AllowedSlots.Any(slot => session.EmptySlots.Contains(slot));
         }
 
-        private static void CaptureFashionHiddenWearableTypes(Character character, WearableSprite sprite)
+        private static void CaptureFashionHiddenWearableTypes(RenderSession session, WearableSprite sprite)
         {
-            if (character == null || sprite?.HideWearablesOfType == null || sprite.HideWearablesOfType.Count == 0) { return; }
+            if (session == null || sprite?.HideWearablesOfType == null || sprite.HideWearablesOfType.Count == 0) { return; }
             foreach (WearableType hiddenType in sprite.HideWearablesOfType)
             {
                 if (!FashionHideableAttachmentTypes.Contains(hiddenType)) { continue; }
-                if (!FashionHiddenWearableTypesByCharacter.TryGetValue(character, out HashSet<WearableType> hiddenTypes))
-                {
-                    hiddenTypes = new HashSet<WearableType>();
-                    FashionHiddenWearableTypesByCharacter[character] = hiddenTypes;
-                }
-                hiddenTypes.Add(hiddenType);
+                session.HiddenWearableTypes.Add(hiddenType);
             }
         }
 
         private static bool ShouldHideAttachmentForFashion(Character character, WearableSprite original)
         {
             if (character == null || original == null) { return false; }
-            if (FashionHiddenWearableTypesByCharacter.TryGetValue(character, out HashSet<WearableType> hiddenTypes) &&
-                hiddenTypes.Contains(original.Type))
+            if (RenderSessions.TryGetValue(character, out RenderSession session) &&
+                session.HiddenWearableTypes.Contains(original.Type))
             {
                 return true;
             }
-            return ForceHideHairCharacters.Contains(character) &&
+            return session?.HideHair == true &&
                    HairAttachmentTypes.Contains(original.Type);
         }
 
         private static string DescribeFashionHiddenTypes(Character character)
         {
             if (character == null ||
-                !FashionHiddenWearableTypesByCharacter.TryGetValue(character, out HashSet<WearableType> hiddenTypes) ||
-                hiddenTypes.Count == 0)
+                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                session.HiddenWearableTypes.Count == 0)
             {
                 return "none";
             }
-            return string.Join(",", hiddenTypes.Select(type => type.ToString()).OrderBy(name => name));
+            return string.Join(",", session.HiddenWearableTypes.Select(type => type.ToString()).OrderBy(name => name));
         }
 
         private static bool ShouldHideOriginalForSavedSlot(Character character, WearableSprite original)
         {
             if (character == null || original?.WearableComponent?.AllowedSlots == null) { return false; }
-            if (!SavedFashionSlotsByCharacter.TryGetValue(character, out HashSet<InvSlotType> savedSlots) || savedSlots.Count == 0)
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) || session.SavedSlots.Count == 0)
             {
                 return false;
             }
 
-            return original.WearableComponent.AllowedSlots.Any(slot => savedSlots.Contains(slot));
+            return original.WearableComponent.AllowedSlots.Any(slot => session.SavedSlots.Contains(slot));
         }
 
         private static string DescribeWearableSlots(WearableSprite sprite)
@@ -2294,72 +2569,25 @@ namespace BaroWardrobeSwitcher
 
         private static string DescribeSavedSlots(Character character)
         {
-            return DescribeSlotSet(SavedFashionSlotsByCharacter, character);
+            return RenderSessions.TryGetValue(character, out RenderSession session)
+                ? DescribeSlotSet(session.SavedSlots)
+                : "none";
         }
 
         private static string DescribeEmptySlots(Character character)
         {
-            return DescribeSlotSet(EmptyFashionSlotsByCharacter, character);
+            return RenderSessions.TryGetValue(character, out RenderSession session)
+                ? DescribeSlotSet(session.EmptySlots)
+                : "none";
         }
 
-        private static string DescribeSlotSet(Dictionary<Character, HashSet<InvSlotType>> slotsByCharacter, Character character)
+        private static string DescribeSlotSet(HashSet<InvSlotType> slots)
         {
-            if (character == null ||
-                !slotsByCharacter.TryGetValue(character, out HashSet<InvSlotType> slots) ||
-                slots == null ||
-                slots.Count == 0)
+            if (slots == null || slots.Count == 0)
             {
                 return "none";
             }
             return string.Join(",", slots.Select(slot => slot.ToString()).OrderBy(slot => slot));
-        }
-
-        private static WearableSprite CreateFashionSpriteClone(Character character, WearableSprite original)
-        {
-            WearableSprite clone = original;
-            try
-            {
-                clone = MemberwiseCloneMethod?.Invoke(original, null) as WearableSprite ?? original;
-            }
-            catch (Exception ex)
-            {
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Failed to clone fashion sprite, using original: {ex.GetType().Name}: {ex.Message}");
-            }
-
-            if (ReferenceEquals(clone, original))
-            {
-                SaveOriginalMask(character, clone);
-            }
-            ClearWearableAttachmentMask(clone);
-            if (IsHeadVisualSprite(clone))
-            {
-                ClearHeadWearableMask(clone);
-            }
-            return clone;
-        }
-
-        private static int SanitizeEquippedItemMasks(Character character, Wearable wearable)
-        {
-            int count = 0;
-            foreach (WearableSprite sprite in wearable.wearableSprites.Where(sprite => IsEquipmentSprite(sprite)))
-            {
-                SaveOriginalMask(character, sprite);
-                ClearMask(sprite);
-                count++;
-            }
-            return count;
-        }
-
-        private static void SaveOriginalMask(Character character, WearableSprite sprite)
-        {
-            if (character == null || sprite == null) { return; }
-            if (!OriginalSpriteMasksByCharacter.TryGetValue(character, out Dictionary<WearableSprite, SpriteMaskState> masks))
-            {
-                masks = new Dictionary<WearableSprite, SpriteMaskState>();
-                OriginalSpriteMasksByCharacter[character] = masks;
-            }
-            if (masks.ContainsKey(sprite)) { return; }
-            masks[sprite] = new SpriteMaskState(sprite);
         }
 
         private static void ClearMask(WearableSprite sprite)
@@ -2371,42 +2599,6 @@ namespace BaroWardrobeSwitcher
             sprite.CanBeHiddenByOtherWearables = false;
         }
 
-        private static void ClearWearableAttachmentMask(WearableSprite sprite)
-        {
-            if (sprite == null) { return; }
-            sprite.HideWearablesOfType = new List<WearableType>();
-            sprite.ObscureOtherWearables = WearableSprite.ObscuringMode.None;
-            sprite.CanBeHiddenByOtherWearables = false;
-        }
-
-        private static void ClearHeadWearableMask(WearableSprite sprite)
-        {
-            if (sprite == null) { return; }
-            sprite.HideLimb = false;
-        }
-
-        private static void RestoreAllSpriteMasks()
-        {
-            foreach (Character character in OriginalSpriteMasksByCharacter.Keys.ToList())
-            {
-                RestoreSpriteMasks(character);
-            }
-            OriginalSpriteMasksByCharacter.Clear();
-        }
-
-        private static void RestoreSpriteMasks(Character character)
-        {
-            if (character == null) { return; }
-            if (!OriginalSpriteMasksByCharacter.TryGetValue(character, out Dictionary<WearableSprite, SpriteMaskState> masks))
-            {
-                return;
-            }
-            foreach (KeyValuePair<WearableSprite, SpriteMaskState> pair in masks.ToList())
-            {
-                pair.Value.Restore(pair.Key);
-            }
-            OriginalSpriteMasksByCharacter.Remove(character);
-        }
 
         private static bool IsCharacterStale(Character character)
         {
@@ -2445,12 +2637,13 @@ namespace BaroWardrobeSwitcher
         {
             sprite = null;
             if (character == null) { return false; }
-            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot))
+            if (!RenderSessions.TryGetValue(character, out RenderSession session))
             {
                 return false;
             }
-            foreach (WearableSprite candidate in EnumerateFashionSpriteCandidates(spritesBySlot, type, limbType))
+            foreach (FashionSpriteDescriptor descriptor in EnumerateFashionSpriteCandidates(session.SpritesBySlot, type, limbType))
             {
+                WearableSprite candidate = descriptor?.Sprite;
                 if (candidate == null) { continue; }
                 if (drawnSprites != null && drawnSprites.Contains(candidate)) { continue; }
                 sprite = candidate;
@@ -2466,35 +2659,35 @@ namespace BaroWardrobeSwitcher
             HashSet<WearableSprite> drawnSprites)
         {
             if (character == null || drawnSprites == null || drawnSprites.Count == 0) { return false; }
-            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot))
+            if (!RenderSessions.TryGetValue(character, out RenderSession session))
             {
                 return false;
             }
-            return EnumerateFashionSpriteCandidates(spritesBySlot, type, limbType)
-                .Any(sprite => sprite != null && drawnSprites.Contains(sprite));
+            return EnumerateFashionSpriteCandidates(session.SpritesBySlot, type, limbType)
+                .Any(descriptor => descriptor?.Sprite != null && drawnSprites.Contains(descriptor.Sprite));
         }
 
-        private static IEnumerable<WearableSprite> EnumerateFashionSpriteCandidates(
-            Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot,
+        private static IEnumerable<FashionSpriteDescriptor> EnumerateFashionSpriteCandidates(
+            Dictionary<Tuple<WearableType, LimbType>, List<FashionSpriteDescriptor>> spritesBySlot,
             WearableType type,
             LimbType limbType)
         {
             if (spritesBySlot == null) { yield break; }
 
-            if (spritesBySlot.TryGetValue(Tuple.Create(type, limbType), out List<WearableSprite> exactSprites) && exactSprites != null)
+            if (spritesBySlot.TryGetValue(Tuple.Create(type, limbType), out List<FashionSpriteDescriptor> exactSprites) && exactSprites != null)
             {
-                foreach (WearableSprite sprite in exactSprites)
+                foreach (FashionSpriteDescriptor sprite in exactSprites)
                 {
                     yield return sprite;
                 }
             }
 
             if (limbType == LimbType.None) { yield break; }
-            if (!spritesBySlot.TryGetValue(Tuple.Create(type, LimbType.None), out List<WearableSprite> wildcardSprites) || wildcardSprites == null)
+            if (!spritesBySlot.TryGetValue(Tuple.Create(type, LimbType.None), out List<FashionSpriteDescriptor> wildcardSprites) || wildcardSprites == null)
             {
                 yield break;
             }
-            foreach (WearableSprite sprite in wildcardSprites)
+            foreach (FashionSpriteDescriptor sprite in wildcardSprites)
             {
                 yield return sprite;
             }
@@ -2503,13 +2696,13 @@ namespace BaroWardrobeSwitcher
         private static string DescribeFashionSprites(Character character)
         {
             if (character == null) { return "character=nil"; }
-            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
-                spritesBySlot.Count == 0)
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+                session.SpritesBySlot.Count == 0)
             {
                 return "none";
             }
             return string.Join(";",
-                spritesBySlot
+                session.SpritesBySlot
                     .OrderBy(pair => pair.Key.Item2.ToString())
                     .ThenBy(pair => pair.Key.Item1.ToString())
                     .Select(pair => pair.Key.Item2 + "/" + pair.Key.Item1 + "=" + (pair.Value?.Count ?? 0)));
@@ -2518,40 +2711,173 @@ namespace BaroWardrobeSwitcher
         private static string DescribeFashionSpriteLayers(Character character)
         {
             if (character == null) { return "character=nil"; }
-            if (!FashionSpritesByCharacter.TryGetValue(character, out Dictionary<Tuple<WearableType, LimbType>, List<WearableSprite>> spritesBySlot) ||
-                spritesBySlot.Count == 0)
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+                session.SpritesBySlot.Count == 0)
             {
                 return "none";
             }
             return string.Join(";",
-                spritesBySlot.Values
+                session.SpritesBySlot.Values
                     .Where(spriteList => spriteList != null)
-                    .SelectMany(spriteList => spriteList.Where(sprite => sprite != null).Select(GetFashionLayerName))
+                    .SelectMany(spriteList => spriteList.Where(descriptor => descriptor?.Sprite != null).Select(descriptor => GetFashionLayerName(descriptor.Sprite)))
                     .GroupBy(layer => layer)
                     .OrderBy(group => group.Key)
                     .Select(group => group.Key + "=" + group.Count()));
         }
 
-        private sealed class FashionSoundEffect
+        private static string DescribeFashionSpriteSources(Character character)
         {
-            public FashionSoundEffect(StatusEffect statusEffect)
+            if (character == null ||
+                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                session.SpriteCount == 0)
             {
-                StatusEffect = statusEffect;
+                return "none";
             }
-
-            public StatusEffect StatusEffect { get; }
+            return string.Join(";",
+                session.Descriptors
+                    .Where(descriptor => descriptor != null)
+                    .OrderBy(descriptor => descriptor.SourceIdentifier)
+                    .ThenBy(descriptor => descriptor.ResolvedSpritePath)
+                    .Select(descriptor =>
+                        descriptor.SourceIdentifier +
+                        "@" +
+                        descriptor.SourceContentPackage +
+                        "=" +
+                        descriptor.ResolvedSpritePath));
         }
 
-        private sealed class FashionComponentSound
+        internal sealed class LimbRenderTransaction
         {
-            public FashionComponentSound(ItemComponent component, ActionType actionType)
+            private readonly Limb limb;
+            private readonly Dictionary<WearableSprite, SpriteMaskState> originalMasks =
+                new Dictionary<WearableSprite, SpriteMaskState>();
+            private List<WearableSprite> originalOrder;
+            private RenderSession session;
+            private bool cleaned;
+            private int storedFashionDrawDepth;
+
+            public LimbRenderTransaction(Limb limb)
             {
-                Component = component;
-                ActionType = actionType;
+                this.limb = limb;
             }
 
-            public ItemComponent Component { get; }
-            public ActionType ActionType { get; }
+            public bool IsOwner { get; private set; }
+
+            public bool IsDrawingStoredFashion => storedFashionDrawDepth > 0;
+
+            public HashSet<WearableSprite> DrawnSprites { get; } = new HashSet<WearableSprite>();
+
+            public List<WearableSprite> InjectedSprites { get; } = new List<WearableSprite>();
+
+            public void EnterStoredFashionDraw()
+            {
+                if (!IsOwner) { throw new InvalidOperationException("Render transaction is not active."); }
+                storedFashionDrawDepth++;
+            }
+
+            public void ExitStoredFashionDraw()
+            {
+                if (storedFashionDrawDepth <= 0)
+                {
+                    throw new InvalidOperationException("Stored fashion draw guard is unbalanced.");
+                }
+                storedFashionDrawDepth--;
+            }
+
+            public void Begin(RenderSession renderSession)
+            {
+                session = renderSession ?? throw new ArgumentNullException(nameof(renderSession));
+                IsOwner = true;
+                List<WearableSprite> wearingItems = limb?.WearingItems;
+                if (wearingItems == null) { return; }
+
+                originalOrder = new List<WearableSprite>(wearingItems);
+                foreach (WearableSprite equipmentSprite in originalOrder
+                             .Where(sprite => sprite != null && session.EquipmentMasksToSanitize.Contains(sprite)))
+                {
+                    originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);
+                    ClearMask(equipmentSprite);
+                }
+
+                List<FashionSpriteDescriptor> descriptors = EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type)
+                    .Select(pair => pair.Value)
+                    .Where(descriptor => descriptor != null && !wearingItems.Contains(descriptor.Sprite))
+                    .Distinct()
+                    .ToList();
+                foreach (FashionSpriteDescriptor descriptor in descriptors)
+                {
+                    if (!descriptor.IsValid(out string error))
+                    {
+                        throw new InvalidOperationException("invalid fashion descriptor: " + error);
+                    }
+                }
+                foreach (FashionSpriteDescriptor descriptor in descriptors)
+                {
+                    wearingItems.Add(descriptor.Sprite);
+                    InjectedSprites.Add(descriptor.Sprite);
+                }
+                SortWearablesForDraw(wearingItems);
+                lastInjectedSpriteCount = InjectedSprites.Count;
+            }
+
+            public void Cleanup()
+            {
+                if (cleaned) { return; }
+                cleaned = true;
+                List<Exception> cleanupErrors = new List<Exception>();
+                try
+                {
+                    List<WearableSprite> wearingItems = limb?.WearingItems;
+                    if (IsOwner && wearingItems != null)
+                    {
+                        wearingItems.Clear();
+                        if (originalOrder != null)
+                        {
+                            wearingItems.AddRange(originalOrder);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    cleanupErrors.Add(new InvalidOperationException("Failed to restore Limb.WearingItems snapshot.", ex));
+                }
+
+                foreach (KeyValuePair<WearableSprite, SpriteMaskState> pair in originalMasks)
+                {
+                    try
+                    {
+                        pair.Value.Restore(pair.Key);
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupErrors.Add(new InvalidOperationException("Failed to restore wearable mask snapshot.", ex));
+                    }
+                }
+
+                if (IsOwner)
+                {
+                    try
+                    {
+                        session?.ExitDraw(limb);
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupErrors.Add(new InvalidOperationException("Failed to release render transaction ownership.", ex));
+                    }
+                }
+
+                originalMasks.Clear();
+                InjectedSprites.Clear();
+                DrawnSprites.Clear();
+                storedFashionDrawDepth = 0;
+                IsOwner = false;
+
+                if (cleanupErrors.Count == 1) { throw cleanupErrors[0]; }
+                if (cleanupErrors.Count > 1)
+                {
+                    throw new AggregateException("Multiple render transaction cleanup operations failed.", cleanupErrors);
+                }
+            }
         }
 
         private sealed class PatchState
@@ -2623,32 +2949,28 @@ namespace BaroWardrobeSwitcher
 
     internal static class LimbDrawPatch
     {
-        private static void Prefix(Limb __instance)
+        private static void Prefix(Limb __instance, out VisualOverride.LimbRenderTransaction __state)
         {
-            VisualOverride.BeginLimbDraw(__instance);
+            __state = VisualOverride.BeginLimbDraw(__instance);
         }
 
-        private static void Postfix(Limb __instance, object[] __args)
+        private static void Postfix(
+            Limb __instance,
+            SpriteBatch spriteBatch,
+            Camera cam,
+            Color? overrideColor,
+            bool disableDeformations,
+            VisualOverride.LimbRenderTransaction __state)
         {
-            SpriteBatch spriteBatch = null;
-            Color? overrideColor = null;
-            foreach (object arg in __args ?? Array.Empty<object>())
-            {
-                if (spriteBatch == null && arg is SpriteBatch batch)
-                {
-                    spriteBatch = batch;
-                }
-                if (!overrideColor.HasValue && arg is Color color)
-                {
-                    overrideColor = color;
-                }
-            }
-            VisualOverride.DrawMissingFashionSprites(__instance, spriteBatch, overrideColor);
+            VisualOverride.DrawMissingFashionSprites(__instance, __state, spriteBatch, overrideColor);
         }
 
-        private static Exception Finalizer(Limb __instance, Exception __exception)
+        private static Exception Finalizer(
+            Limb __instance,
+            Exception __exception,
+            VisualOverride.LimbRenderTransaction __state)
         {
-            return VisualOverride.EndLimbDraw(__instance, __exception);
+            return VisualOverride.EndLimbDraw(__instance, __state, __exception);
         }
     }
 

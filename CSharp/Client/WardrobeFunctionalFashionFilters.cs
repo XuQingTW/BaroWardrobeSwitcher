@@ -6,312 +6,216 @@ using System.Reflection;
 using Barotrauma;
 using Barotrauma.Items.Components;
 using Barotrauma.LuaCs;
-using HarmonyLib;
 
 namespace BaroWardrobeSwitcher
 {
+    /// <summary>
+    /// Kept as an assembly plugin so existing source-loading configurations continue to
+    /// discover this file. The policy is now composed directly by VisualOverride; it no
+    /// longer Harmony-patches private methods in its own assembly.
+    /// </summary>
     public sealed class WardrobeFunctionalFashionFiltersPlugin : IAssemblyPlugin
     {
-        private Harmony harmonyInstance;
-
         public void Initialize()
         {
-            harmonyInstance = new Harmony("BaroWardrobeSwitcher.FunctionalFashionFilters");
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] Functional fashion filters initializing.");
+            LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion effect policy initialized.");
         }
 
-        public void OnLoadCompleted()
-        {
-            FunctionalFashionFilters.InstallPatches(harmonyInstance);
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] Functional fashion filters loaded.");
-        }
+        public void OnLoadCompleted() { }
 
         public void PreInitPatching() { }
 
         public void Dispose()
         {
-            FunctionalFashionFilters.Clear();
-            harmonyInstance?.UnpatchSelf();
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] Functional fashion filters disposed.");
+            LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion effect policy disposed.");
         }
     }
 
-    internal static class FunctionalFashionFilters
+    /// <summary>
+    /// Decides which functional effects are safe to reproduce for a cosmetic look.
+    /// Stable prefab tags/components are preferred. Identifier/name matching remains as
+    /// a one-release compatibility fallback for third-party items without useful tags.
+    /// </summary>
+    internal sealed class FashionEffectPolicy
     {
-        private static readonly MethodInfo CaptureFashionAnimationsMethod =
-            AccessTools.Method(typeof(VisualOverride), "CaptureFashionAnimations");
-        private static readonly MethodInfo CaptureFashionSoundsMethod =
-            AccessTools.Method(typeof(VisualOverride), "CaptureFashionSounds");
-        private static readonly MethodInfo CaptureFashionComponentSoundsMethod =
-            AccessTools.Method(typeof(VisualOverride), "CaptureFashionComponentSounds");
-        private static readonly MethodInfo CreateFashionSpriteCloneMethod =
-            AccessTools.Method(typeof(VisualOverride), "CreateFashionSpriteClone");
-        private static readonly MethodInfo GetCharacterDebugStatusMethod =
-            AccessTools.Method(typeof(VisualOverride), "GetCharacterDebugStatus");
-        private static readonly MethodInfo ClearCharacterMethod =
-            AccessTools.Method(typeof(VisualOverride), "ClearCharacter");
-        private static readonly MethodInfo ClearAllMethod =
-            AccessTools.Method(typeof(VisualOverride), "ClearAll");
-        private static readonly MethodInfo RestoreCharacterItemVisualsMethod =
-            AccessTools.Method(typeof(VisualOverride), "RestoreCharacterItemVisuals");
-
-        private static readonly FieldInfo FashionAnimationsField =
-            AccessTools.Field(typeof(VisualOverride), "FashionAnimationsByCharacter");
-        private static readonly FieldInfo AnimationsToTriggerField =
-            AccessTools.Field(typeof(StatusEffect), "animationsToTrigger");
+        private static readonly Identifier DeepDivingTag = new Identifier("deepdiving");
+        private static readonly Identifier DeepDivingLargeTag = new Identifier("deepdivinglarge");
         private static readonly FieldInfo SoundsField =
-            AccessTools.Field(typeof(StatusEffect), "sounds");
+            typeof(StatusEffect).GetField("sounds", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo ComponentSoundsField =
-            AccessTools.Field(typeof(ItemComponent), "sounds");
-        private static readonly MethodInfo MemberwiseCloneMethod =
-            AccessTools.Method(typeof(object), "MemberwiseClone") ??
-            typeof(object).GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic);
+            typeof(ItemComponent).GetField("sounds", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo PropertyConditionalsField =
+            typeof(StatusEffect).GetField("propertyConditionals", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo RequiredItemsField =
+            typeof(StatusEffect).GetField("requiredItems", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo PlaySoundOnRequiredItemFailureField =
+            typeof(StatusEffect).GetField("playSoundOnRequiredItemFailure", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private readonly FashionEffectDiagnostics diagnostics = new FashionEffectDiagnostics();
 
-        private static readonly Dictionary<Character, FunctionalFilterDiagnostics> DiagnosticsByCharacter =
-            new Dictionary<Character, FunctionalFilterDiagnostics>();
-
-        public static void InstallPatches(Harmony harmony)
+        public bool ShouldCaptureAnimation(Item item, object animationInfo)
         {
-            if (harmony == null) { return; }
-            PatchTarget(harmony, "VisualOverride.CaptureFashionAnimations", CaptureFashionAnimationsMethod,
-                prefix: AccessTools.Method(typeof(CaptureFashionAnimationsPatch), "Prefix"));
-            PatchTarget(harmony, "VisualOverride.CaptureFashionSounds", CaptureFashionSoundsMethod,
-                prefix: AccessTools.Method(typeof(CaptureFashionSoundsPatch), "Prefix"));
-            PatchTarget(harmony, "VisualOverride.CaptureFashionComponentSounds", CaptureFashionComponentSoundsMethod,
-                prefix: AccessTools.Method(typeof(CaptureFashionComponentSoundsPatch), "Prefix"));
-            PatchTarget(harmony, "VisualOverride.CreateFashionSpriteClone", CreateFashionSpriteCloneMethod,
-                prefix: AccessTools.Method(typeof(CreateFashionSpriteClonePatch), "Prefix"));
-            PatchTarget(harmony, "VisualOverride.GetCharacterDebugStatus", GetCharacterDebugStatusMethod,
-                postfix: AccessTools.Method(typeof(GetCharacterDebugStatusPatch), "Postfix"));
-            PatchTarget(harmony, "VisualOverride.ClearCharacter", ClearCharacterMethod,
-                postfix: AccessTools.Method(typeof(ClearCharacterPatch), "Postfix"));
-            PatchTarget(harmony, "VisualOverride.ClearAll", ClearAllMethod,
-                postfix: AccessTools.Method(typeof(ClearAllPatch), "Postfix"));
-            PatchTarget(harmony, "VisualOverride.RestoreCharacterItemVisuals", RestoreCharacterItemVisualsMethod,
-                postfix: AccessTools.Method(typeof(ClearCharacterPatch), "Postfix"));
+            bool sealedSuit = IsSealedSuit(item);
+            bool filtered = sealedSuit
+                ? IsMovementAnimation(animationInfo)
+                : IsLargeEquipmentMovementAnimation(animationInfo);
+            if (!filtered) { return true; }
+
+            diagnostics.FilteredMovementAnimations++;
+            diagnostics.RememberPolicy(PolicyDescription(item));
+            return false;
         }
 
-        public static void Clear()
+        public bool ShouldCaptureStatusSounds(Item item)
         {
-            DiagnosticsByCharacter.Clear();
+            if (!ShouldSuppressCosmeticSounds(item)) { return true; }
+            int count = CountStatusSounds(item);
+            if (count > 0)
+            {
+                diagnostics.SuppressedStatusSounds += count;
+                diagnostics.RememberPolicy(PolicyDescription(item));
+            }
+            return false;
         }
 
-        private static void PatchTarget(
-            Harmony harmony,
-            string name,
-            MethodBase target,
-            MethodInfo prefix = null,
-            MethodInfo postfix = null)
+        public bool ShouldCaptureStatusSound(Item item, StatusEffect statusEffect)
         {
-            if (target == null)
-            {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Functional filter patch skipped; target missing: " + name);
-                return;
-            }
-            try
-            {
-                harmony.Patch(
-                    target,
-                    prefix == null ? null : new HarmonyMethod(prefix),
-                    postfix == null ? null : new HarmonyMethod(postfix));
-            }
-            catch (Exception ex)
-            {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Functional filter patch failed for " + name + ": " + ex.GetType().Name + ": " + ex.Message);
-            }
+            if (!IsFunctionalEquipmentAlarm(statusEffect)) { return true; }
+            diagnostics.ExcludedFunctionalAlarms++;
+            diagnostics.RememberPolicy(PolicyDescription(item));
+            return false;
         }
 
-        public static bool TryCaptureFilteredFashionAnimations(object[] args, out int result)
+        public bool ShouldCaptureComponentSounds(Item item)
         {
-            result = 0;
-            if (args == null || args.Length < 2) { return false; }
-            Character character = args[0] as Character;
-            Item item = args[1] as Item;
-            if (character == null || item?.Components == null) { return false; }
-            if (AnimationsToTriggerField == null || FashionAnimationsField == null) { return false; }
-
-            Dictionary<Character, List<object>> animationsByCharacter = GetFashionAnimationsByCharacter();
-            if (animationsByCharacter == null) { return false; }
-
-            if (!animationsByCharacter.TryGetValue(character, out List<object> animationInfos))
+            if (!ShouldSuppressCosmeticSounds(item)) { return true; }
+            int count = CountComponentSounds(item);
+            if (count > 0)
             {
-                animationInfos = new List<object>();
-                animationsByCharacter[character] = animationInfos;
+                diagnostics.SuppressedItemSounds += count;
+                diagnostics.RememberPolicy(PolicyDescription(item));
             }
+            return false;
+        }
 
-            int captured = 0;
-            int filtered = 0;
-            bool isSealedSuit = IsSealedSuit(item);
-            foreach (ItemComponent component in item.Components)
-            {
-                if (component?.statusEffectLists == null) { continue; }
-                if (!component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> statusEffects)) { continue; }
-                foreach (StatusEffect statusEffect in statusEffects)
-                {
-                    IEnumerable animations = AnimationsToTriggerField.GetValue(statusEffect) as IEnumerable;
-                    if (animations == null) { continue; }
-                    foreach (object animationInfo in animations)
-                    {
-                        if (ShouldFilterFashionAnimation(isSealedSuit, animationInfo))
-                        {
-                            filtered++;
-                            continue;
-                        }
-
-                        object boostedAnimationInfo = BoostFashionAnimationPriority(animationInfo);
-                        if (boostedAnimationInfo == null || animationInfos.Contains(boostedAnimationInfo)) { continue; }
-                        animationInfos.Add(boostedAnimationInfo);
-                        captured++;
-                    }
-                }
-            }
-
-            if (filtered > 0)
-            {
-                Diagnostics(character).FilteredMovementAnimations += filtered;
-                Diagnostics(character).RememberPolicy(PolicyDescription(item));
-            }
-            result = captured;
+        public bool ShouldPreserveSealedSuitMasks(Item item)
+        {
+            if (!IsSealedSuit(item)) { return false; }
+            diagnostics.PreservedSealedMaskSprites++;
+            diagnostics.RememberPolicy(PolicyDescription(item));
             return true;
         }
 
-        public static bool ShouldSkipFashionStatusSounds(object[] args, out int result)
+        public string AppendDebugStatus(string status)
         {
-            result = 0;
-            if (args == null || args.Length < 2) { return false; }
-            Character character = args[0] as Character;
-            Item item = args[1] as Item;
-            if (character == null || item == null) { return false; }
-            if (!ShouldSuppressCosmeticSounds(item)) { return false; }
-
-            result = 0;
-            int suppressed = CountFashionStatusSounds(item);
-            if (suppressed > 0)
-            {
-                Diagnostics(character).SuppressedStatusSounds += suppressed;
-                Diagnostics(character).RememberPolicy(PolicyDescription(item));
-            }
-            return true;
-        }
-
-        public static bool ShouldSkipFashionComponentSounds(object[] args, out int result)
-        {
-            result = 0;
-            if (args == null || args.Length < 2) { return false; }
-            Character character = args[0] as Character;
-            Item item = args[1] as Item;
-            if (character == null || item == null) { return false; }
-            if (!ShouldSuppressCosmeticSounds(item)) { return false; }
-
-            int suppressed = CountFashionComponentSounds(item);
-            if (suppressed > 0)
-            {
-                Diagnostics(character).SuppressedItemSounds += suppressed;
-                Diagnostics(character).RememberPolicy(PolicyDescription(item));
-            }
-            return true;
-        }
-
-        public static bool TryCreateSealedSuitSpriteClone(object[] args, out WearableSprite result)
-        {
-            result = null;
-            if (args == null || args.Length < 2) { return false; }
-            Character character = args[0] as Character;
-            WearableSprite original = args[1] as WearableSprite;
-            if (original == null) { return false; }
-
-            Item sourceItem = GetSourceItem(original);
-            if (!ShouldPreserveSealedSuitMasks(sourceItem)) { return false; }
-
-            WearableSprite clone = original;
-            try
-            {
-                clone = MemberwiseCloneMethod?.Invoke(original, null) as WearableSprite ?? original;
-            }
-            catch (Exception ex)
-            {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to clone sealed fashion sprite, using original: " + ex.GetType().Name + ": " + ex.Message);
-            }
-
-            if (character != null)
-            {
-                Diagnostics(character).PreservedSealedMaskSprites++;
-                Diagnostics(character).RememberPolicy(PolicyDescription(sourceItem));
-            }
-            result = clone;
-            return true;
-        }
-
-        public static void AppendDebugStatus(object[] args, ref string result)
-        {
-            if (args == null || args.Length < 1) { return; }
-            Character character = args[0] as Character;
-            if (character == null) { return; }
-            if (!DiagnosticsByCharacter.TryGetValue(character, out FunctionalFilterDiagnostics diagnostics)) { return; }
             string suffix = diagnostics.Describe();
-            if (string.IsNullOrWhiteSpace(suffix)) { return; }
-            result = (result ?? string.Empty) + ", functionalFilters=" + suffix;
+            return string.IsNullOrWhiteSpace(suffix)
+                ? status
+                : (status ?? string.Empty) + ", fashionPolicy=" + suffix;
         }
 
-        public static void ClearCharacterDiagnostics(object[] args)
+        internal static bool IsFunctionalEquipmentAlarm(StatusEffect statusEffect)
         {
-            if (args == null || args.Length < 1) { return; }
-            Character character = args[0] as Character;
-            if (character != null)
+            if (statusEffect == null) { return false; }
+            try
             {
-                DiagnosticsByCharacter.Remove(character);
+                // These fields are pinned by the compatibility probe. If a future
+                // game build removes one, fail open and let Barotrauma own the sound
+                // lifecycle instead of risking a swallowed safety warning.
+                if (PropertyConditionalsField == null ||
+                    RequiredItemsField == null ||
+                    PlaySoundOnRequiredItemFailureField == null)
+                {
+                    return true;
+                }
+
+                if (HasEntriesOrCannotInspect(PropertyConditionalsField, statusEffect) ||
+                    HasEntriesOrCannotInspect(RequiredItemsField, statusEffect))
+                {
+                    return true;
+                }
+
+                object playOnFailure = PlaySoundOnRequiredItemFailureField.GetValue(statusEffect);
+                if (playOnFailure is bool enabled) { return enabled; }
+                return playOnFailure != null;
+            }
+            catch
+            {
+                return true;
             }
         }
 
-        private static FunctionalFilterDiagnostics Diagnostics(Character character)
+        private static bool IsSealedSuit(Item item)
         {
-            if (!DiagnosticsByCharacter.TryGetValue(character, out FunctionalFilterDiagnostics diagnostics))
+            if (HasTag(item, DeepDivingTag) || HasTag(item, DeepDivingLargeTag))
             {
-                diagnostics = new FunctionalFilterDiagnostics();
-                DiagnosticsByCharacter[character] = diagnostics;
+                return true;
             }
-            return diagnostics;
+            return IsSealedSuitText(NormalizedItemText(item));
         }
 
-        private static Dictionary<Character, List<object>> GetFashionAnimationsByCharacter()
+        private static bool ShouldSuppressCosmeticSounds(Item item)
+        {
+            if (IsSealedSuit(item)) { return true; }
+
+            string identifier = ItemIdentifier(item);
+            if (identifier.Equals("autoinjectorheadset", StringComparison.OrdinalIgnoreCase) ||
+                identifier.Equals("injectorheadset", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // Compatibility fallback for older and third-party prefabs that expose no
+            // functional tag. Do not use localized display names unless needed.
+            string text = NormalizedItemText(item);
+            return text.Contains("autoinjectorheadset") ||
+                   text.Contains("injectorheadset") ||
+                   text.Contains("autoinjector");
+        }
+
+        private static bool HasTag(Item item, Identifier tag)
         {
             try
             {
-                return FashionAnimationsField?.GetValue(null) as Dictionary<Character, List<object>>;
+                return item != null && (item.HasTag(tag) || (item.Prefab?.Tags?.Contains(tag) ?? false));
             }
-            catch (Exception ex)
+            catch
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to access fashion animation state: " + ex.GetType().Name + ": " + ex.Message);
-                return null;
+                return false;
             }
         }
 
-        private static int CountFashionStatusSounds(Item item)
+        private static int CountStatusSounds(Item item)
         {
             if (item?.Components == null || SoundsField == null) { return 0; }
             int count = 0;
             foreach (ItemComponent component in item.Components)
             {
-                if (component?.statusEffectLists == null) { continue; }
-                if (!component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> statusEffects)) { continue; }
-                foreach (StatusEffect statusEffect in statusEffects)
+                if (component?.statusEffectLists == null ||
+                    !component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> effects))
                 {
-                    if (HasSounds(statusEffect)) { count++; }
+                    continue;
                 }
+                count += effects.Count(HasSounds);
             }
             return count;
         }
 
-        private static int CountFashionComponentSounds(Item item)
+        private static int CountComponentSounds(Item item)
         {
             if (item?.Components == null || ComponentSoundsField == null) { return 0; }
             int count = 0;
             foreach (ItemComponent component in item.Components)
             {
-                System.Collections.IDictionary sounds = ComponentSoundsField.GetValue(component) as System.Collections.IDictionary;
-                if (sounds != null)
+                try
                 {
-                    count += sounds.Count;
+                    if (ComponentSoundsField.GetValue(component) is IDictionary sounds)
+                    {
+                        count += sounds.Count;
+                    }
+                }
+                catch
+                {
+                    // Optional diagnostics must never make capture fail.
                 }
             }
             return count;
@@ -320,48 +224,37 @@ namespace BaroWardrobeSwitcher
         private static bool HasSounds(StatusEffect statusEffect)
         {
             if (statusEffect == null || SoundsField == null) { return false; }
-            IEnumerable sounds = SoundsField.GetValue(statusEffect) as IEnumerable;
-            if (sounds == null) { return false; }
-            foreach (object sound in sounds)
+            try
             {
-                if (sound != null) { return true; }
+                if (!(SoundsField.GetValue(statusEffect) is IEnumerable sounds)) { return false; }
+                foreach (object sound in sounds)
+                {
+                    if (sound != null) { return true; }
+                }
+            }
+            catch
+            {
+                // Optional diagnostics must never make capture fail.
             }
             return false;
         }
 
-        private static Item GetSourceItem(WearableSprite sprite)
+        private static bool HasEntries(IEnumerable values)
         {
-            ItemComponent component = sprite?.WearableComponent;
-            if (component == null) { return null; }
-            try
+            if (values == null) { return false; }
+            foreach (object value in values)
             {
-                PropertyInfo property = component.GetType().GetProperty("Item", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) ??
-                                        typeof(ItemComponent).GetProperty("Item", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                return property?.GetValue(component) as Item;
+                if (value != null) { return true; }
             }
-            catch
-            {
-                return null;
-            }
+            return false;
         }
 
-        private static bool ShouldSuppressCosmeticSounds(Item item)
+        private static bool HasEntriesOrCannotInspect(FieldInfo field, StatusEffect statusEffect)
         {
-            string text = NormalizedItemText(item);
-            return IsSealedSuitText(text) ||
-                   text.Contains("autoinjectorheadset") ||
-                   text.Contains("injectorheadset") ||
-                   text.Contains("autoinjector");
-        }
-
-        private static bool ShouldPreserveSealedSuitMasks(Item item)
-        {
-            return IsSealedSuit(item);
-        }
-
-        private static bool IsSealedSuit(Item item)
-        {
-            return IsSealedSuitText(NormalizedItemText(item));
+            object value = field.GetValue(statusEffect);
+            if (value == null) { return false; }
+            if (!(value is IEnumerable values)) { return true; }
+            return HasEntries(values);
         }
 
         private static bool IsSealedSuitText(string text)
@@ -376,8 +269,7 @@ namespace BaroWardrobeSwitcher
 
         private static string PolicyDescription(Item item)
         {
-            string text = NormalizedItemText(item);
-            if (IsSealedSuitText(text)) { return "sealed-suit"; }
+            if (IsSealedSuit(item)) { return "sealed-suit"; }
             if (ShouldSuppressCosmeticSounds(item)) { return "functional-soundless"; }
             return "movement-filter";
         }
@@ -415,66 +307,20 @@ namespace BaroWardrobeSwitcher
         private static string Normalize(string value)
         {
             if (string.IsNullOrWhiteSpace(value)) { return string.Empty; }
-            char[] buffer = value
-                .ToLowerInvariant()
-                .Where(char.IsLetterOrDigit)
-                .ToArray();
-            return new string(buffer);
-        }
-
-        private static object BoostFashionAnimationPriority(object animationInfo)
-        {
-            if (animationInfo == null) { return null; }
-            Type animationInfoType = animationInfo.GetType();
-            try
-            {
-                PropertyInfo typeProperty = animationInfoType.GetProperty("Type");
-                PropertyInfo fileProperty = animationInfoType.GetProperty("File");
-                PropertyInfo priorityProperty = animationInfoType.GetProperty("Priority");
-                PropertyInfo expectedSpeciesProperty = animationInfoType.GetProperty("ExpectedSpeciesNames");
-                ConstructorInfo constructor = animationInfoType.GetConstructors()
-                    .FirstOrDefault(ctor => ctor.GetParameters().Length == 4);
-                if (typeProperty == null || fileProperty == null || priorityProperty == null || expectedSpeciesProperty == null || constructor == null)
-                {
-                    return animationInfo;
-                }
-
-                float priority = Convert.ToSingle(priorityProperty.GetValue(animationInfo));
-                return constructor.Invoke(new[]
-                {
-                    typeProperty.GetValue(animationInfo),
-                    fileProperty.GetValue(animationInfo),
-                    priority + 10000.0f,
-                    expectedSpeciesProperty.GetValue(animationInfo)
-                });
-            }
-            catch (Exception ex)
-            {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to boost filtered fashion animation priority: " + ex.GetType().Name + ": " + ex.Message);
-                return animationInfo;
-            }
-        }
-
-        private static bool ShouldFilterFashionAnimation(bool isSealedSuit, object animationInfo)
-        {
-            return isSealedSuit
-                ? IsMovementAnimation(animationInfo)
-                : IsLargeEquipmentMovementAnimation(animationInfo);
+            return new string(value.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
         }
 
         private static bool IsMovementAnimation(object animationInfo)
         {
             if (animationInfo == null) { return false; }
-            Type animationInfoType = animationInfo.GetType();
             try
             {
-                string animationType = animationInfoType.GetProperty("Type")?.GetValue(animationInfo)?.ToString();
-                return string.Equals(animationType, "Walk", StringComparison.OrdinalIgnoreCase) ||
-                       string.Equals(animationType, "Run", StringComparison.OrdinalIgnoreCase);
+                string type = animationInfo.GetType().GetProperty("Type")?.GetValue(animationInfo)?.ToString();
+                return string.Equals(type, "Walk", StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(type, "Run", StringComparison.OrdinalIgnoreCase);
             }
-            catch (Exception ex)
+            catch
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to inspect functional fashion animation type: " + ex.GetType().Name + ": " + ex.Message);
                 return false;
             }
         }
@@ -482,35 +328,31 @@ namespace BaroWardrobeSwitcher
         private static bool IsLargeEquipmentMovementAnimation(object animationInfo)
         {
             if (!IsMovementAnimation(animationInfo)) { return false; }
-            Type animationInfoType = animationInfo.GetType();
             try
             {
-                string file = animationInfoType.GetProperty("File")?.GetValue(animationInfo)?.ToString() ?? string.Empty;
+                string file = animationInfo.GetType().GetProperty("File")?.GetValue(animationInfo)?.ToString() ?? string.Empty;
                 return file.IndexOf("Exosuit", StringComparison.OrdinalIgnoreCase) >= 0 ||
                        file.IndexOf("DivingSuit", StringComparison.OrdinalIgnoreCase) >= 0;
             }
-            catch (Exception ex)
+            catch
             {
-                LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to inspect functional fashion animation: " + ex.GetType().Name + ": " + ex.Message);
                 return false;
             }
         }
 
-        private sealed class FunctionalFilterDiagnostics
+        private sealed class FashionEffectDiagnostics
         {
             private readonly HashSet<string> policies = new HashSet<string>();
 
             public int FilteredMovementAnimations { get; set; }
             public int SuppressedStatusSounds { get; set; }
+            public int ExcludedFunctionalAlarms { get; set; }
             public int SuppressedItemSounds { get; set; }
             public int PreservedSealedMaskSprites { get; set; }
 
             public void RememberPolicy(string policy)
             {
-                if (!string.IsNullOrWhiteSpace(policy))
-                {
-                    policies.Add(policy);
-                }
+                if (!string.IsNullOrWhiteSpace(policy)) { policies.Add(policy); }
             }
 
             public string Describe()
@@ -518,87 +360,12 @@ namespace BaroWardrobeSwitcher
                 List<string> parts = new List<string>();
                 if (FilteredMovementAnimations > 0) { parts.Add("filteredMovementAnimations=" + FilteredMovementAnimations); }
                 if (SuppressedStatusSounds > 0) { parts.Add("suppressedStatusSounds=" + SuppressedStatusSounds); }
+                if (ExcludedFunctionalAlarms > 0) { parts.Add("excludedFunctionalAlarms=" + ExcludedFunctionalAlarms); }
                 if (SuppressedItemSounds > 0) { parts.Add("suppressedItemSounds=" + SuppressedItemSounds); }
                 if (PreservedSealedMaskSprites > 0) { parts.Add("preservedSealedMaskSprites=" + PreservedSealedMaskSprites); }
                 if (policies.Count > 0) { parts.Add("policies=" + string.Join("/", policies.OrderBy(policy => policy))); }
                 return string.Join(";", parts);
             }
-        }
-    }
-
-    internal static class CaptureFashionAnimationsPatch
-    {
-        private static bool Prefix(object[] __args, ref int __result)
-        {
-            if (FunctionalFashionFilters.TryCaptureFilteredFashionAnimations(__args, out int result))
-            {
-                __result = result;
-                return false;
-            }
-            return true;
-        }
-    }
-
-    internal static class CaptureFashionSoundsPatch
-    {
-        private static bool Prefix(object[] __args, ref int __result)
-        {
-            if (FunctionalFashionFilters.ShouldSkipFashionStatusSounds(__args, out int result))
-            {
-                __result = result;
-                return false;
-            }
-            return true;
-        }
-    }
-
-    internal static class CaptureFashionComponentSoundsPatch
-    {
-        private static bool Prefix(object[] __args, ref int __result)
-        {
-            if (FunctionalFashionFilters.ShouldSkipFashionComponentSounds(__args, out int result))
-            {
-                __result = result;
-                return false;
-            }
-            return true;
-        }
-    }
-
-    internal static class CreateFashionSpriteClonePatch
-    {
-        private static bool Prefix(object[] __args, ref WearableSprite __result)
-        {
-            if (FunctionalFashionFilters.TryCreateSealedSuitSpriteClone(__args, out WearableSprite result))
-            {
-                __result = result;
-                return false;
-            }
-            return true;
-        }
-    }
-
-    internal static class GetCharacterDebugStatusPatch
-    {
-        private static void Postfix(object[] __args, ref string __result)
-        {
-            FunctionalFashionFilters.AppendDebugStatus(__args, ref __result);
-        }
-    }
-
-    internal static class ClearCharacterPatch
-    {
-        private static void Postfix(object[] __args)
-        {
-            FunctionalFashionFilters.ClearCharacterDiagnostics(__args);
-        }
-    }
-
-    internal static class ClearAllPatch
-    {
-        private static void Postfix()
-        {
-            FunctionalFashionFilters.Clear();
         }
     }
 }

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ModConfig>
   <Assembly Folder="%ModDir%/CSharp/Client" IsScript="true" Target="Client" FriendlyName="BaroWardrobeSwitcher" />
+  <Lua File="%ModDir%/Lua/WardrobeCore.lua" IsAutorun="true" />
   <Lua File="%ModDir%/Lua/WardrobeSwitcher.lua" IsAutorun="true" Target="Client" />
   <Lua File="%ModDir%/Lua/WardrobeSwitcherServer.lua" IsAutorun="true" Target="Server" />
 </ModConfig>
