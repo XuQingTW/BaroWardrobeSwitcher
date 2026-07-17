@@ -1742,20 +1742,20 @@ namespace BaroWardrobeSwitcher
                 return false;
             }
             bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
+            if (hideOriginalForEmptySavedSlot)
+            {
+                skipOriginal = true;
+                drawOverrideHiddenEmptySlotCount++;
+                if (drawOverrideLogCount < 12)
+                {
+                    drawOverrideLogCount++;
+                    LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable hidden original for empty saved slot: limb={limb.type}, type={original.Type}, slots={DescribeWearableSlots(original)}.");
+                }
+                return true;
+            }
             bool hideOriginalForSavedSlot = ShouldHideOriginalForSavedSlot(limb.character, original);
             if (!TryGetFashionSprite(limb.character, original.Type, limb.type, drawnSprites, out WearableSprite fashionSprite))
             {
-                if (hideOriginalForEmptySavedSlot)
-                {
-                    skipOriginal = true;
-                    drawOverrideHiddenEmptySlotCount++;
-                    if (drawOverrideLogCount < 12)
-                    {
-                        drawOverrideLogCount++;
-                        LuaCsLogger.Log($"[Baro Wardrobe Switcher] DrawWearable hidden original for empty saved slot: limb={limb.type}, type={original.Type}, slots={DescribeWearableSlots(original)}.");
-                    }
-                    return true;
-                }
                 if (hideOriginalForSavedSlot)
                 {
                     skipOriginal = true;

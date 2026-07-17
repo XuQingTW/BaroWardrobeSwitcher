@@ -140,6 +140,26 @@ Assert-Contains $renderer "return session.Validate(out _);" `
     "Invalid renderer sessions must never be reused."
 Write-Host "PASS committed-session-reuse"
 
+# An explicitly empty saved equipment slot must hide the real item before a
+# same-type fashion sprite from another slot can be mistaken for its replacement.
+$drawWearableStart = $renderer.IndexOf(
+    "internal static bool TryOverrideDrawWearable(",
+    [StringComparison]::Ordinal)
+$drawWearableEnd = $renderer.IndexOf(
+    "internal static LimbRenderTransaction BeginLimbDraw(",
+    [StringComparison]::Ordinal)
+if ($drawWearableStart -lt 0 -or $drawWearableEnd -le $drawWearableStart) {
+    throw "Could not isolate DrawWearable override path."
+}
+$drawWearableOverride = $renderer.Substring(
+    $drawWearableStart,
+    $drawWearableEnd - $drawWearableStart)
+Assert-Before $drawWearableOverride `
+    "if (hideOriginalForEmptySavedSlot)" `
+    "if (!TryGetFashionSprite(" `
+    "Empty saved slots must win before matching fashion sprites from other equipment slots."
+Write-Host "PASS empty-slot-priority"
+
 # Attachment visibility is an independent draw-time policy. Force-show must win
 # over force-hide, which in turn wins over the appearance item's XML auto mask.
 Assert-Contains $renderer "public static bool SetAttachmentVisibility(" `

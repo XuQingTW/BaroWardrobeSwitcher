@@ -614,6 +614,11 @@ serverHello.FinalizeForTransport()
 assert(type(networkHandlers[WardrobeCore.NET.V2_HELLO]) == "function")
 networkHandlers[WardrobeCore.NET.V2_HELLO](serverHello)
 
+openPanel = true
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled == false,
+    "multiplayer controls must stay disabled while a command is awaiting acknowledgement")
+
 local sentApply = nil
 for index = #networkSent, 1, -1 do
     if networkSent[index].name == WardrobeCore.NET.V2_COMMAND then
@@ -650,6 +655,32 @@ for _, message in ipairs(networkSent) do
 end
 assert(finalApplyCount == applyCountAfterRejection,
     "a rejected multiplayer auto-apply was queued again without a state change")
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "multiplayer controls did not refresh after a rejected acknowledgement")
+
+-- Accepted commands also finish asynchronously. The open panel must rebuild
+-- after the acknowledgement instead of preserving its pending-state buttons.
+buttons["Save Current Outfit"].OnClicked()
+assert(buttons["Save Current Outfit"].Enabled == false,
+    "multiplayer controls were not disabled while Save was pending")
+local sentSave = networkSent[#networkSent]
+assert(sentSave ~= nil and sentSave.name == WardrobeCore.NET.V2_COMMAND)
+local decodedSave = assert(WardrobeCore.readCommand(sentSave))
+assert(decodedSave.kind == WardrobeCore.COMMAND.Save)
+local acceptedAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(acceptedAck, {
+    operationId = decodedSave.operationId,
+    accepted = true,
+    revision = 1,
+    reason = ""
+}))
+acceptedAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](acceptedAck)
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "multiplayer controls did not refresh after an accepted acknowledgement")
+assert(buttons["Apply Saved Look"].Enabled ~= false,
+    "Apply stayed disabled after multiplayer Save completed")
 
 print = originalPrint
 print("Wardrobe client facade tests passed")

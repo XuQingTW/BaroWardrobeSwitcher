@@ -448,6 +448,7 @@ local lastEquipmentSignature = nil
 local slotResults = {}
 local lastNetworkApplyDiagnostics = {}
 local window = nil
+local windowNeedsRefresh = false
 local overlayRoot = nil
 local attachmentPanelOpen = false
 local lastCharacter = nil
@@ -550,6 +551,7 @@ local function dispatchReducer(event)
     reducerState = clientController.getState()
     if applyReducerProjection ~= nil then applyReducerProjection(reducerState) end
     if syncControlledCharacterState ~= nil then syncControlledCharacterState() end
+    windowNeedsRefresh = true
     return effects or {}
 end
 
@@ -4654,6 +4656,7 @@ end
 
 buildWindow = function()
     removeWindow()
+    windowNeedsRefresh = false
     attachmentPanelOpen = false
 
     local parent = overlayParent()
@@ -4741,6 +4744,7 @@ end
 
 buildAttachmentVisibilityWindow = function()
     removeWindow()
+    windowNeedsRefresh = false
     attachmentPanelOpen = true
     fullPanelOpen = true
 
@@ -4947,7 +4951,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
     syncReducerCharacter(character)
     if character == nil then
         handleNoControlledCharacter()
-        if fullPanelOpen and window == nil then
+        if fullPanelOpen and (window == nil or windowNeedsRefresh) then
             if attachmentPanelOpen then buildAttachmentVisibilityWindow() else buildWindow() end
         end
         if fullPanelOpen then
@@ -4968,7 +4972,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
         refreshActiveLookIfNeeded(character)
     end
 
-    if fullPanelOpen and window == nil then
+    if fullPanelOpen and (window == nil or windowNeedsRefresh) then
         if attachmentPanelOpen then buildAttachmentVisibilityWindow() else buildWindow() end
     end
     if fullPanelOpen then
