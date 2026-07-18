@@ -521,6 +521,9 @@ local function ensureStorageDirectory()
     return pcall(function() Directory.CreateDirectory(directory) end)
 end
 
+-- Persistence is replace-based so a crash cannot expose a partially written
+-- document. The backup path also gives the fallback Move implementation a
+-- recoverable copy of the previous state.
 local function atomicWrite(path, contents)
     if File == nil or path == nil or not ensureStorageDirectory() then return false, "storage_unavailable" end
     local temporaryPath = path .. ".tmp"
@@ -1219,6 +1222,8 @@ local function migrateLegacyForClient(client, accountId)
     log("Migrated a legacy Steam wardrobe record to Client.AccountId.")
 end
 
+-- v2 retries reuse operation IDs. Retaining the first result per account/session
+-- makes repeated packets idempotent even if the connection object is replaced.
 local function newOperationCache(clientSessionId)
     return {
         clientSessionId = clientSessionId,
@@ -1606,6 +1611,9 @@ local function commitClear(session, deleteSaved)
     return true, "ok"
 end
 
+-- Decode and envelope validation stay separate so a request whose operation ID
+-- was readable can still receive a deterministic, correlated rejection ACK.
+-- Truly truncated packets fail before such a response is possible.
 local function parseV2Command(message)
     local command = {
         version = tonumber(message.ReadUInt16()),

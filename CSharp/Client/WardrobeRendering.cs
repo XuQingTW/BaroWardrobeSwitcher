@@ -360,6 +360,8 @@ namespace BaroWardrobeSwitcher
 
         public bool IsCommitted { get; private set; }
 
+        // New captures write into a child session so the committed look remains
+        // drawable until the entire replacement has validated successfully.
         public RenderSession CaptureTarget => pendingCapture ?? this;
 
         public RenderSession BeginPendingCapture()

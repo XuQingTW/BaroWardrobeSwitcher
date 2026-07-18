@@ -267,6 +267,9 @@ local function messageRemainingBits(message)
     return 0
 end
 
+-- Every wire and persistence path converges here. Returning a fresh canonical
+-- table prevents unknown fields or mutable caller-owned slot tables from
+-- leaking into reducer state.
 function Core.validateLook(value)
     if type(value) ~= "table" then
         return nil, "look must be a table"
@@ -975,6 +978,9 @@ local function commandPending(state, event, phase)
     state.error = nil
 end
 
+-- The reducer is deliberately pure: it describes game/network work as effects
+-- instead of touching Barotrauma globals. Both client realms can therefore use
+-- the same transitions and rollback rules.
 function Core.reduce(currentState, event)
     if type(currentState) ~= "table" then error("currentState must be a table") end
     if type(event) ~= "table" or type(event.type) ~= "string" then error("event.type is required") end
@@ -1669,6 +1675,8 @@ function Core.copyClientState(state)
     return copyClientState(state)
 end
 
+-- UI permissions are derived from the phase rather than maintained separately,
+-- so an in-flight command cannot accidentally leave one destructive action live.
 function Core.clientViewModel(state)
     if type(state) ~= "table" then error("state must be a table") end
     local look = Core.copyLook(state.look)
@@ -1816,6 +1824,9 @@ local function normalizeAdapterEvents(currentEffect, result, reason)
     return events
 end
 
+-- Local effects are drained synchronously and their adapter results are fed back
+-- through the reducer. Network acknowledgements remain separate root events,
+-- which keeps asynchronous authority changes explicit.
 function Core.createClientController(initialState, adapters)
     local state = copyClientState(initialState or Core.newClientState())
     adapters = adapters or {}

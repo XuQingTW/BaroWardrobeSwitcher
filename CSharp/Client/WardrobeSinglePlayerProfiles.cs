@@ -9,6 +9,10 @@ using System.Text.Json.Serialization;
 
 namespace BaroWardrobeSwitcher
 {
+    /// <summary>
+    /// Stores one look per campaign/character identity. Raw save paths and stable
+    /// character keys are hashed; display names are descriptive and never identity.
+    /// </summary>
     public static partial class WardrobePersistence
     {
         private const int SinglePlayerProfilesVersion = 2;
@@ -150,6 +154,8 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        // Import is recorded per campaign even when no legacy look exists. Without
+        // that tombstone, every profile load would repeatedly probe the old file.
         public static bool TryImportLegacyClientLook(
             string campaignKey,
             string characterKey,
@@ -242,6 +248,8 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        // Only canonical documents enter memory. Older supported schemas migrate
+        // once; malformed or unexpected shapes are quarantined and fail closed.
         private static SinglePlayerProfilesDocument ReadSinglePlayerProfiles()
         {
             string path = GetSinglePlayerProfilesPath();
@@ -289,6 +297,8 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        // Stable ordering makes files deterministic and keeps equivalent updates
+        // from producing noisy rewrites.
         private static void WriteSinglePlayerProfiles(SinglePlayerProfilesDocument document)
         {
             ValidateSinglePlayerProfiles(document);
@@ -618,6 +628,8 @@ namespace BaroWardrobeSwitcher
             return copy;
         }
 
+        // Hashing keeps machine-specific campaign paths and composite character
+        // fingerprints out of the persisted JSON while preserving exact matching.
         private static string HashRequiredKey(string value, string field)
         {
             if (string.IsNullOrWhiteSpace(value))

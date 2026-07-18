@@ -973,6 +973,8 @@ namespace BaroWardrobeSwitcher
             return Version;
         }
 
+        // A character is the lifetime boundary for every captured sprite, mask and
+        // effect. Keeping one aggregate avoids partial cleanup across side tables.
         private static readonly Dictionary<Character, RenderSession> RenderSessions =
             new Dictionary<Character, RenderSession>();
         private static readonly Dictionary<string, PatchState> PatchStates =
@@ -1742,6 +1744,8 @@ namespace BaroWardrobeSwitcher
                 return false;
             }
             bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
+            // Empty is an explicit appearance choice. Resolve it before looking for
+            // a same-type fashion sprite that may belong to a different saved slot.
             if (hideOriginalForEmptySavedSlot)
             {
                 skipOriginal = true;
