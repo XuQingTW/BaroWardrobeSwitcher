@@ -34,6 +34,7 @@ AssemblyLoadContext.Default.Resolving += (_, assemblyName) => ResolveAssembly(as
 
 Assembly modAssembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(modAssemblyPath);
 Type persistence = modAssembly.GetType("BaroWardrobeSwitcher.WardrobePersistence", throwOnError: true)!;
+Type fileLogger = modAssembly.GetType("BaroWardrobeSwitcher.WardrobeFileLogger", throwOnError: true)!;
 MethodInfo saveClientLook = RequireMethod(persistence, "SaveClientLook", typeof(string));
 MethodInfo saveMigratedClientLook = RequireMethod(
     persistence,
@@ -76,6 +77,8 @@ MethodInfo tryImportLegacyClientLook = RequireMethod(
     typeof(string));
 MethodInfo getVersion = RequireMethod(persistence, "GetVersion");
 MethodInfo getLastError = RequireMethod(persistence, "GetLastError");
+MethodInfo getLogPath = RequireMethod(fileLogger, "GetPath");
+MethodInfo writeLog = RequireMethod(fileLogger, "Write", typeof(string), typeof(string));
 
 string tempBase = Path.GetFullPath(Path.GetTempPath());
 string probeRoot = Path.Combine(tempBase, "BaroWardrobeSwitcher-PersistenceProbe-" + Guid.NewGuid().ToString("N"));
@@ -94,6 +97,7 @@ try
 {
     Run("canonical-v3-json", TestCanonicalV3, failures);
     Run("persistence-diagnostic-contract", TestDiagnosticContract, failures);
+    Run("private-file-log", TestPrivateFileLog, failures);
     Run("utf8-identifier-limit", TestUtf8IdentifierLimit, failures);
     Run("v1-migration-and-backup", TestV1Migration, failures);
     Run("v2-migration-and-backup", TestV2Migration, failures);
@@ -149,6 +153,22 @@ void TestCanonicalV3()
            loaded.Contains("visibilityHair=show", StringComparison.Ordinal) &&
            loaded.Contains("visibilityFaceAttachment=show", StringComparison.Ordinal),
         "Canonical attachment visibility did not round-trip through LoadClientLook.");
+}
+
+void TestPrivateFileLog()
+{
+    string directory = NewCaseDirectory("private-log");
+    Assert((bool)(Invoke(writeLog, "DEBUG", "probe message") ?? false),
+        "Wardrobe file logger rejected a diagnostic message.");
+    string path = (string?)Invoke(getLogPath) ?? string.Empty;
+    Assert(Path.GetDirectoryName(path) == directory,
+        "Wardrobe file logger did not use the persistence storage directory.");
+    Assert(Path.GetFileName(path) == "WardrobeClient.log",
+        "Wardrobe file logger returned an unexpected filename.");
+    string contents = File.ReadAllText(path, Encoding.UTF8);
+    Assert(contents.Contains("[DEBUG]", StringComparison.Ordinal) &&
+           contents.Contains("probe message", StringComparison.Ordinal),
+        "Wardrobe file logger omitted the level or message.");
 }
 
 void TestDiagnosticContract()

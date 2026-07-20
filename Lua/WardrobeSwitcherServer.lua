@@ -101,22 +101,27 @@ local activeByCharacterId = {}
 local serverSessionId = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
 local lastGameSessionKey = nil
 
-local function log(message)
+local function writeLog(level, message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
-    if LuaCsLogger ~= nil and LuaCsLogger.Log ~= nil then
-        LuaCsLogger.Log(line)
-    else
-        print(line)
-    end
+    if Environment == nil or Directory == nil or File == nil then return end
+    pcall(function()
+        local root = Environment.GetFolderPath(
+            EnvironmentSpecialFolder ~= nil and EnvironmentSpecialFolder.LocalApplicationData or 28)
+        local directory = tostring(root):gsub("\\", "/") ..
+            "/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
+        Directory.CreateDirectory(directory)
+        File.AppendAllText(
+            directory .. "/WardrobeServer.log",
+            "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] [" .. level .. "] " .. line .. "\n")
+    end)
+end
+
+local function log(message)
+    writeLog("INFO", message)
 end
 
 local function warn(message)
-    local line = "[" .. MOD_NAME .. "] " .. tostring(message)
-    if LuaCsLogger ~= nil and LuaCsLogger.LogError ~= nil then
-        LuaCsLogger.LogError(line)
-    else
-        log(message)
-    end
+    writeLog("WARN", message)
 end
 
 local function trim(value)

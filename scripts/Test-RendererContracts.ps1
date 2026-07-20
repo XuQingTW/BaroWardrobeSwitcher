@@ -123,6 +123,21 @@ if ($characterDictionaryCount -ne 1) {
 }
 Write-Host "PASS render-session-aggregate"
 
+# Prefab fallback items retain components for cosmetic effects, but a client-only
+# item must not reserve an ID that a multiplayer server may later assign.
+Assert-Contains $renderer "tempItem.FreeID();" `
+    "Temporary fashion prefab items must release their client-side entity ID immediately."
+$fallbackStart = $renderer.IndexOf("tempItem = new Item(prefab", [StringComparison]::Ordinal)
+$fallbackCapture = $renderer.IndexOf("CaptureFashionItemCore(character, tempItem", $fallbackStart, [StringComparison]::Ordinal)
+$fallbackFreeId = $renderer.IndexOf("tempItem.FreeID();", $fallbackStart, [StringComparison]::Ordinal)
+if ($fallbackStart -lt 0 -or $fallbackCapture -le $fallbackStart -or
+    $fallbackFreeId -le $fallbackStart -or $fallbackFreeId -ge $fallbackCapture) {
+    throw "Temporary fashion prefab items must release their entity ID before capture."
+}
+Assert-Contains $session "if (item == null || item.Removed) { continue; }" `
+    "Renderer shutdown must not remove a temporary item that Barotrauma already removed."
+Write-Host "PASS temporary-item-network-isolation"
+
 # Reuse is allowed only for the exact atomically committed character session.
 Assert-Contains $session "public bool IsCommitted { get; private set; }" `
     "Render sessions must distinguish staged/direct captures from committed captures."

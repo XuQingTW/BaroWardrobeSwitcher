@@ -499,7 +499,11 @@ namespace BaroWardrobeSwitcher
             // or captured effect can reference their components. Remove them last.
             foreach (Item item in ownedTemporaryItems.ToList())
             {
-                try { item?.Remove(); } catch { }
+                // Barotrauma can remove all world items before LuaCs unloads this
+                // plugin. Do not ask the engine to remove the same temporary item
+                // twice during that shutdown sequence.
+                if (item == null || item.Removed) { continue; }
+                try { item.Remove(); } catch { }
             }
             ownedTemporaryItems.Clear();
         }

@@ -50,6 +50,7 @@ InvSlotType = {
 }
 
 local messages = {}
+local loggedMessages = {}
 local originalPrint = print
 print = function(...)
     local values = {}
@@ -113,6 +114,13 @@ local persistence = {
         return true
     end,
     ClearClientLook = function() return true end
+}
+local fileLogger = {
+    GetPath = function() return "sessionless/WardrobeClient.log" end,
+    Write = function(level, message)
+        loggedMessages[#loggedMessages + 1] = tostring(level) .. ":" .. tostring(message)
+        return true
+    end
 }
 
 local activationCount = 0
@@ -207,6 +215,7 @@ end
 LuaUserData = {
     CreateStatic = function(name)
         if name == "BaroWardrobeSwitcher.WardrobePersistence" then return persistence end
+        if name == "BaroWardrobeSwitcher.WardrobeFileLogger" then return fileLogger end
         if name == "BaroWardrobeSwitcher.VisualOverride" then return visualOverride end
         if name == "Barotrauma.GameMain" then
             return {
@@ -298,10 +307,11 @@ PlayerInput = {
 }
 
 local buttons = {}
+local removedWidgets = 0
 local function widget()
     return {
         RectTransform = {},
-        Remove = function() end,
+        Remove = function() removedWidgets = removedWidgets + 1 end,
         AddToGUIUpdateList = function() end
     }
 end
@@ -368,17 +378,49 @@ assert(profiles[importedPlayerProfileKey] ~= nil and
 assert(activationCount == 0 and prefabCaptureCount == 0,
     "an imported legacy look activated before the player manually applied it")
 
+assert(buttons["Appearance Layers..."] == nil and buttons["Forget Saved Look"] == nil,
+    "additional wardrobe actions should be hidden in the default compact panel")
+local moreOptionsButton = buttons["More Options..."]
+assert(moreOptionsButton ~= nil and type(moreOptionsButton.OnClicked) == "function",
+    "the compact panel did not expose its More Options control")
+local removesBeforeMoreOptions = removedWidgets
+moreOptionsButton.OnClicked()
+assert(removedWidgets == removesBeforeMoreOptions,
+    "More Options removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeMoreOptions + 1,
+    "expanding More Options did not replace the previous overlay on the next tick")
+local lessOptionsButton = buttons["Hide Additional Options"]
+assert(lessOptionsButton ~= nil and type(lessOptionsButton.OnClicked) == "function",
+    "the expanded panel did not expose its collapse control")
+local removesBeforeLessOptions = removedWidgets
+lessOptionsButton.OnClicked()
+assert(removedWidgets == removesBeforeLessOptions,
+    "Hide Additional Options removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeLessOptions + 1,
+    "collapsing More Options did not replace the expanded overlay on the next tick")
+buttons["More Options..."].OnClicked()
+hooks.think()
+
 local appearanceLayersButton = buttons["Appearance Layers..."]
 assert(appearanceLayersButton ~= nil and appearanceLayersButton.Enabled ~= false,
     "Appearance Layers should be enabled when a saved look exists")
 assert(type(appearanceLayersButton.OnClicked) == "function",
     "Appearance Layers callback was not installed")
+local removesBeforeAppearanceLayers = removedWidgets
 appearanceLayersButton.OnClicked()
+assert(removedWidgets == removesBeforeAppearanceLayers,
+    "Appearance Layers removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeAppearanceLayers + 1,
+    "Appearance Layers did not replace the main overlay on the next tick")
 local hideStandardHairButton = buttons["Hide Standard Hair"]
 assert(hideStandardHairButton ~= nil and
     type(hideStandardHairButton.OnClicked) == "function",
     "Hide Standard Hair preset was not installed")
 hideStandardHairButton.OnClicked()
+hooks.think()
 
 assert(saveCalls == 1, "attachment visibility did not persist to the current character profile")
 assert(lastSaved ~= nil and
@@ -661,6 +703,7 @@ assert(buttons["Save Current Outfit"].Enabled ~= false,
 -- Accepted commands also finish asynchronously. The open panel must rebuild
 -- after the acknowledgement instead of preserving its pending-state buttons.
 buttons["Save Current Outfit"].OnClicked()
+hooks.think()
 assert(buttons["Save Current Outfit"].Enabled == false,
     "multiplayer controls were not disabled while Save was pending")
 local sentSave = networkSent[#networkSent]
@@ -681,6 +724,21 @@ assert(buttons["Save Current Outfit"].Enabled ~= false,
     "multiplayer controls did not refresh after an accepted acknowledgement")
 assert(buttons["Apply Saved Look"].Enabled ~= false,
     "Apply stayed disabled after multiplayer Save completed")
+
+local closeButton = buttons["Close"]
+assert(closeButton ~= nil and type(closeButton.OnClicked) == "function",
+    "Close callback was not installed")
+local removesBeforeClose = removedWidgets
+closeButton.OnClicked()
+assert(removedWidgets == removesBeforeClose,
+    "Close removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeClose + 1,
+    "Close did not release the overlay on the next tick")
+assert(#messages == 0,
+    "routine wardrobe diagnostics leaked into the Lua console")
+assert(#loggedMessages > 0,
+    "routine wardrobe diagnostics were not written through the file logger")
 
 print = originalPrint
 print("Wardrobe client facade tests passed")

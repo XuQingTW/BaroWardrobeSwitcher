@@ -97,7 +97,8 @@ local translations = {
         ["panel.attachment_layers"] = "Appearance Layers",
         ["panel.attachment_help"] = "Character mods may reuse these wearable slots for head parts. Auto follows the appearance item's XML; Show overrides equipment hiding.",
         ["panel.visibility"] = "Visibility",
-        ["panel.debug_log_hint"] = "Debug dump writes to the LuaCs/Barotrauma log; search for [Baro Wardrobe Switcher].",
+        ["panel.debug_log_hint"] = "Diagnostics are written to WardrobeClient.log without filling the game console.",
+        ["panel.log_file"] = "Wardrobe log",
         ["panel.saved_file"] = "Saved-look file",
         ["button.save"] = "Save Current Outfit",
         ["button.apply"] = "Apply Saved Look",
@@ -114,6 +115,8 @@ local translations = {
         ["button.diagnostics"] = "Diagnostics",
         ["button.hide_diagnostics"] = "Hide Diagnostics",
         ["button.dump_debug"] = "Dump Debug Log",
+        ["button.more_options"] = "More Options...",
+        ["button.less_options"] = "Hide Additional Options",
         ["button.close"] = "Close",
         ["slot.head"] = "Head",
         ["slot.headset"] = "Headset",
@@ -174,7 +177,8 @@ local translations = {
         ["panel.attachment_layers"] = "外观图层",
         ["panel.attachment_help"] = "角色模组可能重用这些穿戴槽位作为头部组件。自动会遵循外观物品 XML；显示可覆盖装备的隐藏规则。",
         ["panel.visibility"] = "可见性",
-        ["panel.debug_log_hint"] = "诊断会写入 LuaCs/Barotrauma 日志；搜索 [Baro Wardrobe Switcher]。",
+        ["panel.debug_log_hint"] = "诊断会写入 WardrobeClient.log，不再刷满游戏控制台。",
+        ["panel.log_file"] = "衣柜日志",
         ["panel.saved_file"] = "保存外观文件",
         ["button.save"] = "保存当前服装",
         ["button.apply"] = "套用已保存外观",
@@ -191,6 +195,8 @@ local translations = {
         ["button.diagnostics"] = "诊断",
         ["button.hide_diagnostics"] = "隐藏诊断",
         ["button.dump_debug"] = "输出诊断到日志",
+        ["button.more_options"] = "更多选项…",
+        ["button.less_options"] = "收起更多选项",
         ["button.close"] = "关闭",
         ["slot.head"] = "头部",
         ["slot.headset"] = "耳机",
@@ -251,7 +257,8 @@ local translations = {
         ["panel.attachment_layers"] = "外觀圖層",
         ["panel.attachment_help"] = "角色模組可能重用這些穿戴槽位作為頭部組件。自動會遵循外觀物品 XML；顯示可覆寫裝備的隱藏規則。",
         ["panel.visibility"] = "可見性",
-        ["panel.debug_log_hint"] = "診斷會寫入 LuaCs/Barotrauma 日誌；搜尋 [Baro Wardrobe Switcher]。",
+        ["panel.debug_log_hint"] = "診斷會寫入 WardrobeClient.log，不再洗滿遊戲控制台。",
+        ["panel.log_file"] = "衣櫃日誌",
         ["panel.saved_file"] = "儲存外觀檔案",
         ["button.save"] = "儲存目前服裝",
         ["button.apply"] = "套用已儲存外觀",
@@ -268,6 +275,8 @@ local translations = {
         ["button.diagnostics"] = "診斷",
         ["button.hide_diagnostics"] = "隱藏診斷",
         ["button.dump_debug"] = "輸出診斷到日誌",
+        ["button.more_options"] = "更多選項…",
+        ["button.less_options"] = "收合更多選項",
         ["button.close"] = "關閉",
         ["slot.head"] = "頭部",
         ["slot.headset"] = "耳機",
@@ -453,11 +462,13 @@ local window = nil
 local windowNeedsRefresh = false
 local overlayRoot = nil
 local attachmentPanelOpen = false
+local advancedPanelOpen = false
 local lastCharacter = nil
 local buildWindow
 local buildAttachmentVisibilityWindow
 local toggleWindow
 local fullPanelOpen = false
+local Helpers = {}
 local controlled
 local tryCaptureEmptyVisualOverride
 local unequipItem
@@ -549,7 +560,9 @@ local function dispatchReducer(event)
     if not coreAvailable or clientController == nil then return {} end
     local ok, effects, feedback = pcall(clientController.dispatch, event)
     if not ok then
-        print("[" .. MOD_NAME .. " DEBUG] reducer rejected event " .. tostring(event and event.type) .. ": " .. tostring(effects))
+        local message = "reducer rejected event " .. tostring(event and event.type) .. ": " .. tostring(effects)
+        lastOperation = message
+        if Helpers.debugLog ~= nil then Helpers.debugLog(message) end
         return {}
     end
     reducerState = clientController.getState()
@@ -927,25 +940,46 @@ end
 
 -- Keep later helpers on one table so standard Lua compilers stay below
 -- their 200-local limit without exposing implementation details globally.
-local Helpers = {}
+
+function Helpers.ensureFileLogger()
+    if Helpers.fileLogger ~= nil then return Helpers.fileLogger end
+    pcall(function()
+        LuaUserData.RegisterType("BaroWardrobeSwitcher.WardrobeFileLogger")
+    end)
+    local ok, logger = pcall(function()
+        return LuaUserData.CreateStatic("BaroWardrobeSwitcher.WardrobeFileLogger", true)
+    end)
+    if ok then Helpers.fileLogger = logger end
+    return Helpers.fileLogger
+end
+
+function Helpers.writeLog(level, message)
+    local logger = Helpers.ensureFileLogger()
+    if logger == nil or logger.Write == nil then return false end
+    local ok, written = pcall(function()
+        return logger.Write(tostring(level or "INFO"), tostring(message or ""))
+    end)
+    return ok and written == true
+end
 
 function Helpers.log(message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
     lastOperation = tostring(message)
-    if LuaCsLogger ~= nil and LuaCsLogger.Log ~= nil then
-        LuaCsLogger.Log(line)
-    else
-        print(line)
-    end
+    Helpers.writeLog("INFO", line)
 end
 
 function Helpers.debugLog(message)
     local line = "[" .. MOD_NAME .. " DEBUG] " .. tostring(message)
-    if LuaCsLogger ~= nil and LuaCsLogger.Log ~= nil then
-        LuaCsLogger.Log(line)
-    else
-        print(line)
+    Helpers.writeLog("DEBUG", line)
+end
+
+function Helpers.clientLogPath()
+    local logger = Helpers.ensureFileLogger()
+    if logger ~= nil and logger.GetPath ~= nil then
+        local ok, path = pcall(function() return logger.GetPath() end)
+        if ok and path ~= nil then return tostring(path) end
     end
+    return "WardrobeClient.log"
 end
 
 function Helpers.clientPersistPath()
@@ -4519,25 +4553,30 @@ function Helpers.dumpDebugLog()
     local debugStatus = Helpers.visualOverrideDebugStatus(character)
     emit("visualOverrideCharacter=" .. tostring(debugStatus))
     emit("---- wardrobe diagnostic dump end ----")
-    lastOperation = "Debug diagnostics dumped to LuaCs log."
-end
-
-function Helpers.removeWindow()
-    if window ~= nil then
-        pcall(function() window.Remove() end)
-        window = nil
-    end
+    lastOperation = "Debug diagnostics written to WardrobeClient.log."
 end
 
 function Helpers.clearWindow()
-    Helpers.removeWindow()
     fullPanelOpen = false
     attachmentPanelOpen = false
+    advancedPanelOpen = false
+    diagnosticsVisible = false
+    windowNeedsRefresh = false
     Helpers.resetOverlay()
 end
 
+function Helpers.requestWindowClose()
+    fullPanelOpen = false
+    attachmentPanelOpen = false
+    advancedPanelOpen = false
+    diagnosticsVisible = false
+    -- GUI callbacks run while Barotrauma is traversing the update list. Leave
+    -- the current root alive until the next think tick instead of removing it
+    -- from inside its own OnClicked callback.
+    windowNeedsRefresh = true
+end
+
 function Helpers.refreshWindow()
-    Helpers.removeWindow()
     if attachmentPanelOpen then
         buildAttachmentVisibilityWindow()
     else
@@ -4559,7 +4598,9 @@ function Helpers.addButton(parent, text, action, refresh, enabled)
     button.OnClicked = function()
         action()
         if refresh ~= false then
-            Helpers.refreshWindow()
+            -- Rebuilding here would remove the button that Barotrauma is still
+            -- dispatching. The think hook consumes this request next frame.
+            windowNeedsRefresh = true
         end
         return true
     end
@@ -4674,7 +4715,9 @@ function Helpers.updateAttachmentVisibility(nextVisibility)
 end
 
 buildWindow = function()
-    Helpers.removeWindow()
+    -- Rebuild the whole overlay. Removing only the child frame can leave its
+    -- old controls in Barotrauma's GUI update list for another interaction.
+    Helpers.resetOverlay()
     windowNeedsRefresh = false
     attachmentPanelOpen = false
 
@@ -4684,7 +4727,12 @@ buildWindow = function()
         return
     end
 
-    local frame = GUI.Frame(GUI.RectTransform(Vector2(0.48, 0.74), parent, GUI.Anchor.Center), "GUIFrame")
+    local panelWidth = advancedPanelOpen and 0.48 or 0.44
+    local panelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.72) or 0.52
+    local frame = GUI.Frame(
+        GUI.RectTransform(Vector2(panelWidth, panelHeight), parent, GUI.Anchor.Center),
+        "GUIFrame"
+    )
     window = frame
     fullPanelOpen = true
 
@@ -4697,72 +4745,74 @@ buildWindow = function()
     local view = Helpers.clientViewModelSnapshot(character, overrideState)
 
     Helpers.addText(list, tr("panel.title"))
-    Helpers.addText(list, view.overrideLabel)
     if view.singlePlayer then
         Helpers.addText(list, tr("panel.profile") .. ": " .. tostring(view.profileLabel))
-        Helpers.addText(
-            list,
-            tr("panel.transfer") ..
-            ": " ..
-            (view.transferEnabled and tr("status.enabled") or tr("status.disabled"))
-        )
     end
     Helpers.addText(list, tr("panel.saved_look") .. ": " .. Helpers.savedLookSummary(view.look, view.captured) .. " | " .. tr("panel.look") .. ": " .. (view.active and tr("panel.active") or tr("panel.inactive")))
     Helpers.addText(list, tr("panel.last") .. ": " .. localizedStatus(view.lastOperation))
 
     Helpers.addButton(list, tr("button.save"), function() Helpers.saveFashionAndUnequip() end, true, view.canSave)
     Helpers.addButton(list, tr("button.apply"), function() Helpers.applyFashionToCurrentEquipment(false) end, true, view.canApply)
-    Helpers.addButton(list, tr("button.attachment_layers"), function()
-        attachmentPanelOpen = true
-        Helpers.removeWindow()
-        buildAttachmentVisibilityWindow()
-    end, false, view.canSetAttachmentVisibility)
-    if view.singlePlayer then
-        Helpers.addButton(
-            list,
-            view.transferEnabled and
-                tr("button.disable_transfer") or
-                tr("button.enable_transfer"),
-            function()
-                local saved, reason = Helpers.setSinglePlayerTransferSetting(not view.transferEnabled)
-                if not saved then
-                    Helpers.log("Appearance-transfer setting could not be saved: " .. tostring(reason))
-                end
-            end,
-            true,
-            true
-        )
-    end
     Helpers.addButton(list, tr("button.clear"), function() Helpers.clearActiveLook() end, true, view.canClear)
-    Helpers.addButton(list, tr("button.forget"), function() Helpers.clearSavedLook() end, true, view.canForget)
-    Helpers.addButton(list, view.diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
-        diagnosticsVisible = not diagnosticsVisible
+    Helpers.addButton(list, advancedPanelOpen and tr("button.less_options") or tr("button.more_options"), function()
+        advancedPanelOpen = not advancedPanelOpen
+        if not advancedPanelOpen then diagnosticsVisible = false end
     end)
-    Helpers.addButton(list, tr("button.dump_debug"), function() Helpers.dumpDebugLog() end, true)
-    Helpers.addText(list, tr("panel.debug_log_hint"))
-    Helpers.addText(list, tr("panel.saved_file") .. ": " .. Helpers.clientLookStoragePath())
-    Helpers.addButton(list, tr("button.close"), function() fullPanelOpen = false; Helpers.resetOverlay() end, false)
 
-    for _, entry in ipairs(slots) do
-        local currentItem = view.currentNames[entry.key]
-        local result = localizedStatus(view.slotResults[entry.key] or "-")
-        Helpers.addText(
-            list,
-            slotLabel(entry) .. " | " .. tr("panel.current") .. ": " .. currentItem .. " | " .. tr("panel.saved") .. ": " .. Helpers.itemName(view.look[entry.key]) .. " | " .. tr("panel.result") .. ": " .. result
-        )
-    end
+    if advancedPanelOpen then
+        Helpers.addButton(list, tr("button.attachment_layers"), function()
+            attachmentPanelOpen = true
+        end, true, view.canSetAttachmentVisibility)
+        if view.singlePlayer then
+            Helpers.addButton(
+                list,
+                view.transferEnabled and
+                    tr("button.disable_transfer") or
+                    tr("button.enable_transfer"),
+                function()
+                    local saved, reason = Helpers.setSinglePlayerTransferSetting(not view.transferEnabled)
+                    if not saved then
+                        Helpers.log("Appearance-transfer setting could not be saved: " .. tostring(reason))
+                    end
+                end,
+                true,
+                true
+            )
+        end
+        Helpers.addButton(list, tr("button.forget"), function() Helpers.clearSavedLook() end, true, view.canForget)
+        Helpers.addButton(list, view.diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
+            diagnosticsVisible = not diagnosticsVisible
+        end)
 
-    if view.diagnosticsVisible then
-        Helpers.addText(list, tr("panel.diagnostics") .. ": " .. tostring(view.overrideDetails or tr("status.none")))
-        local debugStatus = Helpers.visualOverrideDebugStatus(character)
-        if debugStatus ~= nil then
-            Helpers.addText(list, tr("panel.character") .. ": " .. debugStatus)
+        if view.diagnosticsVisible then
+            Helpers.addText(list, view.overrideLabel)
+            Helpers.addButton(list, tr("button.dump_debug"), function() Helpers.dumpDebugLog() end, true)
+            Helpers.addText(list, tr("panel.debug_log_hint"))
+            Helpers.addText(list, tr("panel.log_file") .. ": " .. Helpers.clientLogPath())
+            Helpers.addText(list, tr("panel.saved_file") .. ": " .. Helpers.clientLookStoragePath())
+            for _, entry in ipairs(slots) do
+                local currentItem = view.currentNames[entry.key]
+                local result = localizedStatus(view.slotResults[entry.key] or "-")
+                Helpers.addText(
+                    list,
+                    slotLabel(entry) .. " | " .. tr("panel.current") .. ": " .. currentItem .. " | " .. tr("panel.saved") .. ": " .. Helpers.itemName(view.look[entry.key]) .. " | " .. tr("panel.result") .. ": " .. result
+                )
+            end
+            Helpers.addText(list, tr("panel.diagnostics") .. ": " .. tostring(view.overrideDetails or tr("status.none")))
+            local debugStatus = Helpers.visualOverrideDebugStatus(character)
+            if debugStatus ~= nil then
+                Helpers.addText(list, tr("panel.character") .. ": " .. debugStatus)
+            end
         end
     end
+
+    Helpers.addButton(list, tr("button.close"), function()
+        Helpers.requestWindowClose()
+    end, true)
 end
 
 buildAttachmentVisibilityWindow = function()
-    Helpers.removeWindow()
+    Helpers.resetOverlay()
     windowNeedsRefresh = false
     attachmentPanelOpen = true
     fullPanelOpen = true
@@ -4822,23 +4872,19 @@ buildAttachmentVisibilityWindow = function()
 
     Helpers.addButton(list, tr("button.back"), function()
         attachmentPanelOpen = false
-        Helpers.removeWindow()
-        buildWindow()
-    end, false, true)
+    end, true, true)
     Helpers.addButton(list, tr("button.close"), function()
-        fullPanelOpen = false
-        attachmentPanelOpen = false
-        Helpers.resetOverlay()
-    end, false, true)
+        Helpers.requestWindowClose()
+    end, true, true)
 end
 
 toggleWindow = function()
     if fullPanelOpen then
-        fullPanelOpen = false
-        Helpers.resetOverlay()
+        Helpers.clearWindow()
     else
         fullPanelOpen = true
-        Helpers.resetOverlay()
+        advancedPanelOpen = false
+        diagnosticsVisible = false
         buildWindow()
     end
 end
@@ -4964,6 +5010,13 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
 
     if Helpers.f8Hit() then
         toggleWindow()
+    end
+
+    -- A Close click also uses the deferred refresh path. Consume it even when
+    -- the panel is now marked closed so the old overlay root is released here.
+    if not fullPanelOpen and windowNeedsRefresh then
+        Helpers.resetOverlay()
+        windowNeedsRefresh = false
     end
 
     local character = controlled()

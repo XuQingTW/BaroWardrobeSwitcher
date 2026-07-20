@@ -14,9 +14,52 @@ using Barotrauma.LuaCs;
 using HarmonyLib;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
+using LuaCsLogger = BaroWardrobeSwitcher.WardrobeFileLogger;
 
 namespace BaroWardrobeSwitcher
 {
+    /// <summary>
+    /// Keeps routine wardrobe diagnostics out of the in-game console while retaining
+    /// them in a dedicated UTF-8 log beside the saved wardrobe data.
+    /// </summary>
+    public static class WardrobeFileLogger
+    {
+        private const string LogFileName = "WardrobeClient.log";
+        private static readonly object SyncRoot = new object();
+
+        public static string GetPath()
+        {
+            return Path.Combine(WardrobePersistence.GetStorageDirectory(), LogFileName);
+        }
+
+        public static bool Write(string level, string message)
+        {
+            try
+            {
+                string path = GetPath();
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                string line =
+                    "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "] " +
+                    "[" + (string.IsNullOrWhiteSpace(level) ? "INFO" : level) + "] " +
+                    (message ?? string.Empty) + Environment.NewLine;
+                lock (SyncRoot)
+                {
+                    File.AppendAllText(path, line, Encoding.UTF8);
+                }
+                return true;
+            }
+            catch
+            {
+                // Logging must never interrupt rendering, persistence or shutdown.
+                return false;
+            }
+        }
+
+        public static void Log(string message) => Write("INFO", message);
+
+        public static void LogError(string message) => Write("ERROR", message);
+    }
+
     public sealed class WardrobeVisualOverridePlugin : IAssemblyPlugin
     {
         private Harmony harmonyInstance;
@@ -1544,6 +1587,10 @@ namespace BaroWardrobeSwitcher
                 try
                 {
                     tempItem = new Item(prefab, Vector2.Zero, null, 0, false);
+                    // The fallback item must keep its components alive for captured
+                    // animations and sounds, but it must never reserve a client-side
+                    // entity ID. A server spawn can legitimately reuse that ID.
+                    tempItem.FreeID();
                     int captured = CaptureFashionItemCore(character, tempItem, takeOwnership: true, out bool succeeded);
                     if (!succeeded) { return 0; }
                     // Ownership was transferred to the render session. It must outlive

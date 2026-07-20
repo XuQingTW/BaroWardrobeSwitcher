@@ -6,6 +6,7 @@ using System.Reflection;
 using Barotrauma;
 using Barotrauma.Items.Components;
 using Barotrauma.LuaCs;
+using LuaCsLogger = BaroWardrobeSwitcher.WardrobeFileLogger;
 
 namespace BaroWardrobeSwitcher
 {

@@ -235,6 +235,8 @@ RequireAnyPublicField("CharacterInfo.ID", characterInfo, "ID");
 RequirePublicProperty("CharacterInfo.OriginalName", characterInfo, "OriginalName");
 RequirePublicProperty("CharacterInfo.SpeciesName", characterInfo, "SpeciesName");
 RequireAnyPublicField("CharacterInfo.HumanPrefabIds", characterInfo, "HumanPrefabIds");
+RequirePublicProperty("Entity.Removed", entity, "Removed", typeof(bool));
+RequireMethod("Entity.FreeID()", entity, "FreeID", Array.Empty<Type>(), typeof(void));
 
 RequireMethod("Limb.Draw(SpriteBatch,Camera,Color?,bool)", limb, "Draw",
     new[] { spriteBatch, camera, typeof(Nullable<>).MakeGenericType(color), typeof(bool) }, typeof(void));
