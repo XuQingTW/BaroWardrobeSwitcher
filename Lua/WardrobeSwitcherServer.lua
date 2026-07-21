@@ -2,67 +2,26 @@ local MOD_NAME = "Baro Wardrobe Switcher"
 
 if not SERVER then return end
 
--- WardrobeCore is loaded first by ModConfig in v0.5.1. Keep the constants below
--- as a deployment-safe fallback so a partially upgraded installation fails
--- gracefully instead of preventing the server script from loading.
-local Core = rawget(_G, "WardrobeCore") or rawget(_G, "BaroWardrobeCore")
-local NET = Core ~= nil and Core.NET or {
-    SAVE_REQUEST = "barowardrobeswitcher.save",
-    APPLY_REQUEST = "barowardrobeswitcher.apply",
-    CLEAR_REQUEST = "barowardrobeswitcher.clear",
-    FORGET_REQUEST = "barowardrobeswitcher.forget",
-    LOOK_APPLY = "barowardrobeswitcher.look.apply",
-    LOOK_CLEAR = "barowardrobeswitcher.look.clear",
-    V2_HELLO = "barowardrobeswitcher.v2.hello",
-    V2_COMMAND = "barowardrobeswitcher.v2.command",
-    V2_STATE = "barowardrobeswitcher.v2.state",
-    V2_ACK = "barowardrobeswitcher.v2.ack"
-}
-NET.SAVE_REQUEST = NET.SAVE_REQUEST or NET.V1_SAVE_REQUEST or "barowardrobeswitcher.save"
-NET.APPLY_REQUEST = NET.APPLY_REQUEST or NET.V1_APPLY_REQUEST or "barowardrobeswitcher.apply"
-NET.CLEAR_REQUEST = NET.CLEAR_REQUEST or NET.V1_CLEAR_REQUEST or "barowardrobeswitcher.clear"
-NET.FORGET_REQUEST = NET.FORGET_REQUEST or NET.V1_FORGET_REQUEST or "barowardrobeswitcher.forget"
-NET.LOOK_APPLY = NET.LOOK_APPLY or NET.V1_LOOK_APPLY or "barowardrobeswitcher.look.apply"
-NET.LOOK_CLEAR = NET.LOOK_CLEAR or NET.V1_LOOK_CLEAR or "barowardrobeswitcher.look.clear"
-local PROTOCOL_VERSION = Core ~= nil and (Core.PROTOCOL_VERSION or Core.PROTOCOL) or 2
-local LOOK_SCHEMA_VERSION = Core ~= nil and (Core.LOOK_SCHEMA_VERSION or Core.SCHEMA_VERSION) or 2
-local PERSISTENCE_VERSION = Core ~= nil and Core.PERSISTENCE_VERSION or 3
-local LIMITS = Core ~= nil and Core.LIMITS or {}
-local MAX_SLOTS = tonumber(LIMITS.MAX_SLOTS or LIMITS.maxSlots) or 6
-local MAX_IDENTIFIER_BYTES = tonumber(LIMITS.MAX_IDENTIFIER_BYTES or LIMITS.maxIdentifierBytes) or 256
-local MAX_PAYLOAD_BYTES = tonumber(LIMITS.MAX_PAYLOAD_BYTES or LIMITS.maxPayloadBytes) or 4096
-local MAX_SESSION_ID_BYTES = 128
-local MAX_OPERATION_ID_BYTES = 128
-local MAX_SEEN_OPERATIONS = tonumber(LIMITS.MAX_SEEN_OPERATIONS or LIMITS.maxSeenOperations) or 512
-local MAX_REVISION = 4294967295
-local ATTACHMENT_KEYS = Core ~= nil and Core.ATTACHMENT_KEYS or {
-    "Hair",
-    "Beard",
-    "Moustache",
-    "FaceAttachment"
-}
-local ATTACHMENT_BITS = Core ~= nil and Core.ATTACHMENT_BITS or {
-    Hair = 0x01,
-    Beard = 0x02,
-    Moustache = 0x04,
-    FaceAttachment = 0x08
-}
-local ATTACHMENT_VISIBILITY = Core ~= nil and Core.ATTACHMENT_VISIBILITY or {
-    Auto = "auto",
-    Hide = "hide",
-    Show = "show"
-}
-local ATTACHMENT_MASK = Core ~= nil and Core.ATTACHMENT_MASK or 0x0F
-local CAPABILITY_ATTACHMENT_VISIBILITY =
-    Core ~= nil and Core.CAPABILITY ~= nil and Core.CAPABILITY.AttachmentVisibility or 0x01
-local COMMAND_VISIBILITY =
-    Core ~= nil and Core.COMMAND ~= nil and Core.COMMAND.Visibility or "visibility"
-local SUPPORTS_ATTACHMENT_VISIBILITY =
-    Core ~= nil and
-    type(Core.validateAttachmentVisibility) == "function" and
-    type(Core.attachmentVisibilityMasks) == "function" and
-    (type(Core.readLook) == "function" or type(Core.ReadLook) == "function") and
-    (type(Core.writeLook) == "function" or type(Core.WriteLook) == "function")
+local Core = assert(
+    type(WardrobeCore) == "table" and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 2 and
+    type(WardrobeCore.NET) == "table" and
+    WardrobeCore,
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 2")
+local NET = Core.NET
+local PROTOCOL_VERSION = Core.PROTOCOL_VERSION
+local LOOK_SCHEMA_VERSION = Core.LOOK_SCHEMA_VERSION
+local PERSISTENCE_VERSION = Core.PERSISTENCE_VERSION
+local MAX_SLOTS = Core.LIMITS.MAX_SLOTS
+local MAX_IDENTIFIER_BYTES = Core.LIMITS.MAX_IDENTIFIER_BYTES
+local MAX_PAYLOAD_BYTES = Core.LIMITS.MAX_PAYLOAD_BYTES
+local MAX_SESSION_ID_BYTES = Core.LIMITS.MAX_SESSION_ID_BYTES
+local MAX_OPERATION_ID_BYTES = Core.LIMITS.MAX_OPERATION_ID_BYTES
+local MAX_SEEN_OPERATIONS = Core.LIMITS.MAX_SEEN_OPERATIONS
+local MAX_REVISION = Core.LIMITS.MAX_UINT32
+local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
+local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
+local COMMAND_VISIBILITY = Core.COMMAND.Visibility
 
 local CharacterInventory = nil
 local Client = nil
@@ -101,22 +60,27 @@ local activeByCharacterId = {}
 local serverSessionId = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
 local lastGameSessionKey = nil
 
-local function log(message)
+local function writeLog(level, message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
-    if LuaCsLogger ~= nil and LuaCsLogger.Log ~= nil then
-        LuaCsLogger.Log(line)
-    else
-        print(line)
-    end
+    if Environment == nil or Directory == nil or File == nil then return end
+    pcall(function()
+        local root = Environment.GetFolderPath(
+            EnvironmentSpecialFolder ~= nil and EnvironmentSpecialFolder.LocalApplicationData or 28)
+        local directory = tostring(root):gsub("\\", "/") ..
+            "/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
+        Directory.CreateDirectory(directory)
+        File.AppendAllText(
+            directory .. "/WardrobeServer.log",
+            "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] [" .. level .. "] " .. line .. "\n")
+    end)
+end
+
+local function log(message)
+    writeLog("INFO", message)
 end
 
 local function warn(message)
-    local line = "[" .. MOD_NAME .. "] " .. tostring(message)
-    if LuaCsLogger ~= nil and LuaCsLogger.LogError ~= nil then
-        LuaCsLogger.LogError(line)
-    else
-        log(message)
-    end
+    writeLog("WARN", message)
 end
 
 local function trim(value)
@@ -140,40 +104,11 @@ local function messageLengthBytes(message)
 end
 
 local function attachmentVisibilityFromLegacy(hideHair)
-    if Core ~= nil and Core.attachmentVisibilityFromLegacy ~= nil then
-        return Core.attachmentVisibilityFromLegacy(hideHair == true)
-    end
-    local hidden = hideHair == true
-    return {
-        Hair = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
-        Beard = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
-        Moustache = hidden and ATTACHMENT_VISIBILITY.Hide or ATTACHMENT_VISIBILITY.Auto,
-        FaceAttachment = ATTACHMENT_VISIBILITY.Auto
-    }
+    return Core.attachmentVisibilityFromLegacy(hideHair == true)
 end
 
 local function validateAttachmentVisibility(value, legacyHideHair)
-    if Core ~= nil and Core.validateAttachmentVisibility ~= nil then
-        return Core.validateAttachmentVisibility(value, legacyHideHair == true)
-    end
-    if value == nil then return attachmentVisibilityFromLegacy(legacyHideHair) end
-    if type(value) ~= "table" then return nil, "invalid_attachment_visibility" end
-    local expected = {}
-    for _, key in ipairs(ATTACHMENT_KEYS) do expected[key] = true end
-    for key in pairs(value) do
-        if expected[key] ~= true then return nil, "unknown_attachment_layer" end
-    end
-    local result = {}
-    for _, key in ipairs(ATTACHMENT_KEYS) do
-        local state = value[key]
-        if state ~= ATTACHMENT_VISIBILITY.Auto and
-            state ~= ATTACHMENT_VISIBILITY.Hide and
-            state ~= ATTACHMENT_VISIBILITY.Show then
-            return nil, "invalid_attachment_visibility"
-        end
-        result[key] = state
-    end
-    return result
+    return Core.validateAttachmentVisibility(value, legacyHideHair == true)
 end
 
 local function copyAttachmentVisibility(value, legacyHideHair)
@@ -185,30 +120,7 @@ local function copyAttachmentVisibility(value, legacyHideHair)
 end
 
 local function legacyHideHair(value)
-    if Core ~= nil and Core.legacyHideHair ~= nil then return Core.legacyHideHair(value) end
-    local visibility = validateAttachmentVisibility(value, false)
-    return visibility ~= nil and
-        visibility.Hair == ATTACHMENT_VISIBILITY.Hide and
-        visibility.Beard == ATTACHMENT_VISIBILITY.Hide and
-        visibility.Moustache == ATTACHMENT_VISIBILITY.Hide
-end
-
-local function attachmentVisibilityMasks(value)
-    if Core ~= nil and Core.attachmentVisibilityMasks ~= nil then
-        return Core.attachmentVisibilityMasks(value)
-    end
-    local visibility, reason = validateAttachmentVisibility(value, false)
-    if visibility == nil then return nil, nil, reason end
-    local forceHide, forceShow = 0, 0
-    for _, key in ipairs(ATTACHMENT_KEYS) do
-        local bit = ATTACHMENT_BITS[key]
-        if visibility[key] == ATTACHMENT_VISIBILITY.Hide then
-            forceHide = forceHide + bit
-        elseif visibility[key] == ATTACHMENT_VISIBILITY.Show then
-            forceShow = forceShow + bit
-        end
-    end
-    return forceHide, forceShow
+    return Core.legacyHideHair(value)
 end
 
 local function cloneLook(look)
@@ -1128,69 +1040,9 @@ local function captureAuthoritativeLook(character, clientLook)
 end
 
 local function readCoreLook(message)
-    if Core ~= nil and Core.readLook ~= nil then
-        local look, reason = Core.readLook(message)
-        if look == nil then error(reason or "invalid_look") end
-        return look
-    end
-    if Core ~= nil and Core.ReadLook ~= nil then
-        local look, reason = Core.ReadLook(message)
-        if look == nil then error(reason or "invalid_look") end
-        return look
-    end
-    local look = {
-        schemaVersion = tonumber(message.ReadUInt16()),
-        captured = message.ReadBoolean() == true,
-        hideHair = message.ReadBoolean() == true,
-        attachmentVisibility = nil,
-        slots = {}
-    }
-    local count = tonumber(message.ReadUInt16()) or 0
-    if count > MAX_SLOTS then error("too_many_slots") end
-    for _ = 1, count do
-        local key = tostring(message.ReadString() or "")
-        local identifier = tostring(message.ReadString() or "")
-        if look.slots[key] ~= nil then error("duplicate_slot") end
-        look.slots[key] = identifier
-    end
+    local look, reason = Core.readLook(message)
+    if look == nil then error(reason or "invalid_look") end
     return look
-end
-
-local function writeCoreLook(message, look)
-    local attachmentVisibility = copyAttachmentVisibility(
-        look ~= nil and look.attachmentVisibility or nil,
-        look ~= nil and look.hideHair == true
-    )
-    local wireLook = {
-        schemaVersion = LOOK_SCHEMA_VERSION,
-        captured = look ~= nil and look.captured == true,
-        hideHair = legacyHideHair(attachmentVisibility),
-        attachmentVisibility = attachmentVisibility,
-        slots = {}
-    }
-    for _, entry in ipairs(slots) do
-        local slot = look ~= nil and look.slots ~= nil and look.slots[entry.key] or nil
-        if slot ~= nil then wireLook.slots[entry.key] = type(slot) == "table" and slot.identifier or tostring(slot) end
-    end
-    if Core ~= nil and Core.writeLook ~= nil then Core.writeLook(message, wireLook) return end
-    if Core ~= nil and Core.WriteLook ~= nil then Core.WriteLook(message, wireLook) return end
-    message.WriteUInt16(LOOK_SCHEMA_VERSION)
-    message.WriteBoolean(wireLook.captured)
-    message.WriteBoolean(wireLook.hideHair)
-    local count = 0
-    for _, entry in ipairs(slots) do if wireLook.slots[entry.key] ~= nil then count = count + 1 end end
-    message.WriteUInt16(count)
-    for _, entry in ipairs(slots) do
-        local identifier = wireLook.slots[entry.key]
-        if identifier ~= nil then message.WriteString(entry.key) message.WriteString(identifier) end
-    end
-    if SUPPORTS_ATTACHMENT_VISIBILITY then
-        local forceHide, forceShow = attachmentVisibilityMasks(wireLook.attachmentVisibility)
-        message.WriteByte(0x57)
-        message.WriteByte(1)
-        message.WriteByte(forceHide)
-        message.WriteByte(forceShow)
-    end
 end
 
 local function writeLegacyLook(message, characterId, look)
@@ -1351,54 +1203,37 @@ end
 local function sendV2Ack(session, operationId, accepted, reason, revision)
     if session == nil or session.client == nil or session.client.Connection == nil then return end
     local message = Networking.Start(NET.V2_ACK)
-    if Core ~= nil and Core.writeAck ~= nil then
-        local written, writeReason = Core.writeAck(message, {
-            operationId = operationId or "",
-            accepted = accepted == true,
-            revision = math.max(0, tonumber(revision) or session.revision or 0),
-            reason = reason or ""
-        })
-        if not written then warn("Could not encode v2 acknowledgement: " .. tostring(writeReason)) return end
-    else
-        message.WriteUInt16(PROTOCOL_VERSION)
-        message.WriteString(operationId or "")
-        message.WriteBoolean(accepted == true)
-        message.WriteUInt32(math.max(0, tonumber(revision) or session.revision or 0))
-        message.WriteString(reason or "")
-    end
+    local written, writeReason = Core.writeAck(message, {
+        operationId = operationId or "",
+        accepted = accepted == true,
+        revision = math.max(0, tonumber(revision) or session.revision or 0),
+        reason = reason or ""
+    })
+    if not written then warn("Could not encode v2 acknowledgement: " .. tostring(writeReason)) return end
     Networking.Send(message, session.client.Connection)
 end
 
 local function sendV2State(client, revision, characterId, active, look)
     if client == nil or client.Connection == nil then return end
     local message = Networking.Start(NET.V2_STATE)
-    if Core ~= nil and Core.writeState ~= nil then
-        local written, writeReason = Core.writeState(message, {
-            revision = math.max(0, tonumber(revision) or 0),
-            characterId = math.max(0, tonumber(characterId) or 0),
-            active = active == true,
-            look = look
-        })
-        if not written then warn("Could not encode v2 state: " .. tostring(writeReason)) return end
-    else
-        message.WriteUInt16(PROTOCOL_VERSION)
-        message.WriteUInt32(math.max(0, tonumber(revision) or 0))
-        message.WriteUInt16(math.max(0, tonumber(characterId) or 0))
-        message.WriteBoolean(active == true)
-        message.WriteBoolean(look ~= nil)
-        if look ~= nil then writeCoreLook(message, look) end
-    end
+    local written, writeReason = Core.writeState(message, {
+        revision = math.max(0, tonumber(revision) or 0),
+        characterId = math.max(0, tonumber(characterId) or 0),
+        active = active == true,
+        look = look
+    })
+    if not written then warn("Could not encode v2 state: " .. tostring(writeReason)) return end
     Networking.Send(message, client.Connection)
 end
 
 local function sendLegacyState(client, characterId, active, look)
     if client == nil or client.Connection == nil then return end
     if active then
-        local message = Networking.Start(NET.LOOK_APPLY)
+        local message = Networking.Start(NET.V1_LOOK_APPLY)
         writeLegacyLook(message, characterId, look)
         Networking.Send(message, client.Connection)
     else
-        local message = Networking.Start(NET.LOOK_CLEAR)
+        local message = Networking.Start(NET.V1_LOOK_CLEAR)
         message.WriteUInt16(characterId or 0)
         Networking.Send(message, client.Connection)
     end
@@ -1639,11 +1474,9 @@ local validCommandKinds = {
     save = true,
     apply = true,
     clear = true,
-    forget = true
+    forget = true,
+    [COMMAND_VISIBILITY] = true
 }
-if SUPPORTS_ATTACHMENT_VISIBILITY then
-    validCommandKinds[COMMAND_VISIBILITY] = true
-end
 
 local function validateV2Envelope(command)
     if type(command) ~= "table" or command.version ~= PROTOCOL_VERSION then return false, "unsupported_protocol" end
@@ -1672,13 +1505,7 @@ local function resendCurrentState(session)
 end
 
 Networking.Receive(NET.V2_HELLO, function(message, client)
-    local ok, hello, helloReason = pcall(function()
-        if Core ~= nil and Core.readClientHello ~= nil then return Core.readClientHello(message) end
-        local version = tonumber(message.ReadUInt16())
-        local clientSessionId = tostring(message.ReadString() or "")
-        if version ~= PROTOCOL_VERSION then return nil, "unsupported_protocol" end
-        return { protocolVersion = version, clientSessionId = clientSessionId }
-    end)
+    local ok, hello, helloReason = pcall(Core.readClientHello, message)
     if not ok or hello == nil then
         warn("Rejected malformed v2 hello: " .. tostring(ok and helloReason or hello))
         return
@@ -1690,24 +1517,12 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     session.protocol = 2
     bindOperationCache(session, clientSessionId)
     local response = Networking.Start(NET.V2_HELLO)
-    local advertisedCapabilities =
-        SUPPORTS_ATTACHMENT_VISIBILITY and CAPABILITY_ATTACHMENT_VISIBILITY or 0
-    if Core ~= nil and Core.writeServerHello ~= nil then
-        local written, writeReason = Core.writeServerHello(
-            response,
-            math.max(0, session.revision),
-            advertisedCapabilities
-        )
-        if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
-    else
-        response.WriteUInt16(PROTOCOL_VERSION)
-        response.WriteUInt32(math.max(0, session.revision))
-        if advertisedCapabilities ~= 0 then
-            response.WriteByte(0x57)
-            response.WriteByte(1)
-            response.WriteByte(advertisedCapabilities)
-        end
-    end
+    local written, writeReason = Core.writeServerHello(
+        response,
+        math.max(0, session.revision),
+        CAPABILITY_ATTACHMENT_VISIBILITY
+    )
+    if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
     Networking.Send(response, client.Connection)
     sendActiveSnapshot(client)
     sendOwnInactiveState(session)
@@ -1805,7 +1620,7 @@ local function selectLegacyProtocol(session)
     return true
 end
 
-Networking.Receive(NET.SAVE_REQUEST, function(_, client)
+Networking.Receive(NET.V1_SAVE_REQUEST, function(_, client)
     local session = sessionFor(client)
     local character = clientCharacter(client)
     if session == nil or character == nil then return end
@@ -1813,7 +1628,7 @@ Networking.Receive(NET.SAVE_REQUEST, function(_, client)
     commitSave(session, character, nil)
 end)
 
-Networking.Receive(NET.APPLY_REQUEST, function(message, client)
+Networking.Receive(NET.V1_APPLY_REQUEST, function(message, client)
     local session = sessionFor(client)
     local character = clientCharacter(client)
     if session == nil or character == nil then return end
@@ -1839,14 +1654,14 @@ Networking.Receive(NET.APPLY_REQUEST, function(message, client)
     commitApply(session, character, look)
 end)
 
-Networking.Receive(NET.CLEAR_REQUEST, function(_, client)
+Networking.Receive(NET.V1_CLEAR_REQUEST, function(_, client)
     local session = sessionFor(client)
     if session == nil then return end
     if not selectLegacyProtocol(session) then return end
     commitClear(session, false)
 end)
 
-Networking.Receive(NET.FORGET_REQUEST, function(_, client)
+Networking.Receive(NET.V1_FORGET_REQUEST, function(_, client)
     local session = sessionFor(client)
     if session == nil then return end
     if not selectLegacyProtocol(session) then return end

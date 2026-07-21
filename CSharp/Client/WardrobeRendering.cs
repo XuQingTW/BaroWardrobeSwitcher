@@ -326,15 +326,14 @@ namespace BaroWardrobeSwitcher
 
         public List<object> FashionAnimations { get; } = new List<object>();
 
-        public List<FashionSoundEffect> FashionSounds { get; } = new List<FashionSoundEffect>();
+        public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();
 
-        public List<FashionComponentSound> FashionComponentSounds { get; } = new List<FashionComponentSound>();
+        public List<(ItemComponent Component, ActionType ActionType)> FashionComponentSounds { get; } =
+            new List<(ItemComponent Component, ActionType ActionType)>();
 
         public HashSet<StatusEffect> SuppressedEquipmentSounds { get; } = new HashSet<StatusEffect>();
 
         public HashSet<ItemComponent> SuppressedEquipmentComponentSounds { get; } = new HashSet<ItemComponent>();
-
-        public FashionEffectPolicy EffectPolicy { get; } = new FashionEffectPolicy();
 
         public int FashionSoundCursor { get; set; }
 
@@ -499,32 +498,14 @@ namespace BaroWardrobeSwitcher
             // or captured effect can reference their components. Remove them last.
             foreach (Item item in ownedTemporaryItems.ToList())
             {
-                try { item?.Remove(); } catch { }
+                // Barotrauma can remove all world items before LuaCs unloads this
+                // plugin. Do not ask the engine to remove the same temporary item
+                // twice during that shutdown sequence.
+                if (item == null || item.Removed) { continue; }
+                try { item.Remove(); } catch { }
             }
             ownedTemporaryItems.Clear();
         }
     }
 
-    internal sealed class FashionSoundEffect
-    {
-        public FashionSoundEffect(StatusEffect statusEffect)
-        {
-            StatusEffect = statusEffect;
-        }
-
-        public StatusEffect StatusEffect { get; }
-    }
-
-    internal sealed class FashionComponentSound
-    {
-        public FashionComponentSound(ItemComponent component, ActionType actionType)
-        {
-            Component = component;
-            ActionType = actionType;
-        }
-
-        public ItemComponent Component { get; }
-
-        public ActionType ActionType { get; }
-    }
 }

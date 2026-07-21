@@ -38,6 +38,16 @@ for _, candidate in ipairs(clientPathCandidates) do
     end
 end
 assert(clientPath ~= nil, "could not locate Lua/WardrobeSwitcher.lua")
+local clientSourceFile = assert(io.open(clientPath, "r"))
+local clientSource = clientSourceFile:read("*a")
+clientSourceFile:close()
+for _, forbidden in ipairs({
+    "local savedLook =", "local savedLookCaptured =", "local activeLook =",
+    "local autoApplyLook =", "local hideHair =", "local attachmentVisibility =",
+    "applyReducerProjection"
+}) do
+    assert(not clientSource:find(forbidden, 1, true), "facade state mirror returned: " .. forbidden)
+end
 SERVER = false
 CLIENT = true
 InvSlotType = {
@@ -50,6 +60,7 @@ InvSlotType = {
 }
 
 local messages = {}
+local loggedMessages = {}
 local originalPrint = print
 print = function(...)
     local values = {}
@@ -113,6 +124,13 @@ local persistence = {
         return true
     end,
     ClearClientLook = function() return true end
+}
+local fileLogger = {
+    GetPath = function() return "sessionless/WardrobeClient.log" end,
+    Write = function(level, message)
+        loggedMessages[#loggedMessages + 1] = tostring(level) .. ":" .. tostring(message)
+        return true
+    end
 }
 
 local activationCount = 0
@@ -207,6 +225,7 @@ end
 LuaUserData = {
     CreateStatic = function(name)
         if name == "BaroWardrobeSwitcher.WardrobePersistence" then return persistence end
+        if name == "BaroWardrobeSwitcher.WardrobeFileLogger" then return fileLogger end
         if name == "BaroWardrobeSwitcher.VisualOverride" then return visualOverride end
         if name == "Barotrauma.GameMain" then
             return {
@@ -298,10 +317,11 @@ PlayerInput = {
 }
 
 local buttons = {}
+local removedWidgets = 0
 local function widget()
     return {
         RectTransform = {},
-        Remove = function() end,
+        Remove = function() removedWidgets = removedWidgets + 1 end,
         AddToGUIUpdateList = function() end
     }
 end
@@ -368,17 +388,49 @@ assert(profiles[importedPlayerProfileKey] ~= nil and
 assert(activationCount == 0 and prefabCaptureCount == 0,
     "an imported legacy look activated before the player manually applied it")
 
+assert(buttons["Appearance Layers..."] == nil and buttons["Forget Saved Look"] == nil,
+    "additional wardrobe actions should be hidden in the default compact panel")
+local moreOptionsButton = buttons["More Options..."]
+assert(moreOptionsButton ~= nil and type(moreOptionsButton.OnClicked) == "function",
+    "the compact panel did not expose its More Options control")
+local removesBeforeMoreOptions = removedWidgets
+moreOptionsButton.OnClicked()
+assert(removedWidgets == removesBeforeMoreOptions,
+    "More Options removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeMoreOptions + 1,
+    "expanding More Options did not replace the previous overlay on the next tick")
+local lessOptionsButton = buttons["Hide Additional Options"]
+assert(lessOptionsButton ~= nil and type(lessOptionsButton.OnClicked) == "function",
+    "the expanded panel did not expose its collapse control")
+local removesBeforeLessOptions = removedWidgets
+lessOptionsButton.OnClicked()
+assert(removedWidgets == removesBeforeLessOptions,
+    "Hide Additional Options removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeLessOptions + 1,
+    "collapsing More Options did not replace the expanded overlay on the next tick")
+buttons["More Options..."].OnClicked()
+hooks.think()
+
 local appearanceLayersButton = buttons["Appearance Layers..."]
 assert(appearanceLayersButton ~= nil and appearanceLayersButton.Enabled ~= false,
     "Appearance Layers should be enabled when a saved look exists")
 assert(type(appearanceLayersButton.OnClicked) == "function",
     "Appearance Layers callback was not installed")
+local removesBeforeAppearanceLayers = removedWidgets
 appearanceLayersButton.OnClicked()
+assert(removedWidgets == removesBeforeAppearanceLayers,
+    "Appearance Layers removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeAppearanceLayers + 1,
+    "Appearance Layers did not replace the main overlay on the next tick")
 local hideStandardHairButton = buttons["Hide Standard Hair"]
 assert(hideStandardHairButton ~= nil and
     type(hideStandardHairButton.OnClicked) == "function",
     "Hide Standard Hair preset was not installed")
 hideStandardHairButton.OnClicked()
+hooks.think()
 
 assert(saveCalls == 1, "attachment visibility did not persist to the current character profile")
 assert(lastSaved ~= nil and
@@ -442,6 +494,8 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = player
 hooks.think()
+assert(activationCount == 2,
+    "CharacterReady/RestoreLook did not rebuild the player's active reducer state")
 enableTransferButton.OnClicked()
 assert(transferEnabled, "appearance-transfer setting was not persisted")
 
@@ -449,12 +503,12 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = npc
 hooks.think()
-assert(activationCount == 2,
+assert(activationCount == 3,
     "enabled transfer did not fill the unconfigured NPC profile; activations=" ..
     tostring(activationCount) ..
     ", transfer=" ..
     tostring(transferEnabled))
-assert(prefabCaptureCount == 2,
+assert(prefabCaptureCount == 3,
     "transferred NPC look did not build an NPC-owned renderer session")
 assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
     "successful transferred look was not persisted for the target NPC")
@@ -462,8 +516,8 @@ assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
 -- Clear/reapply on the same NPC must reuse its committed renderer session.
 clearButton.OnClicked()
 applyButton.OnClicked()
-assert(activationCount == 3, "NPC clear/reapply did not reactivate the renderer")
-assert(prefabCaptureCount == 2,
+assert(activationCount == 4, "NPC clear/reapply did not reactivate the renderer")
+assert(prefabCaptureCount == 3,
     "clear/reapply discarded the reusable renderer session and rebuilt from the prefab")
 
 -- An existing inactive profile must win over transfer and remain inactive until
@@ -472,7 +526,7 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = existingNpc
 hooks.think()
-assert(activationCount == 3,
+assert(activationCount == 4,
     "appearance transfer overwrote or activated an existing NPC profile")
 local existingProfileKey =
     profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))
@@ -480,12 +534,12 @@ assert(profiles[existingProfileKey] ~= nil and
     profiles[existingProfileKey]:find("existinghelmet", 1, true) ~= nil,
     "appearance transfer replaced an existing NPC profile")
 applyButton.OnClicked()
-assert(activationCount == 4,
+assert(activationCount == 5,
     "manual apply did not activate the existing NPC profile")
 assert(capturedIdentifierByCharacterId[44] == "existinghelmet",
     "the existing NPC profile did not use its own saved appearance")
-assert(activeCharacterIds[43] == true and activeCharacterIds[44] == true,
-    "two NPCs could not keep different active wardrobe sessions")
+assert(activeCharacterIds[43] ~= true and activeCharacterIds[44] == true,
+    "CharacterLost did not retire the previous renderer while preserving the new character state")
 
 -- Clear only the player before the scene transition. Both NPC profiles remain
 -- active and should restore independently in the replacement scene.
@@ -509,10 +563,12 @@ Character.CharacterList = { playerNextScene, npcNextScene, existingNextScene }
 Character.Controlled = playerNextScene
 hooks.roundStart()
 for _ = 1, 15 do hooks.think() end
-assert(activationCount == 6,
-    "active NPC looks were not independently restored in the next scene")
-assert(prefabCaptureCount == 5,
-    "replacement NPCs incorrectly reused renderer sessions from the previous scene")
+assert(activationCount == 9,
+    "active NPC looks were not independently restored in the next scene; activations=" ..
+    tostring(activationCount))
+assert(prefabCaptureCount == 8,
+    "replacement NPCs incorrectly reused renderer sessions from the previous scene; captures=" ..
+    tostring(prefabCaptureCount))
 assert(capturedIdentifierByCharacterId[143] == "helmet",
     "the transferred NPC profile restored the wrong appearance")
 assert(capturedIdentifierByCharacterId[144] == "existinghelmet",
@@ -555,8 +611,9 @@ Character.CharacterList = {
 Character.Controlled = playerFinalScene
 hooks.roundStart()
 for _ = 1, 15 do hooks.think() end
-assert(activationCount == 7,
-    "forgotten or ambiguous NPC profiles were incorrectly restored")
+assert(activationCount == 10,
+    "forgotten or ambiguous NPC profiles were incorrectly restored; activations=" ..
+    tostring(activationCount))
 assert(activeCharacterIds[244] == true,
     "an unaffected NPC profile did not restore in the final scene")
 assert(activeCharacterIds[243] ~= true,
@@ -579,14 +636,14 @@ hooks.think()
 local savesBeforeMemoryProfile = saveCalls
 saveButton.OnClicked()
 applyButton.OnClicked()
-assert(activationCount == 8,
+assert(activationCount == 11,
     "campaign-less player profile did not apply; activations=" ..
     tostring(activationCount))
 Character.Controlled = nil
 hooks.think()
 Character.Controlled = memoryNpc
 for _ = 1, 15 do hooks.think() end
-assert(activationCount == 9,
+assert(activationCount == 12,
     "campaign-less in-memory profiles did not apply and transfer during the session; activations=" ..
     tostring(activationCount) ..
     ", ids=" ..
@@ -661,6 +718,7 @@ assert(buttons["Save Current Outfit"].Enabled ~= false,
 -- Accepted commands also finish asynchronously. The open panel must rebuild
 -- after the acknowledgement instead of preserving its pending-state buttons.
 buttons["Save Current Outfit"].OnClicked()
+hooks.think()
 assert(buttons["Save Current Outfit"].Enabled == false,
     "multiplayer controls were not disabled while Save was pending")
 local sentSave = networkSent[#networkSent]
@@ -681,6 +739,21 @@ assert(buttons["Save Current Outfit"].Enabled ~= false,
     "multiplayer controls did not refresh after an accepted acknowledgement")
 assert(buttons["Apply Saved Look"].Enabled ~= false,
     "Apply stayed disabled after multiplayer Save completed")
+
+local closeButton = buttons["Close"]
+assert(closeButton ~= nil and type(closeButton.OnClicked) == "function",
+    "Close callback was not installed")
+local removesBeforeClose = removedWidgets
+closeButton.OnClicked()
+assert(removedWidgets == removesBeforeClose,
+    "Close removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeClose + 1,
+    "Close did not release the overlay on the next tick")
+assert(#messages == 0,
+    "routine wardrobe diagnostics leaked into the Lua console")
+assert(#loggedMessages > 0,
+    "routine wardrobe diagnostics were not written through the file logger")
 
 print = originalPrint
 print("Wardrobe client facade tests passed")

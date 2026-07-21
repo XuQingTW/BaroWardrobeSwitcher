@@ -42,6 +42,10 @@ local MemoryFile = {
         return value
     end,
     WriteAllText = function(path, value) memoryFiles[tostring(path)] = tostring(value) end,
+    AppendAllText = function(path, value)
+        path = tostring(path)
+        memoryFiles[path] = tostring(memoryFiles[path] or "") .. tostring(value)
+    end,
     Delete = function(path) memoryFiles[tostring(path)] = nil end,
     Copy = function(source, destination, overwrite)
         source, destination = tostring(source), tostring(destination)
@@ -160,6 +164,10 @@ Hook = {
 }
 
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+local serverLogPath = storageRoot .. "/WardrobeServer.log"
+assert(memoryFiles[serverLogPath] ~= nil and
+       memoryFiles[serverLogPath]:find("Server authority", 1, true) ~= nil,
+    "server diagnostics were not written to the dedicated file log")
 
 local handlerCount = 0
 for _ in pairs(Networking.handlers) do handlerCount = handlerCount + 1 end

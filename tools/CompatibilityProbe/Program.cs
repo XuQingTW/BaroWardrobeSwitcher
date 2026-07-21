@@ -235,15 +235,28 @@ RequireAnyPublicField("CharacterInfo.ID", characterInfo, "ID");
 RequirePublicProperty("CharacterInfo.OriginalName", characterInfo, "OriginalName");
 RequirePublicProperty("CharacterInfo.SpeciesName", characterInfo, "SpeciesName");
 RequireAnyPublicField("CharacterInfo.HumanPrefabIds", characterInfo, "HumanPrefabIds");
+RequirePublicProperty("Entity.Removed", entity, "Removed", typeof(bool));
+RequireMethod("Entity.FreeID()", entity, "FreeID", Array.Empty<Type>(), typeof(void));
 
 RequireMethod("Limb.Draw(SpriteBatch,Camera,Color?,bool)", limb, "Draw",
     new[] { spriteBatch, camera, typeof(Nullable<>).MakeGenericType(color), typeof(bool) }, typeof(void));
 RequireMethod("Limb.DrawWearable(WearableSprite,float,SpriteBatch,Color,float,SpriteEffects)", limb, "DrawWearable",
     new[] { wearableSprite, typeof(float), spriteBatch, color, typeof(float), spriteEffects }, typeof(void));
+FieldInfo? limbParamsField = limb.GetField("Params", AllMembers);
+RequirePublicField("Limb.Params", limb, "Params", limbParamsField?.FieldType ?? typeof(void));
+RequirePublicProperty("LimbParams.ID", limbParamsField?.FieldType ?? typeof(void), "ID", typeof(int));
 RequireMethod("WearableSprite.Init(Character)", wearableSprite, "Init", new[] { character }, typeof(void));
 RequireProperty("WearableSprite.IsInitialized", wearableSprite, "IsInitialized");
 RequireReadWriteProperty("WearableSprite.Sprite", wearableSprite, "Sprite");
 RequireProperty("WearableSprite.SourceElement", wearableSprite, "SourceElement");
+PropertyInfo? sourceElementProperty = wearableSprite.GetProperty("SourceElement", AllMembers);
+Console.WriteLine($"INFO WearableSprite.SourceElement type={sourceElementProperty?.PropertyType.FullName ?? "missing"}");
+RequireMethod(
+    "ContentXElement.GetAttribute(string)",
+    sourceElementProperty?.PropertyType ?? typeof(void),
+    "GetAttribute",
+    new[] { typeof(string) },
+    typeof(System.Xml.Linq.XAttribute));
 RequireProperty("WearableSprite.CanBeHiddenByItem", wearableSprite, "CanBeHiddenByItem");
 foreach (string property in new[]
          {
