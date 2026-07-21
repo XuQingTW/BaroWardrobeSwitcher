@@ -312,6 +312,34 @@ do
     end
     assert(ownSnapshot ~= nil and ownSnapshot.active and ownSnapshot.revision == 4,
         "a ready client did not receive its own saved active wardrobe snapshot")
+
+    local lateApply = sendCommand({
+        clientSessionId = "late-client-session",
+        operationId = "late-client-apply",
+        baseRevision = 0,
+        kind = Core.COMMAND.Apply,
+        look = assert(Core.newLook(true, false, { Head = "helmet" }))
+    }, lateClient)
+    assert(lateApply.accepted and lateApply.revision == 1)
+
+    local sentBeforeReadyHello = #Networking.sent
+    local readyHello = newBuffer()
+    assert(Core.writeClientHello(readyHello, "late-client-session"))
+    Networking.handlers[Core.NET.V2_HELLO](readyHello, lateClient)
+    local announcedToExistingClient = nil
+    for index = sentBeforeReadyHello + 1, #Networking.sent do
+        local sent = Networking.sent[index]
+        if sent.connection == client.Connection and sent.message.name == Core.NET.V2_STATE then
+            local state = assert(Core.readState(sent.message))
+            if state.characterId == 144 then announcedToExistingClient = state end
+        end
+    end
+    assert(announcedToExistingClient ~= nil and announcedToExistingClient.active and
+        announcedToExistingClient.revision == 1 and
+        announcedToExistingClient.look.slots.Head == "helmet",
+        "a ready late client did not reannounce its active look to an existing client")
+
+    Hook.handlers["client.disconnected"](lateClient)
     connectedClients[2] = nil
 end
 

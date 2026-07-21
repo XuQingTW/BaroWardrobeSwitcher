@@ -1427,16 +1427,18 @@ local activateRuntime
 
 local function sendActiveSnapshot(client)
     local reboundCharacterIds = {}
-    -- Round transitions can clear the runtime index before every Client.Character
-    -- is rebound. Rebuild missing active entries from authoritative sessions when
-    -- a ready client asks for a snapshot, then notify every negotiated peer once.
+    local requestingSession = sessionFor(client)
+    -- Rebuild runtime entries lost during round transitions. The requesting
+    -- client's ready hello also reannounces its own active look so peers that saw
+    -- an early/transient Character get one authoritative state after it is ready.
     for _, owner in ipairs(connectedClients()) do
         local ownerSession = sessionFor(owner)
         local character = clientCharacter(owner)
         local characterId = characterEntityId(character)
         if ownerSession ~= nil and ownerSession.active and ownerSession.savedLook ~= nil and characterId > 0 then
             local runtime = activeByCharacterId[characterId]
-            if tonumber(ownerSession.activeCharacterId) ~= characterId or runtime == nil or
+            if ownerSession == requestingSession or
+                tonumber(ownerSession.activeCharacterId) ~= characterId or runtime == nil or
                 runtime.session ~= ownerSession or runtime.revision ~= ownerSession.revision then
                 if activateRuntime(ownerSession, character, ownerSession.savedLook) then
                     reboundCharacterIds[characterId] = true
