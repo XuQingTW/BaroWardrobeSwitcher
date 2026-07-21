@@ -112,20 +112,6 @@ local function shallowCopy(source)
     return copy
 end
 
--- copySlots is currently unused; keep it disabled while confirming safe removal.
---[[
-local function copySlots(source)
-    local copy = {}
-    source = source or {}
-    for _, key in ipairs(Core.SLOT_KEYS) do
-        if source[key] ~= nil then
-            copy[key] = tostring(source[key])
-        end
-    end
-    return copy
-end
-]]
-
 local function checkBoundedString(value, field, maximum, allowEmpty)
     if type(value) ~= "string" then
         return nil, field .. " must be a string"
@@ -752,12 +738,6 @@ function Core.readCommand(message)
         command.look = look
     end
     return Core.validateCommand(command)
-end
-
-function Core.tryReadCommand(message)
-    local ok, command, reason = pcall(Core.readCommand, message)
-    if not ok then return nil, "malformed command payload: " .. tostring(command) end
-    return command, reason
 end
 
 function Core.writeState(message, state)
@@ -1895,43 +1875,6 @@ function Core.createClientController(initialState, adapters)
         getState = function() return copyClientState(state) end,
         getViewModel = function() return Core.clientViewModel(state) end
     }
-end
-
-function Core.selfTest()
-    local emptyLook = assert(Core.newLook(true, false, {}))
-    assert(Core.hasLook(emptyLook), "captured empty look must be preserved")
-
-    local look = assert(Core.newLook(true, true, { Head = "ballistichelmet", Bag = "duffelbag" }))
-    assert(look.slots.Head == "ballistichelmet")
-    assert(Core.validateLook({ schemaVersion = 99, slots = {} }) == nil)
-    assert(Core.validateLook({ slots = { Unknown = "bad" } }) == nil)
-
-    local state = Core.newClientState({ characterKey = "7" })
-    state = Core.reduce(state, { type = "SaveRequested" })
-    assert(state.phase == Core.PHASE.Saving)
-    state = Core.reduce(state, { type = "CaptureSucceeded", look = look })
-    assert(state.phase == Core.PHASE.Saving)
-    state = Core.reduce(state, { type = "UnequipSucceeded" })
-    assert(state.phase == Core.PHASE.SavedInactive)
-    state = Core.reduce(state, {
-        type = "RemoteStateReceived",
-        revision = 2,
-        characterId = 7,
-        active = true,
-        look = look
-    })
-    assert(state.phase == Core.PHASE.ApplyPending)
-    state = Core.reduce(state, { type = "RenderSucceeded", revision = 2 })
-    assert(state.phase == Core.PHASE.Active)
-    local unchanged, effects = Core.reduce(state, {
-        type = "RemoteStateReceived",
-        revision = 1,
-        characterId = 7,
-        active = false
-    })
-    assert(unchanged.phase == Core.PHASE.Active)
-    assert(effects[1].type == "IgnoredStaleState")
-    return true
 end
 
 WardrobeCore = Core

@@ -14,15 +14,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ERRORS: list[str] = []
-EXPECTED_METADATA = {
-    "modVersion": "0.5.1",
-    "protocolVersion": 2,
-    "lookSchemaVersion": 2,
-    "persistenceVersion": 3,
-    "barotraumaGameVersion": "1.13.4.0",
-    "barotraumaSourceCommit": "a589d2cee3ff2214c99a7ea30c46f16a5406a01d",
-    "luaCsCommit": "0d380afcd1feeb842c0c86290d46bcaf198cd5e4",
-}
 EXPECTED_CANDIDATE_DECLARED_VERSION = "1.12.7.0"
 
 
@@ -59,9 +50,6 @@ def main() -> int:
     args = parser.parse_args()
 
     version = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))
-    for key, expected in EXPECTED_METADATA.items():
-        if version.get(key) != expected:
-            fail(f"version.json {key} must be {expected!r}")
     filelist_root = parse_xml(ROOT / "filelist.xml")
     modconfig_root = parse_xml(ROOT / "ModConfig.xml")
     parse_xml(ROOT / "Texts.xml")

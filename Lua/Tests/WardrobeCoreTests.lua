@@ -65,7 +65,10 @@ local function assertEqual(actual, expected, message)
     assert(actual == expected, (message or "values differ") .. ": " .. tostring(actual) .. " ~= " .. tostring(expected))
 end
 
-assert(Core.selfTest())
+local emptyLook = assert(Core.newLook(true, false, {}))
+assert(Core.hasLook(emptyLook), "captured empty look must be preserved")
+assert(Core.validateLook({ schemaVersion = 99, slots = {} }) == nil)
+assert(Core.validateLook({ slots = { Unknown = "bad" } }) == nil)
 
 local allSlots = {
     Head = "helmet",

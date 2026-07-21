@@ -1,117 +1,52 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Barotrauma;
-using Barotrauma.Items.Components;
-using Barotrauma.LuaCs;
-using LuaCsLogger = BaroWardrobeSwitcher.WardrobeFileLogger;
 
 namespace BaroWardrobeSwitcher
 {
-    /// <summary>
-    /// Kept as an assembly plugin so existing source-loading configurations continue to
-    /// discover this file. The policy is now composed directly by VisualOverride; it no
-    /// longer Harmony-patches private methods in its own assembly.
-    /// </summary>
-    public sealed class WardrobeFunctionalFashionFiltersPlugin : IAssemblyPlugin
-    {
-        public void Initialize()
-        {
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion effect policy initialized.");
-        }
-
-        public void OnLoadCompleted() { }
-
-        public void PreInitPatching() { }
-
-        public void Dispose()
-        {
-            LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion effect policy disposed.");
-        }
-    }
-
     /// <summary>
     /// Decides which functional effects are safe to reproduce for a cosmetic look.
     /// Stable prefab tags/components are preferred. Identifier/name matching remains as
     /// a one-release compatibility fallback for third-party items without useful tags.
     /// </summary>
-    internal sealed class FashionEffectPolicy
+    internal static class FashionEffectPolicy
     {
         private static readonly Identifier DeepDivingTag = new Identifier("deepdiving");
         private static readonly Identifier DeepDivingLargeTag = new Identifier("deepdivinglarge");
-        private static readonly FieldInfo SoundsField =
-            typeof(StatusEffect).GetField("sounds", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        private static readonly FieldInfo ComponentSoundsField =
-            typeof(ItemComponent).GetField("sounds", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo PropertyConditionalsField =
             typeof(StatusEffect).GetField("propertyConditionals", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo RequiredItemsField =
             typeof(StatusEffect).GetField("requiredItems", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo PlaySoundOnRequiredItemFailureField =
             typeof(StatusEffect).GetField("playSoundOnRequiredItemFailure", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-        private readonly FashionEffectDiagnostics diagnostics = new FashionEffectDiagnostics();
-
-        public bool ShouldCaptureAnimation(Item item, object animationInfo)
+        public static bool ShouldCaptureAnimation(Item item, object animationInfo)
         {
             bool sealedSuit = IsSealedSuit(item);
-            bool filtered = sealedSuit
+            return !(sealedSuit
                 ? IsMovementAnimation(animationInfo)
-                : IsLargeEquipmentMovementAnimation(animationInfo);
-            if (!filtered) { return true; }
-
-            diagnostics.FilteredMovementAnimations++;
-            diagnostics.RememberPolicy(PolicyDescription(item));
-            return false;
+                : IsLargeEquipmentMovementAnimation(animationInfo));
         }
 
-        public bool ShouldCaptureStatusSounds(Item item)
+        public static bool ShouldCaptureStatusSounds(Item item)
         {
-            if (!ShouldSuppressCosmeticSounds(item)) { return true; }
-            int count = CountStatusSounds(item);
-            if (count > 0)
-            {
-                diagnostics.SuppressedStatusSounds += count;
-                diagnostics.RememberPolicy(PolicyDescription(item));
-            }
-            return false;
+            return !ShouldSuppressCosmeticSounds(item);
         }
 
-        public bool ShouldCaptureStatusSound(Item item, StatusEffect statusEffect)
+        public static bool ShouldCaptureStatusSound(StatusEffect statusEffect)
         {
-            if (!IsFunctionalEquipmentAlarm(statusEffect)) { return true; }
-            diagnostics.ExcludedFunctionalAlarms++;
-            diagnostics.RememberPolicy(PolicyDescription(item));
-            return false;
+            return !IsFunctionalEquipmentAlarm(statusEffect);
         }
 
-        public bool ShouldCaptureComponentSounds(Item item)
+        public static bool ShouldCaptureComponentSounds(Item item)
         {
-            if (!ShouldSuppressCosmeticSounds(item)) { return true; }
-            int count = CountComponentSounds(item);
-            if (count > 0)
-            {
-                diagnostics.SuppressedItemSounds += count;
-                diagnostics.RememberPolicy(PolicyDescription(item));
-            }
-            return false;
+            return !ShouldSuppressCosmeticSounds(item);
         }
 
-        public bool ShouldPreserveSealedSuitMasks(Item item)
+        public static bool ShouldPreserveSealedSuitMasks(Item item)
         {
-            if (!IsSealedSuit(item)) { return false; }
-            diagnostics.PreservedSealedMaskSprites++;
-            diagnostics.RememberPolicy(PolicyDescription(item));
-            return true;
-        }
-
-        public string AppendDebugStatus(string status)
-        {
-            string suffix = diagnostics.Describe();
-            return string.IsNullOrWhiteSpace(suffix)
-                ? status
-                : (status ?? string.Empty) + ", fashionPolicy=" + suffix;
+            return IsSealedSuit(item);
         }
 
         internal static bool IsFunctionalEquipmentAlarm(StatusEffect statusEffect)
@@ -185,61 +120,6 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static int CountStatusSounds(Item item)
-        {
-            if (item?.Components == null || SoundsField == null) { return 0; }
-            int count = 0;
-            foreach (ItemComponent component in item.Components)
-            {
-                if (component?.statusEffectLists == null ||
-                    !component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> effects))
-                {
-                    continue;
-                }
-                count += effects.Count(HasSounds);
-            }
-            return count;
-        }
-
-        private static int CountComponentSounds(Item item)
-        {
-            if (item?.Components == null || ComponentSoundsField == null) { return 0; }
-            int count = 0;
-            foreach (ItemComponent component in item.Components)
-            {
-                try
-                {
-                    if (ComponentSoundsField.GetValue(component) is IDictionary sounds)
-                    {
-                        count += sounds.Count;
-                    }
-                }
-                catch
-                {
-                    // Optional diagnostics must never make capture fail.
-                }
-            }
-            return count;
-        }
-
-        private static bool HasSounds(StatusEffect statusEffect)
-        {
-            if (statusEffect == null || SoundsField == null) { return false; }
-            try
-            {
-                if (!(SoundsField.GetValue(statusEffect) is IEnumerable sounds)) { return false; }
-                foreach (object sound in sounds)
-                {
-                    if (sound != null) { return true; }
-                }
-            }
-            catch
-            {
-                // Optional diagnostics must never make capture fail.
-            }
-            return false;
-        }
-
         private static bool HasEntries(IEnumerable values)
         {
             if (values == null) { return false; }
@@ -266,13 +146,6 @@ namespace BaroWardrobeSwitcher
                    text.Contains("divesuit") ||
                    text.Contains("pucs") ||
                    text.Contains("puccs");
-        }
-
-        private static string PolicyDescription(Item item)
-        {
-            if (IsSealedSuit(item)) { return "sealed-suit"; }
-            if (ShouldSuppressCosmeticSounds(item)) { return "functional-soundless"; }
-            return "movement-filter";
         }
 
         private static string NormalizedItemText(Item item)
@@ -341,32 +214,5 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private sealed class FashionEffectDiagnostics
-        {
-            private readonly HashSet<string> policies = new HashSet<string>();
-
-            public int FilteredMovementAnimations { get; set; }
-            public int SuppressedStatusSounds { get; set; }
-            public int ExcludedFunctionalAlarms { get; set; }
-            public int SuppressedItemSounds { get; set; }
-            public int PreservedSealedMaskSprites { get; set; }
-
-            public void RememberPolicy(string policy)
-            {
-                if (!string.IsNullOrWhiteSpace(policy)) { policies.Add(policy); }
-            }
-
-            public string Describe()
-            {
-                List<string> parts = new List<string>();
-                if (FilteredMovementAnimations > 0) { parts.Add("filteredMovementAnimations=" + FilteredMovementAnimations); }
-                if (SuppressedStatusSounds > 0) { parts.Add("suppressedStatusSounds=" + SuppressedStatusSounds); }
-                if (ExcludedFunctionalAlarms > 0) { parts.Add("excludedFunctionalAlarms=" + ExcludedFunctionalAlarms); }
-                if (SuppressedItemSounds > 0) { parts.Add("suppressedItemSounds=" + SuppressedItemSounds); }
-                if (PreservedSealedMaskSprites > 0) { parts.Add("preservedSealedMaskSprites=" + PreservedSealedMaskSprites); }
-                if (policies.Count > 0) { parts.Add("policies=" + string.Join("/", policies.OrderBy(policy => policy))); }
-                return string.Join(";", parts);
-            }
-        }
     }
 }

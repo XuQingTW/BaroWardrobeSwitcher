@@ -38,6 +38,16 @@ for _, candidate in ipairs(clientPathCandidates) do
     end
 end
 assert(clientPath ~= nil, "could not locate Lua/WardrobeSwitcher.lua")
+local clientSourceFile = assert(io.open(clientPath, "r"))
+local clientSource = clientSourceFile:read("*a")
+clientSourceFile:close()
+for _, forbidden in ipairs({
+    "local savedLook =", "local savedLookCaptured =", "local activeLook =",
+    "local autoApplyLook =", "local hideHair =", "local attachmentVisibility =",
+    "applyReducerProjection"
+}) do
+    assert(not clientSource:find(forbidden, 1, true), "facade state mirror returned: " .. forbidden)
+end
 SERVER = false
 CLIENT = true
 InvSlotType = {
@@ -484,6 +494,8 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = player
 hooks.think()
+assert(activationCount == 2,
+    "CharacterReady/RestoreLook did not rebuild the player's active reducer state")
 enableTransferButton.OnClicked()
 assert(transferEnabled, "appearance-transfer setting was not persisted")
 
@@ -491,12 +503,12 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = npc
 hooks.think()
-assert(activationCount == 2,
+assert(activationCount == 3,
     "enabled transfer did not fill the unconfigured NPC profile; activations=" ..
     tostring(activationCount) ..
     ", transfer=" ..
     tostring(transferEnabled))
-assert(prefabCaptureCount == 2,
+assert(prefabCaptureCount == 3,
     "transferred NPC look did not build an NPC-owned renderer session")
 assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
     "successful transferred look was not persisted for the target NPC")
@@ -504,8 +516,8 @@ assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
 -- Clear/reapply on the same NPC must reuse its committed renderer session.
 clearButton.OnClicked()
 applyButton.OnClicked()
-assert(activationCount == 3, "NPC clear/reapply did not reactivate the renderer")
-assert(prefabCaptureCount == 2,
+assert(activationCount == 4, "NPC clear/reapply did not reactivate the renderer")
+assert(prefabCaptureCount == 3,
     "clear/reapply discarded the reusable renderer session and rebuilt from the prefab")
 
 -- An existing inactive profile must win over transfer and remain inactive until
@@ -514,7 +526,7 @@ Character.Controlled = nil
 hooks.think()
 Character.Controlled = existingNpc
 hooks.think()
-assert(activationCount == 3,
+assert(activationCount == 4,
     "appearance transfer overwrote or activated an existing NPC profile")
 local existingProfileKey =
     profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))
@@ -522,12 +534,12 @@ assert(profiles[existingProfileKey] ~= nil and
     profiles[existingProfileKey]:find("existinghelmet", 1, true) ~= nil,
     "appearance transfer replaced an existing NPC profile")
 applyButton.OnClicked()
-assert(activationCount == 4,
+assert(activationCount == 5,
     "manual apply did not activate the existing NPC profile")
 assert(capturedIdentifierByCharacterId[44] == "existinghelmet",
     "the existing NPC profile did not use its own saved appearance")
-assert(activeCharacterIds[43] == true and activeCharacterIds[44] == true,
-    "two NPCs could not keep different active wardrobe sessions")
+assert(activeCharacterIds[43] ~= true and activeCharacterIds[44] == true,
+    "CharacterLost did not retire the previous renderer while preserving the new character state")
 
 -- Clear only the player before the scene transition. Both NPC profiles remain
 -- active and should restore independently in the replacement scene.
@@ -551,10 +563,12 @@ Character.CharacterList = { playerNextScene, npcNextScene, existingNextScene }
 Character.Controlled = playerNextScene
 hooks.roundStart()
 for _ = 1, 15 do hooks.think() end
-assert(activationCount == 6,
-    "active NPC looks were not independently restored in the next scene")
-assert(prefabCaptureCount == 5,
-    "replacement NPCs incorrectly reused renderer sessions from the previous scene")
+assert(activationCount == 9,
+    "active NPC looks were not independently restored in the next scene; activations=" ..
+    tostring(activationCount))
+assert(prefabCaptureCount == 8,
+    "replacement NPCs incorrectly reused renderer sessions from the previous scene; captures=" ..
+    tostring(prefabCaptureCount))
 assert(capturedIdentifierByCharacterId[143] == "helmet",
     "the transferred NPC profile restored the wrong appearance")
 assert(capturedIdentifierByCharacterId[144] == "existinghelmet",
@@ -597,8 +611,9 @@ Character.CharacterList = {
 Character.Controlled = playerFinalScene
 hooks.roundStart()
 for _ = 1, 15 do hooks.think() end
-assert(activationCount == 7,
-    "forgotten or ambiguous NPC profiles were incorrectly restored")
+assert(activationCount == 10,
+    "forgotten or ambiguous NPC profiles were incorrectly restored; activations=" ..
+    tostring(activationCount))
 assert(activeCharacterIds[244] == true,
     "an unaffected NPC profile did not restore in the final scene")
 assert(activeCharacterIds[243] ~= true,
@@ -621,14 +636,14 @@ hooks.think()
 local savesBeforeMemoryProfile = saveCalls
 saveButton.OnClicked()
 applyButton.OnClicked()
-assert(activationCount == 8,
+assert(activationCount == 11,
     "campaign-less player profile did not apply; activations=" ..
     tostring(activationCount))
 Character.Controlled = nil
 hooks.think()
 Character.Controlled = memoryNpc
 for _ = 1, 15 do hooks.think() end
-assert(activationCount == 9,
+assert(activationCount == 12,
     "campaign-less in-memory profiles did not apply and transfer during the session; activations=" ..
     tostring(activationCount) ..
     ", ids=" ..

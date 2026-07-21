@@ -261,11 +261,6 @@ namespace BaroWardrobeSwitcher
                 int version = ReadSchemaVersion(parsed.RootElement);
                 if (version == 1)
                 {
-                    if (!IsCanonicalSinglePlayerProfilesV1(parsed.RootElement))
-                    {
-                        throw new InvalidDataException(
-                            "Single-player wardrobe profile schema v1 is not canonical.");
-                    }
                     SinglePlayerProfilesDocument migrated = MigrateSinglePlayerProfilesV1(json);
                     ValidateSinglePlayerProfiles(migrated);
                     File.Copy(path, path + ".v1.bak", overwrite: true);
@@ -274,8 +269,7 @@ namespace BaroWardrobeSwitcher
                         "Migrated single-player wardrobe profiles from schema v1 to schema v2.");
                     return migrated;
                 }
-                if (version != SinglePlayerProfilesVersion ||
-                    !IsCanonicalSinglePlayerProfilesDocument(parsed.RootElement))
+                if (version != SinglePlayerProfilesVersion)
                 {
                     throw new InvalidDataException(
                         "Single-player wardrobe profile document is not canonical.");
@@ -418,184 +412,6 @@ namespace BaroWardrobeSwitcher
             }
         }
 
-        private static bool IsCanonicalSinglePlayerProfilesDocument(JsonElement root)
-        {
-            if (root.ValueKind != JsonValueKind.Object) { return false; }
-            var expected = new HashSet<string>(StringComparer.Ordinal)
-            {
-                "schemaVersion",
-                "transferToUnconfiguredCharacter",
-                "importedLegacyCampaigns",
-                "profiles"
-            };
-            foreach (JsonProperty property in root.EnumerateObject())
-            {
-                if (!expected.Remove(property.Name)) { return false; }
-            }
-            if (expected.Count != 0 ||
-                !root.TryGetProperty("schemaVersion", out JsonElement version) ||
-                version.ValueKind != JsonValueKind.Number ||
-                !version.TryGetInt32(out int schemaVersion) ||
-                schemaVersion != SinglePlayerProfilesVersion ||
-                !root.TryGetProperty(
-                    "transferToUnconfiguredCharacter",
-                    out JsonElement transfer) ||
-                !IsBooleanKind(transfer) ||
-                !root.TryGetProperty("importedLegacyCampaigns", out JsonElement imported) ||
-                imported.ValueKind != JsonValueKind.Array ||
-                imported.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.String) ||
-                !root.TryGetProperty("profiles", out JsonElement profiles) ||
-                profiles.ValueKind != JsonValueKind.Array)
-            {
-                return false;
-            }
-
-            foreach (JsonElement profile in profiles.EnumerateArray())
-            {
-                if (!IsCanonicalSinglePlayerProfile(profile)) { return false; }
-            }
-            return true;
-        }
-
-        private static bool IsCanonicalSinglePlayerProfilesV1(JsonElement root)
-        {
-            if (root.ValueKind != JsonValueKind.Object) { return false; }
-            var expected = new HashSet<string>(StringComparer.Ordinal)
-            {
-                "schemaVersion",
-                "transferToUnconfiguredCharacter",
-                "importedLegacyCampaigns",
-                "profiles"
-            };
-            foreach (JsonProperty property in root.EnumerateObject())
-            {
-                if (!expected.Remove(property.Name)) { return false; }
-            }
-            if (expected.Count != 0 ||
-                !root.TryGetProperty("schemaVersion", out JsonElement version) ||
-                version.ValueKind != JsonValueKind.Number ||
-                !version.TryGetInt32(out int schemaVersion) ||
-                schemaVersion != 1 ||
-                !root.TryGetProperty(
-                    "transferToUnconfiguredCharacter",
-                    out JsonElement transfer) ||
-                !IsBooleanKind(transfer) ||
-                !root.TryGetProperty("importedLegacyCampaigns", out JsonElement imported) ||
-                imported.ValueKind != JsonValueKind.Array ||
-                imported.EnumerateArray().Any(value => value.ValueKind != JsonValueKind.String) ||
-                !root.TryGetProperty("profiles", out JsonElement profiles) ||
-                profiles.ValueKind != JsonValueKind.Array)
-            {
-                return false;
-            }
-
-            foreach (JsonElement profile in profiles.EnumerateArray())
-            {
-                if (!IsCanonicalSinglePlayerProfileV1(profile)) { return false; }
-            }
-            return true;
-        }
-
-        private static bool IsCanonicalSinglePlayerProfileV1(JsonElement profile)
-        {
-            if (profile.ValueKind != JsonValueKind.Object) { return false; }
-            var expected = new HashSet<string>(StringComparer.Ordinal)
-            {
-                "campaignHash",
-                "characterHash",
-                "displayName",
-                "autoApply",
-                "captured",
-                "hideHair",
-                "slots"
-            };
-            foreach (JsonProperty property in profile.EnumerateObject())
-            {
-                if (!expected.Remove(property.Name)) { return false; }
-            }
-            if (expected.Count != 0 ||
-                !profile.TryGetProperty("campaignHash", out JsonElement campaignHash) ||
-                campaignHash.ValueKind != JsonValueKind.String ||
-                !profile.TryGetProperty("characterHash", out JsonElement characterHash) ||
-                characterHash.ValueKind != JsonValueKind.String ||
-                !profile.TryGetProperty("displayName", out JsonElement displayName) ||
-                displayName.ValueKind != JsonValueKind.String ||
-                !profile.TryGetProperty("autoApply", out JsonElement autoApply) ||
-                !IsBooleanKind(autoApply) ||
-                !profile.TryGetProperty("captured", out JsonElement captured) ||
-                !IsBooleanKind(captured) ||
-                !profile.TryGetProperty("hideHair", out JsonElement hideHair) ||
-                !IsBooleanKind(hideHair) ||
-                !profile.TryGetProperty("slots", out JsonElement slots) ||
-                slots.ValueKind != JsonValueKind.Object)
-            {
-                return false;
-            }
-
-            var expectedSlots = new HashSet<string>(SlotKeys, StringComparer.Ordinal);
-            foreach (JsonProperty slot in slots.EnumerateObject())
-            {
-                if (!expectedSlots.Remove(slot.Name) ||
-                    slot.Value.ValueKind != JsonValueKind.String &&
-                    slot.Value.ValueKind != JsonValueKind.Null)
-                {
-                    return false;
-                }
-            }
-            return expectedSlots.Count == 0;
-        }
-
-        private static bool IsCanonicalSinglePlayerProfile(JsonElement profile)
-        {
-            if (profile.ValueKind != JsonValueKind.Object) { return false; }
-            var expected = new HashSet<string>(StringComparer.Ordinal)
-            {
-                "campaignHash",
-                "characterHash",
-                "displayName",
-                "autoApply",
-                "captured",
-                "attachmentVisibility",
-                "slots"
-            };
-            foreach (JsonProperty property in profile.EnumerateObject())
-            {
-                if (!expected.Remove(property.Name)) { return false; }
-            }
-            if (expected.Count != 0 ||
-                !profile.TryGetProperty("campaignHash", out JsonElement campaignHash) ||
-                campaignHash.ValueKind != JsonValueKind.String ||
-                !profile.TryGetProperty("characterHash", out JsonElement characterHash) ||
-                characterHash.ValueKind != JsonValueKind.String ||
-                !profile.TryGetProperty("displayName", out JsonElement displayName) ||
-                displayName.ValueKind != JsonValueKind.String ||
-                !profile.TryGetProperty("autoApply", out JsonElement autoApply) ||
-                !IsBooleanKind(autoApply) ||
-                !profile.TryGetProperty("captured", out JsonElement captured) ||
-                !IsBooleanKind(captured) ||
-                !profile.TryGetProperty(
-                    "attachmentVisibility",
-                    out JsonElement attachmentVisibility) ||
-                !IsCanonicalAttachmentVisibility(attachmentVisibility) ||
-                !profile.TryGetProperty("slots", out JsonElement slots) ||
-                slots.ValueKind != JsonValueKind.Object)
-            {
-                return false;
-            }
-
-            var expectedSlots = new HashSet<string>(SlotKeys, StringComparer.Ordinal);
-            foreach (JsonProperty slot in slots.EnumerateObject())
-            {
-                if (!expectedSlots.Remove(slot.Name) ||
-                    slot.Value.ValueKind != JsonValueKind.String &&
-                    slot.Value.ValueKind != JsonValueKind.Null)
-                {
-                    return false;
-                }
-            }
-            return expectedSlots.Count == 0;
-        }
-
         private static string EncodeSinglePlayerProfile(SinglePlayerProfile profile)
         {
             var parts = new List<string>
@@ -665,78 +481,100 @@ namespace BaroWardrobeSwitcher
 
         private sealed class SinglePlayerProfilesDocument
         {
+            [JsonRequired]
             [JsonPropertyName("schemaVersion")]
             public int Version { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("transferToUnconfiguredCharacter")]
             public bool TransferToUnconfiguredCharacter { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("importedLegacyCampaigns")]
             public List<string> ImportedLegacyCampaigns { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("profiles")]
             public List<SinglePlayerProfile> Profiles { get; set; }
         }
 
         private sealed class SinglePlayerProfile
         {
+            [JsonRequired]
             [JsonPropertyName("campaignHash")]
             public string CampaignHash { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("characterHash")]
             public string CharacterHash { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("displayName")]
             public string DisplayName { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("autoApply")]
             public bool AutoApply { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("captured")]
             public bool Captured { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("attachmentVisibility")]
             public AttachmentVisibilityDocument AttachmentVisibility { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("slots")]
             public Dictionary<string, string> Slots { get; set; }
         }
 
         private sealed class LegacySinglePlayerProfilesDocument
         {
+            [JsonRequired]
             [JsonPropertyName("schemaVersion")]
             public int Version { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("transferToUnconfiguredCharacter")]
             public bool TransferToUnconfiguredCharacter { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("importedLegacyCampaigns")]
             public List<string> ImportedLegacyCampaigns { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("profiles")]
             public List<LegacySinglePlayerProfile> Profiles { get; set; }
         }
 
         private sealed class LegacySinglePlayerProfile
         {
+            [JsonRequired]
             [JsonPropertyName("campaignHash")]
             public string CampaignHash { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("characterHash")]
             public string CharacterHash { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("displayName")]
             public string DisplayName { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("autoApply")]
             public bool AutoApply { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("captured")]
             public bool Captured { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("hideHair")]
             public bool HideHair { get; set; }
 
+            [JsonRequired]
             [JsonPropertyName("slots")]
             public Dictionary<string, string> Slots { get; set; }
         }
