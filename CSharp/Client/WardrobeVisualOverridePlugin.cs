@@ -1246,7 +1246,6 @@ namespace BaroWardrobeSwitcher
                 session.ForceShowAttachmentMask = 0;
                 session.EmptySlots.Clear();
                 session.SavedSlots.Clear();
-                session.EquipmentMasksToSanitize.Clear();
             }
         }
 
@@ -1262,7 +1261,6 @@ namespace BaroWardrobeSwitcher
                 session.ForceShowAttachmentMask = 0;
                 session.EmptySlots.Clear();
                 session.SavedSlots.Clear();
-                session.EquipmentMasksToSanitize.Clear();
             }
             fallbackDrawnFashionSpriteCount = 0;
             RefreshWearables(character);
@@ -1614,17 +1612,11 @@ namespace BaroWardrobeSwitcher
                 return ActivateFashionVisual(character);
             }
 
-            RenderSession session = GetOrCreateSession(character);
-            int sanitized = 0;
-            foreach (WearableSprite sprite in wearable.wearableSprites.Where(sprite => IsEquipmentSprite(sprite)))
-            {
-                if (session.EquipmentMasksToSanitize.Add(sprite)) { sanitized++; }
-            }
             bool activated = ActivateFashionVisual(character);
             if (carrier)
             {
-                int capturedSprites = session.SpriteCount;
-                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Enabled draw-only fashion override through carrier: {item.Name}, capturedSprites={capturedSprites}, sanitizedSprites={sanitized}.");
+                int capturedSprites = GetOrCreateSession(character).SpriteCount;
+                LuaCsLogger.Log($"[Baro Wardrobe Switcher] Enabled draw-only fashion override through carrier: {item.Name}, capturedSprites={capturedSprites}.");
             }
             drawOverrideLogCount = 0;
             return activated;
@@ -3016,7 +3008,7 @@ namespace BaroWardrobeSwitcher
 
                 originalOrder = new List<WearableSprite>(wearingItems);
                 foreach (WearableSprite equipmentSprite in originalOrder
-                             .Where(sprite => sprite != null && session.EquipmentMasksToSanitize.Contains(sprite)))
+                             .Where(sprite => IsEquipmentSprite(sprite) && !session.TryGetDescriptor(sprite, out _)))
                 {
                     originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);
                     ClearMask(equipmentSprite);

@@ -844,6 +844,7 @@ persistence.LoadClientLook = function() return "" end
 local v1Character = makeCharacter(903, 903, "Late Legacy Player", false)
 Character.Controlled = v1Character
 Character.CharacterList = { v1Character }
+gameSessionDataPath.SavePath = "p2p-session-a.save"
 assert(dofile(clientPath) == nil)
 hooks.roundStart()
 local deferredV1 = newNetworkBuffer(WardrobeCore.NET.V1_LOOK_APPLY)
@@ -864,6 +865,20 @@ assert(activationCount == beforeDeferredV1,
 for _ = 1, 20 do hooks.think() end
 assert(activationCount == beforeDeferredV1 + 1,
     "a deferred v1 round-start frame was not applied exactly once")
+
+-- P2P can replace the game session while retaining the same controlled
+-- Character object. The session reset must force CharacterReady to bind the
+-- fresh reducer instead of leaving all character-gated F8 actions disabled.
+persistence.LoadClientLook = function()
+    return "captured=true|active=false|auto=false|hidehair=false|Head=helmet,"
+end
+gameSessionDataPath.SavePath = "p2p-session-b.save"
+openPanel = true
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false and
+       buttons["Apply Saved Look"].Enabled ~= false and
+       buttons["Clear Look"].Enabled ~= false,
+    "same-character P2P session replacement left F8 actions disabled")
 
 assert(#messages == 0,
     "routine wardrobe diagnostics leaked into the Lua console")

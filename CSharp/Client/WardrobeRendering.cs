@@ -322,8 +322,6 @@ namespace BaroWardrobeSwitcher
 
         public HashSet<InvSlotType> SavedSlots { get; set; } = new HashSet<InvSlotType>();
 
-        public HashSet<WearableSprite> EquipmentMasksToSanitize { get; } = new HashSet<WearableSprite>();
-
         public List<object> FashionAnimations { get; } = new List<object>();
 
         public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();
@@ -487,7 +485,6 @@ namespace BaroWardrobeSwitcher
             }
             descriptorsBySprite.Clear();
             SpritesBySlot.Clear();
-            EquipmentMasksToSanitize.Clear();
             FashionAnimations.Clear();
             FashionSounds.Clear();
             FashionComponentSounds.Clear();

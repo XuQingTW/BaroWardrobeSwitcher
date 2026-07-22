@@ -61,6 +61,16 @@ $contracts = @(
         )
     },
     @{
+        Name = "live-equipment-mask-transaction"
+        Source = $renderer
+        Required = @(
+            ".Where(sprite => IsEquipmentSprite(sprite) && !session.TryGetDescriptor(sprite, out _))",
+            "originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);",
+            "ClearMask(equipmentSprite);",
+            "pair.Value.Restore(pair.Key);"
+        )
+    },
+    @{
         Name = "physical-limb-guard"
         Source = $renderer
         Required = @(

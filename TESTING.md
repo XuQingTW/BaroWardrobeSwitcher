@@ -6,7 +6,7 @@ This checklist is the release gate for v0.5.2. Automated checks must pass before
 
 1. Run `scripts/Build.ps1` with explicit Barotrauma and LuaCs Publicized paths. Expected: zero warnings and errors; output only under `artifacts`.
 2. Run `scripts/Test-Compatibility.ps1 -RequireOptional`. Expected: every exact 1.13.4.0 target reports `PASS`.
-3. Run `scripts/Test-RendererContracts.ps1`. Expected: the crash characterizations, `RenderSession` aggregate, attachment-visibility priority/no-wearable-refresh contract, and functional-equipment-alarm lifecycle report `PASS`.
+3. Run `scripts/Test-RendererContracts.ps1`. Expected: the crash characterizations, live-equipment mask transaction, `RenderSession` aggregate, attachment-visibility priority/no-wearable-refresh contract, and functional-equipment-alarm lifecycle report `PASS`.
 4. Run `scripts/Test-Persistence.ps1` with the same explicit paths. Expected: canonical client v3, client v1/v2 migration, single-player profile v2 and v1 migration, transfer round-trip, profile/campaign isolation, one-time inactive legacy import, quarantine, and atomic-failure cases report `PASS`.
 5. Run `scripts/Test-Lua.ps1`. Expected: every Lua source parses in Barotrauma's MoonSharp and every pure/authority test reports `PASS`.
 6. Run `scripts/verify_package.py`. Expected: metadata agrees, every runtime source is listed, and no generated file is present in the source package.
@@ -39,6 +39,7 @@ Run single-player, Windows host, and Linux dedicated server with at least two cl
 - Duplicate operation IDs return the original result without applying twice.
 - Out-of-order state is ignored; clear/forget followed by a late stale apply stays cleared.
 - Join, reconnect, round start/end, death/respawn, character replacement, and campaign/server changes preserve the documented intent.
+- On a P2P host, change session or scene while retaining the same controlled Character and while a command is awaiting acknowledgement. Reopening F8 must leave Save, Apply, and Clear usable after the new session binds.
 - An active look survives each character/scene replacement and renders exactly once after the initial-equipment gate. A saved-but-never-applied look stays inactive.
 - `Clear Look` and `Forget Saved Look` remain inactive across round start, reconnect, death/respawn, and character replacement in single-player, v1 bridge, and v2 flows.
 - Invalid version/slot, duplicate slot, truncated payload, identifier over 256 bytes, payload over 4 KiB, forged item ID/name, unknown prefab, and non-wearable slot are rejected atomically.
@@ -69,6 +70,7 @@ Use a campaign with at least the player and two controllable human NPC crew memb
 - EA-HI/manual composite-head check: apply the appearance, set `Hair=Show`, then hide only the Beard/Moustache layers actually required. The modded head and decorations must remain present and must not revert to the Vanilla head.
 - Confirm appearance-layer buttons never trigger `Character.OnWearablesChanged()` and that local persistence failure restores the complete prior policy and active render state.
 - Real equipment keeps stats, protection, oxygen, buffs, inventory, and health-interface behavior.
+- With a visual look active, equip and remove a real diving suit before and after wardrobe synchronization on both the owning client and an observer. Body limbs remain visible and the suit appearance remains stable.
 - Fashion animation and looping/one-shot/silent sound replacement matches v0.4 behavior when optional capabilities are available.
 - With a visual look active over a real diving suit, low and empty oxygen alarms remain audible. Replacing/refilling the oxygen tank or removing the real suit stops the alarm through the game's native lifecycle.
 - A saved diving-suit appearance without a real diving suit never creates a low/empty-oxygen alarm, and clearing/removing the appearance leaves no alarm behind.

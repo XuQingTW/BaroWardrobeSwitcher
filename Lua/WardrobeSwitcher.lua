@@ -4293,6 +4293,8 @@ end
 
 function Helpers.resetSavedLookForNewSession()
     Helpers.clearAllVisualOverrides()
+    lastCharacter = nil
+    windowNeedsRefresh = true
     legacyLookMetadata = {}
     characterStates = {}
     slotResults = {}
