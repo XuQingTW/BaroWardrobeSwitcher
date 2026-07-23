@@ -48,6 +48,7 @@ $contracts = @(
             "staged.MarkCommitted();",
             "current.Dispose();",
             "session.HasPendingCapture",
+            "session.HasLiveItemSources",
             "return session.Validate(out _);"
         )
     },
@@ -84,7 +85,9 @@ $contracts = @(
         Source = $all
         Required = @(
             "tempItem.FreeID();",
+            "tempItem.SpriteColor = new Color(packedColor.Value);",
             "public static bool CanReuseCapturedFashion(Character character)",
+            "session.MarkLiveItemSource();",
             "if (item == null || item.Removed) { continue; }"
         )
     },
@@ -128,4 +131,8 @@ Assert-Order "visibility-precedence" $visibility @(
 $fallback = Get-Section $renderer `
     "tempItem = new Item(prefab" `
     "if (!succeeded)"
-Assert-Order "temporary-item-id-release" $fallback @("tempItem.FreeID();", "CaptureFashionItemCore(character, tempItem")
+Assert-Order "temporary-item-id-and-color" $fallback @(
+    "tempItem.FreeID();",
+    "tempItem.SpriteColor = new Color(packedColor.Value);",
+    "CaptureFashionItemCore(character, tempItem"
+)

@@ -1,5 +1,5 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<contentpackage name="Wardrobe(beta)" modversion="0.5.2" corepackage="False" steamworkshopid="3737903001" gameversion="1.13.4.0">
+<contentpackage name="Wardrobe(beta)" modversion="0.5.3" corepackage="False" steamworkshopid="3737903001" gameversion="1.13.4.0">
   <Text file="%ModDir%/Texts.xml" />
   <Text file="%ModDir%/TextsSimplifiedChinese.xml" />
   <Text file="%ModDir%/TextsTraditionalChinese.xml" />

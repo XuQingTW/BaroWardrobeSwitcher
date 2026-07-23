@@ -24,6 +24,7 @@ Pinned contracts used by the adapter:
 
 Required renderer capabilities:
 
+- Public read/write `Item.SpriteColor`, public read/write `Color.PackedValue`, and `Color(uint)`
 - `Limb.Draw(SpriteBatch, Camera, Color?, bool)`
 - `Limb.DrawWearable(WearableSprite, float, SpriteBatch, Color, float, SpriteEffects)`
 - `WearableSprite.Init(Character)` and readable initialization/resource properties
@@ -60,15 +61,15 @@ Run the contract probe on a machine with the game installed:
 
 ## Network compatibility
 
-Protocol 2 is used when both peers complete the v2 hello handshake. The six original v1 message names remain available in v0.5.2:
+Protocol 3 is used when both peers complete the existing hello handshake. The six original v1 message names remain available in v0.5.3:
 
-- Old client with v0.5.2 server: v1.
-- v0.5.2 client with old server: v1 after the five-second hello timeout.
-- v0.5.2 client with v0.5.2 server: v2.
+- Older client with v0.5.3 server: v1.
+- v0.5.3 client with an older server: v1 after the five-second hello timeout.
+- v0.5.3 client with v0.5.3 server: v3.
 
-The protocol number and wire look schema remain 2. Updated server hello messages may append `0x57, 1, capabilities`; capability bit `0x01` enables the `visibility` command and full four-layer synchronization. Updated look payloads may append `0x57, 1, forceHideMask, forceShowMask`. Updated readers reject partial, unknown-version, unknown-bit, or overlapping tails. Old v2 readers consume the unchanged prefix and ignore the tail.
+Protocol and wire look schema 3 add `hasColor` plus an optional `UInt32` after each identifier. Server hello messages may append `0x57, 1, capabilities`; capability bit `0x01` enables the `visibility` command and full four-layer synchronization. Look payloads may append `0x57, 1, forceHideMask, forceShowMask`. Readers reject truncated colors, partial or unknown extensions, unknown bits, and overlapping masks.
 
-An updated client connected to a v2 server without capability `0x01` never sends the new command. It retains full local visibility and projects `hideHair=true` only when Hair, Beard, and Moustache are all explicitly hidden.
+An updated client connected through the v1 bridge cannot synchronize custom colors. It retains full local visibility and projects `hideHair=true` only when Hair, Beard, and Moustache are all explicitly hidden.
 
 The v1 bridge is scheduled for removal in v0.6.0. V2 state is revisioned; v1 remains best-effort compatibility and does not gain new positional fields.
 

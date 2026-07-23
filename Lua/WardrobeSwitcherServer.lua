@@ -4,10 +4,10 @@ if not SERVER then return end
 
 local Core = assert(
     type(WardrobeCore) == "table" and
-    tonumber(WardrobeCore.PROTOCOL_VERSION) == 2 and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 3 and
     type(WardrobeCore.NET) == "table" and
     WardrobeCore,
-    "Baro Wardrobe Switcher requires WardrobeCore protocol 2")
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 3")
 local NET = Core.NET
 local PROTOCOL_VERSION = Core.PROTOCOL_VERSION
 local LOOK_SCHEMA_VERSION = Core.LOOK_SCHEMA_VERSION
@@ -126,7 +126,8 @@ local function cloneLook(look)
                 cloned.slots[entry.key] = {
                     identifier = tostring(source.identifier or ""),
                     itemId = tonumber(source.itemId) or 0,
-                    name = tostring(source.name or "")
+                    name = tostring(source.name or ""),
+                    color = tonumber(source.color)
                 }
             else
                 cloned.slots[entry.key] = { identifier = tostring(source), itemId = 0, name = "" }
@@ -272,7 +273,7 @@ local function connectedClients()
 end
 
 -- JSON codec kept local to avoid adding a server-side C# assembly. It accepts
--- standard JSON but the writer emits only the persistence-v3 document below.
+-- standard JSON but the writer emits only the current persistence document below.
 local function jsonEscape(value)
     return tostring(value or "")
         :gsub("\\", "\\\\")
@@ -473,15 +474,21 @@ local function encodeLookJson(look)
         )
     }
     local slotMembers = {}
+    local colorMembers = {}
     for _, entry in ipairs(slots) do
         local slot = look ~= nil and look.slots ~= nil and look.slots[entry.key] or nil
         local identifier = slot ~= nil and (type(slot) == "table" and slot.identifier or slot) or nil
         identifier = trim(identifier)
         if identifier ~= nil then
             slotMembers[#slotMembers + 1] = '"' .. entry.key .. '":"' .. jsonEscape(identifier) .. '"'
+            local color = type(slot) == "table" and tonumber(slot.color) or nil
+            if color ~= nil then
+                colorMembers[#colorMembers + 1] = '"' .. entry.key .. '":' .. tostring(math.floor(color))
+            end
         end
     end
     members[#members + 1] = '"slots":{' .. table.concat(slotMembers, ",") .. "}"
+    members[#members + 1] = '"colors":{' .. table.concat(colorMembers, ",") .. "}"
     return "{" .. table.concat(members, ",") .. "}"
 end
 
@@ -593,13 +600,26 @@ local function parseLegacyDocument(text)
 end
 
 local function validateStoredLook(raw, persistenceVersion)
+    local expectedLookSchema = persistenceVersion == PERSISTENCE_VERSION and LOOK_SCHEMA_VERSION or 2
     if type(raw) ~= "table" or type(raw.schemaVersion) ~= "number" or
-        raw.schemaVersion ~= LOOK_SCHEMA_VERSION or
+        raw.schemaVersion ~= expectedLookSchema or
         raw.captured ~= true or type(raw.slots) ~= "table" then
         return nil
     end
     local visibility
     if persistenceVersion == PERSISTENCE_VERSION then
+        if not hasOnlyFields(raw, {
+            schemaVersion = true,
+            captured = true,
+            attachmentVisibility = true,
+            slots = true,
+            colors = true
+        }) or raw.hideHair ~= nil or type(raw.attachmentVisibility) ~= "table" or
+            type(raw.colors) ~= "table" then
+            return nil
+        end
+        visibility = Core.validateAttachmentVisibility(raw.attachmentVisibility, false)
+    elseif persistenceVersion == 3 then
         if not hasOnlyFields(raw, {
             schemaVersion = true,
             captured = true,
@@ -638,6 +658,15 @@ local function validateStoredLook(raw, persistenceVersion)
         count = count + 1
         if count > MAX_SLOTS then return nil end
         look.slots[key] = { identifier = identifier, itemId = 0, name = "" }
+    end
+    if persistenceVersion == PERSISTENCE_VERSION then
+        for key, color in pairs(raw.colors) do
+            if slotByKey[key] == nil or look.slots[key] == nil or type(color) ~= "number" or
+                color < 0 or color > MAX_REVISION or color % 1 ~= 0 then
+                return nil
+            end
+            look.slots[key].color = math.floor(color)
+        end
     end
     return look
 end
@@ -686,7 +715,7 @@ local function loadJsonPersistence(path)
         ok and type(document) == "table" and type(document.schemaVersion) == "number" and
         document.schemaVersion or nil
     if not ok or
-        (documentVersion ~= PERSISTENCE_VERSION and documentVersion ~= 2) or
+        (documentVersion ~= PERSISTENCE_VERSION and documentVersion ~= 3 and documentVersion ~= 2) or
         type(document.records) ~= "table" or
         type(document.pendingLegacySteamRecords) ~= "table" or
         type(document.migratedLegacySteamIds) ~= "table" or
@@ -735,20 +764,22 @@ local function loadJsonPersistence(path)
     persistentRecords = loaded
     migratedLegacySteamIds = loadedMigrated
     legacySteamRecords = pendingLegacy
-    if documentVersion == 2 then
-        local backupPath = path .. ".v2.bak"
+    if documentVersion ~= PERSISTENCE_VERSION then
+        local backupPath = path .. ".v" .. tostring(documentVersion) .. ".bak"
         local backedUp = File ~= nil and pcall(function()
             if File.Exists(backupPath) then File.Delete(backupPath) end
             File.Copy(path, backupPath, true)
         end)
         if not backedUp then
-            warn("Could not preserve ServerLooks.json.v2.bak; leaving the valid v2 file unchanged.")
+            warn("Could not preserve " .. backupPath .. "; leaving the valid legacy file unchanged.")
             return true
         end
         if persistLooks() then
-            log("Migrated server wardrobe persistence from v2 to v3.")
+            log("Migrated server wardrobe persistence from v" .. tostring(documentVersion) ..
+                " to v" .. tostring(PERSISTENCE_VERSION) .. ".")
         else
-            warn("Could not persist migrated server wardrobe v3; the v2 source remains available for retry.")
+            warn("Could not persist migrated server wardrobe v" .. tostring(PERSISTENCE_VERSION) ..
+                "; the legacy source remains available for retry.")
         end
     end
     return true
@@ -865,6 +896,13 @@ local function itemIdentifier(item)
     return item ~= nil and item.Prefab ~= nil and trim(item.Prefab.Identifier) or nil
 end
 
+local function itemSpriteColor(item)
+    if item == nil then return nil end
+    local ok, color = pcall(function() return tonumber(item.SpriteColor.PackedValue) end)
+    if not ok or color == nil or color < 0 or color > MAX_REVISION or color % 1 ~= 0 then return nil end
+    return math.floor(color)
+end
+
 local function isIgnoredItem(item)
     local identifier = itemIdentifier(item)
     return identifier == "genesplicer" or identifier == "advancedgenesplicer"
@@ -950,22 +988,31 @@ local function restoreWardrobeItems(character, snapshots)
     return restored
 end
 
-local function canonicalSlot(identifier, slotKey)
+local function canonicalSlot(identifier, slotKey, color)
     identifier = trim(identifier)
     if identifier == nil then return nil, "empty_identifier" end
     if byteLength(identifier) > MAX_IDENTIFIER_BYTES then return nil, "identifier_too_long" end
+    if color ~= nil and (type(color) ~= "number" or color < 0 or color > MAX_REVISION or color % 1 ~= 0) then
+        return nil, "invalid_color"
+    end
     local prefab = resolveItemPrefab(identifier)
     if prefab == nil then return nil, "unknown_item" end
     if not wearableAllowsSlot(prefab, slotKey) then return nil, "item_not_wearable_in_slot" end
     local canonicalIdentifier = prefabIdentifier(prefab)
     if canonicalIdentifier == nil or byteLength(canonicalIdentifier) > MAX_IDENTIFIER_BYTES then return nil, "invalid_prefab_identifier" end
-    return { identifier = canonicalIdentifier, itemId = 0, name = prefabName(prefab) }
+    return {
+        identifier = canonicalIdentifier,
+        itemId = 0,
+        name = prefabName(prefab),
+        color = color ~= nil and math.floor(color) or nil
+    }
 end
 
 local function canonicalizeLook(raw, requireCaptured)
     if type(raw) ~= "table" or tonumber(raw.schemaVersion) ~= LOOK_SCHEMA_VERSION or type(raw.slots) ~= "table" then
         return nil, "invalid_look_schema"
     end
+    if raw.colors ~= nil and type(raw.colors) ~= "table" then return nil, "invalid_colors" end
     if requireCaptured and raw.captured ~= true then return nil, "look_not_captured" end
     local attachmentVisibility, visibilityReason =
         Core.validateAttachmentVisibility(raw.attachmentVisibility, raw.hideHair == true)
@@ -978,15 +1025,25 @@ local function canonicalizeLook(raw, requireCaptured)
         slots = {}
     }
     local count, payloadBytes = 0, 16
+    for key, color in pairs(raw.colors or {}) do
+        if type(key) ~= "string" or slotByKey[key] == nil then return nil, "unknown_color_slot" end
+        if raw.slots[key] == nil then return nil, "orphan_color" end
+        if type(color) ~= "number" or color < 0 or color > MAX_REVISION or color % 1 ~= 0 then
+            return nil, "invalid_color"
+        end
+    end
     for key, rawSlot in pairs(raw.slots) do
         if type(key) ~= "string" or slotByKey[key] == nil then return nil, "unknown_slot" end
         count = count + 1
         if count > MAX_SLOTS then return nil, "too_many_slots" end
         local identifier = type(rawSlot) == "table" and rawSlot.identifier or rawSlot
+        local color = raw.colors ~= nil and raw.colors[key] or
+            (type(rawSlot) == "table" and rawSlot.color or nil)
         if type(identifier) ~= "string" then return nil, "invalid_identifier" end
-        payloadBytes = payloadBytes + byteLength(key) + byteLength(identifier) + 4
+        payloadBytes = payloadBytes + byteLength(key) + byteLength(identifier) + 5
+        if color ~= nil then payloadBytes = payloadBytes + 4 end
         if payloadBytes > MAX_PAYLOAD_BYTES then return nil, "payload_too_large" end
-        local slot, reason = canonicalSlot(identifier, key)
+        local slot, reason = canonicalSlot(identifier, key, color)
         if slot == nil then return nil, reason .. ":" .. key end
         canonical.slots[key] = slot
     end
@@ -1011,7 +1068,12 @@ local function captureAuthoritativeLook(character, clientLook)
         local item = getSlotItem(character, entry.slot)
         if item ~= nil and not isIgnoredItem(item) then
             local identifier = itemIdentifier(item)
-            if identifier ~= nil then raw.slots[entry.key] = identifier end
+            if identifier ~= nil then
+                raw.slots[entry.key] = {
+                    identifier = identifier,
+                    color = itemSpriteColor(item)
+                }
+            end
         end
     end
     return canonicalizeLook(raw, true)
@@ -1219,7 +1281,7 @@ end
 
 local function sendStateTo(client, revision, characterId, active, look)
     local recipient = sessionFor(client)
-    if recipient ~= nil and recipient.protocol == 2 then
+    if recipient ~= nil and recipient.protocol == PROTOCOL_VERSION then
         sendV2State(client, revision, characterId, active, look)
     elseif recipient ~= nil and recipient.protocol == 1 then
         sendLegacyState(client, characterId, active, look)
@@ -1262,7 +1324,7 @@ local function sendActiveSnapshot(client)
 end
 
 local function sendOwnInactiveState(session)
-    if session == nil or session.protocol ~= 2 or session.savedLook == nil or session.active or session.activeCharacterId ~= nil then return end
+    if session == nil or session.protocol ~= PROTOCOL_VERSION or session.savedLook == nil or session.active or session.activeCharacterId ~= nil then return end
     local characterId = characterEntityId(clientCharacter(session.client))
     if characterId <= 0 then return end
     sendV2State(session.client, session.revision, characterId, false, session.savedLook)
@@ -1374,7 +1436,7 @@ local function commitSave(session, character, clientLook)
         return false, restored and "persistence_failed" or "persistence_failed_equipment_rollback_failed"
     end
     clearActiveRuntime(session, true)
-    if session.protocol == 2 then
+    if session.protocol == PROTOCOL_VERSION then
         -- SAVE is intentionally inactive. Send the canonical server capture so
         -- the v2 client can leave ApplyPending even when there was no prior
         -- active character state to clear.
@@ -1517,7 +1579,7 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     if byteLength(clientSessionId) == 0 or byteLength(clientSessionId) > MAX_SESSION_ID_BYTES then return end
     local session = sessionFor(client)
     if session == nil then return end
-    session.protocol = 2
+    session.protocol = PROTOCOL_VERSION
     bindOperationCache(session, clientSessionId)
     local response = Networking.Start(NET.V2_HELLO)
     local written, writeReason = Core.writeServerHello(
@@ -1544,7 +1606,7 @@ Networking.Receive(NET.V2_COMMAND, function(message, client)
         warn("Rejected a truncated v2 command before its operation ID could be authenticated.")
         return
     end
-    session.protocol = 2
+    session.protocol = PROTOCOL_VERSION
     local envelopeOk, envelopeReason = validateV2Envelope(command)
     if not envelopeOk then
         sendV2Ack(session, command.operationId, false, envelopeReason, session.revision)
@@ -1615,8 +1677,8 @@ end
 
 local function selectLegacyProtocol(session)
     if session == nil then return false end
-    if session.protocol == 2 then
-        warn("Ignored a legacy wardrobe command after this connection negotiated protocol v2.")
+    if session.protocol == PROTOCOL_VERSION then
+        warn("Ignored a legacy wardrobe command after this connection negotiated protocol v3.")
         return false
     end
     session.protocol = 1
@@ -1773,5 +1835,7 @@ end)
 loadPersistence()
 lastGameSessionKey = currentGameSessionKey()
 log("Server authority v" .. tostring(Core.MOD_VERSION) ..
-    " loaded (protocol 2, look schema 2, persistence 3). Path: " ..
+    " loaded (protocol " .. tostring(PROTOCOL_VERSION) ..
+    ", look schema " .. tostring(LOOK_SCHEMA_VERSION) ..
+    ", persistence " .. tostring(PERSISTENCE_VERSION) .. "). Path: " ..
     tostring(storagePath("ServerLooks.json")))

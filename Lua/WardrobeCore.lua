@@ -3,10 +3,10 @@
 
 local Core = {}
 
-Core.MOD_VERSION = "0.5.2"
-Core.PROTOCOL_VERSION = 2
-Core.LOOK_SCHEMA_VERSION = 2
-Core.PERSISTENCE_VERSION = 3
+Core.MOD_VERSION = "0.5.3"
+Core.PROTOCOL_VERSION = 3
+Core.LOOK_SCHEMA_VERSION = 3
+Core.PERSISTENCE_VERSION = 4
 Core.HELLO_TIMEOUT_SECONDS = 5
 Core.LOOK_EXTENSION_MARKER = 0x57
 Core.LOOK_EXTENSION_VERSION = 1
@@ -125,12 +125,17 @@ local function checkBoundedString(value, field, maximum, allowEmpty)
     return value
 end
 
-local function normalizeRevision(value, field)
-    local revision = tonumber(value)
-    if revision == nil or revision < 0 or revision > Core.LIMITS.MAX_UINT32 or revision % 1 ~= 0 then
-        return nil, (field or "revision") .. " must be an unsigned 32-bit integer"
+local function normalizeUInt32(value, field)
+    local normalized = tonumber(value)
+    if normalized == nil or normalized < 0 or
+        normalized > Core.LIMITS.MAX_UINT32 or normalized % 1 ~= 0 then
+        return nil, (field or "value") .. " must be an unsigned 32-bit integer"
     end
-    return revision
+    return normalized
+end
+
+local function normalizeRevision(value, field)
+    return normalizeUInt32(value, field or "revision")
 end
 
 local function rawSlotIdentifier(value)
@@ -139,6 +144,12 @@ local function rawSlotIdentifier(value)
     end
     if value == nil then return nil end
     return tostring(value)
+end
+
+local function rawSlotColor(value, colors, key)
+    if type(colors) == "table" and colors[key] ~= nil then return colors[key] end
+    if type(value) == "table" then return value.color end
+    return nil
 end
 
 function Core.attachmentVisibilityFromLegacy(hideHair)
@@ -266,8 +277,12 @@ function Core.validateLook(value)
     end
 
     local slotSource = value.slots
+    local colorSource = value.colors
     local isCanonical = type(slotSource) == "table"
     if not isCanonical then slotSource = value end
+    if colorSource ~= nil and type(colorSource) ~= "table" then
+        return nil, "colors must be a table"
+    end
 
     if isCanonical then
         for key, _ in pairs(slotSource) do
@@ -276,12 +291,21 @@ function Core.validateLook(value)
             end
         end
     end
+    if colorSource ~= nil then
+        for key, _ in pairs(colorSource) do
+            if not Core.SLOT_SET[key] then
+                return nil, "unknown wardrobe color slot " .. tostring(key)
+            end
+        end
+    end
 
     local slots = {}
+    local colors = {}
     local count = 0
     local payloadBytes = 8
     for _, key in ipairs(Core.SLOT_KEYS) do
         local identifier = rawSlotIdentifier(slotSource[key])
+        local rawColor = rawSlotColor(slotSource[key], colorSource, key)
         if identifier ~= nil and identifier ~= "" then
             local valid, reason = checkBoundedString(
                 identifier,
@@ -291,8 +315,16 @@ function Core.validateLook(value)
             )
             if valid == nil then return nil, reason end
             count = count + 1
-            payloadBytes = payloadBytes + #key + #identifier + 4
+            payloadBytes = payloadBytes + #key + #identifier + 5
             slots[key] = identifier
+            if rawColor ~= nil then
+                local color, colorReason = normalizeUInt32(rawColor, "color for " .. key)
+                if color == nil then return nil, colorReason end
+                colors[key] = color
+                payloadBytes = payloadBytes + 4
+            end
+        elseif rawColor ~= nil then
+            return nil, "color for " .. key .. " has no wardrobe item"
         end
     end
 
@@ -314,17 +346,19 @@ function Core.validateLook(value)
         captured = value.captured == true,
         hideHair = Core.legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
-        slots = slots
+        slots = slots,
+        colors = colors
     }
 end
 
-function Core.newLook(captured, hideHair, slots, attachmentVisibility)
+function Core.newLook(captured, hideHair, slots, attachmentVisibility, colors)
     return Core.validateLook({
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = captured == true,
         hideHair = hideHair == true,
         attachmentVisibility = attachmentVisibility,
-        slots = slots or {}
+        slots = slots or {},
+        colors = colors
     })
 end
 
@@ -356,7 +390,8 @@ function Core.toLegacyLook(look)
                 identifier = identifier,
                 itemId = 0,
                 name = "",
-                slot = key
+                slot = key,
+                color = valid.colors[key]
             }
         end
     end
@@ -387,6 +422,7 @@ function Core.parseLegacyClientLookLine(line)
     local hideHair = false
     local attachmentVisibility = nil
     local sessionKey = nil
+    local colors = {}
 
     local function booleanValue(name, value)
         if value == "true" then return true end
@@ -401,7 +437,7 @@ function Core.parseLegacyClientLookLine(line)
         seen[name] = true
 
         if name == "schema" then
-            if value ~= "1" and value ~= "2" and value ~= "3" then
+            if value ~= "1" and value ~= "2" and value ~= "3" and value ~= "4" then
                 return nil, "unsupported legacy client look schema " .. tostring(value)
             end
         elseif name == "captured" then
@@ -429,6 +465,11 @@ function Core.parseLegacyClientLookLine(line)
             attachmentVisibility[key] = value
         elseif name == "session" then
             sessionKey = decodePersistentValue(value)
+        elseif name:sub(-#"Color") == "Color" and Core.SLOT_SET[name:sub(1, -#"Color" - 1)] then
+            local key = name:sub(1, -#"Color" - 1)
+            local color, colorReason = normalizeUInt32(value, "color for " .. key)
+            if color == nil then return nil, colorReason end
+            colors[key] = color
         elseif Core.SLOT_SET[name] then
             local identifier, displayName = value:match("^([^,]+),(.*)$")
             if identifier == nil then return nil, "slot " .. name .. " is truncated" end
@@ -448,6 +489,10 @@ function Core.parseLegacyClientLookLine(line)
     end
 
     if captured == nil then return nil, "legacy client look is missing captured intent" end
+    for key, color in pairs(colors) do
+        if legacy[key] == nil then return nil, "color for " .. key .. " has no wardrobe item" end
+        legacy[key].color = color
+    end
     local look, reason = Core.fromLegacyLook(legacy, captured, hideHair, attachmentVisibility)
     if look == nil then return nil, reason end
     if not Core.hasLook(look) then return nil, "legacy client look has no captured intent" end
@@ -483,6 +528,7 @@ function Core.lookSignature(look)
     end
     for _, key in ipairs(Core.SLOT_KEYS) do
         parts[#parts + 1] = key .. "=" .. tostring(valid.slots[key] or "-")
+        parts[#parts + 1] = key .. "Color=" .. tostring(valid.colors[key] or "-")
     end
     return table.concat(parts, ";")
 end
@@ -512,6 +558,9 @@ function Core.writeLook(message, look)
         if identifier ~= nil then
             message.WriteString(key)
             message.WriteString(identifier)
+            local color = valid.colors[key]
+            message.WriteBoolean(color ~= nil)
+            if color ~= nil then message.WriteUInt32(color) end
         end
     end
     local forceHide, forceShow = Core.attachmentVisibilityMasks(valid.attachmentVisibility)
@@ -536,6 +585,7 @@ function Core.readLook(message)
     end
 
     local slots = {}
+    local colors = {}
     for _ = 1, count do
         local key = message.ReadString()
         local identifier = message.ReadString()
@@ -546,6 +596,7 @@ function Core.readLook(message)
             return nil, "duplicate wardrobe slot " .. tostring(key)
         end
         slots[key] = identifier
+        if message.ReadBoolean() == true then colors[key] = message.ReadUInt32() end
     end
 
     local attachmentVisibility = nil
@@ -573,7 +624,8 @@ function Core.readLook(message)
         captured = captured,
         hideHair = hideHair,
         attachmentVisibility = attachmentVisibility,
-        slots = slots
+        slots = slots,
+        colors = colors
     })
 end
 

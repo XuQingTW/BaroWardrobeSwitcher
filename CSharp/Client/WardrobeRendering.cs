@@ -357,6 +357,8 @@ namespace BaroWardrobeSwitcher
 
         public bool IsCommitted { get; private set; }
 
+        public bool HasLiveItemSources { get; private set; }
+
         // New captures write into a child session so the committed look remains
         // drawable until the entire replacement has validated successfully.
         public RenderSession CaptureTarget => pendingCapture ?? this;
@@ -420,6 +422,11 @@ namespace BaroWardrobeSwitcher
             {
                 ownedTemporaryItems.Add(item);
             }
+        }
+
+        public void MarkLiveItemSource()
+        {
+            HasLiveItemSources = true;
         }
 
         public void MarkInvalid(string error)

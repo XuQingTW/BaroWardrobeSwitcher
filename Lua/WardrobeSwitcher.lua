@@ -3,10 +3,10 @@
 local MOD_NAME = "Baro Wardrobe Switcher"
 local Core = assert(
     type(WardrobeCore) == "table" and
-    tonumber(WardrobeCore.PROTOCOL_VERSION) == 2 and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 3 and
     type(WardrobeCore.NET) == "table" and
     WardrobeCore,
-    "Baro Wardrobe Switcher requires WardrobeCore protocol 2")
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 3")
 local EXPECTED_CSHARP_VERSION = tostring(Core.MOD_VERSION)
 local NET = Core.NET
 local NET_SAVE_REQUEST = NET.V1_SAVE_REQUEST
@@ -274,7 +274,8 @@ local function copyLookData(lookData)
                 identifier = tostring(slotState.identifier or ""),
                 itemId = tonumber(slotState.itemId) or 0,
                 name = tostring(slotState.name or ""),
-                slot = entry.key
+                slot = entry.key,
+                color = tonumber(slotState.color)
             }
         end
     end
@@ -286,7 +287,7 @@ local function legacyHideHairForVisibility(value)
 end
 
 local function serverSupportsAttachmentVisibility()
-    return protocolMode == "v2" and
+    return protocolMode == "v3" and
         math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_ATTACHMENT_VISIBILITY) % 2 == 1
 end
 
@@ -317,7 +318,9 @@ local function lookDataSignature(lookData, captured, visibility)
                 "=" ..
                 tostring(slotState.identifier or "") ..
                 "#" ..
-                tostring(tonumber(slotState.itemId) or 0)
+                tostring(tonumber(slotState.itemId) or 0) ..
+                "@" ..
+                tostring(tonumber(slotState.color) or "-")
         else
             parts[#parts + 1] = entry.key .. "=-"
         end
@@ -334,7 +337,8 @@ local function rememberLegacyLookMetadata(lookData)
                 identifier = tostring(value.identifier or ""),
                 itemId = tonumber(value.itemId) or 0,
                 name = tostring(value.name or ""),
-                slot = entry.key
+                slot = entry.key,
+                color = tonumber(value.color)
             }
         end
     end
@@ -647,7 +651,7 @@ function Helpers.encodePersistentClientLook(lookData, captured, active, auto, vi
     end
     local hairHidden = legacyHideHairForVisibility(visibility)
     local parts = {
-        "schema=3",
+        "schema=4",
         "captured=" .. tostring(captured == true),
         "active=" .. tostring(active == true),
         "auto=" .. tostring(auto == true),
@@ -670,6 +674,9 @@ function Helpers.encodePersistentClientLook(lookData, captured, active, auto, vi
                 Helpers.escapePersistentValue(slotState.identifier or "") ..
                 "," ..
                 Helpers.escapePersistentValue(slotState.name or "")
+            if slotState.color ~= nil then
+                parts[#parts + 1] = entry.key .. "Color=" .. tostring(slotState.color)
+            end
         end
     end
     return table.concat(parts, "|")
@@ -915,9 +922,14 @@ function Helpers.restorePersistentClientLookLine(line, source)
     local restoredHideHair = false
     local restoredAttachmentVisibility = nil
     local restoredSessionKey = nil
+    local restoredColors = {}
     local seen = {}
     local validSlots = {}
-    for _, entry in ipairs(slots) do validSlots[entry.key] = true end
+    local colorFields = {}
+    for _, entry in ipairs(slots) do
+        validSlots[entry.key] = true
+        colorFields[entry.key .. "Color"] = entry.key
+    end
 
     local function parseBoolean(name, value)
         if value == "true" then return true end
@@ -952,12 +964,19 @@ function Helpers.restorePersistentClientLookLine(line, source)
             restoredAttachmentVisibility = restoredAttachmentVisibility or {}
             restoredAttachmentVisibility[name:sub(#"visibility" + 1)] = value
         elseif name == "schema" then
-            if value ~= "1" and value ~= "2" and value ~= "3" then
+            if value ~= "1" and value ~= "2" and value ~= "3" and value ~= "4" then
                 Helpers.debugLog("Rejected persistent client look with unsupported schema " .. tostring(value) .. ".")
                 return false
             end
         elseif name == "session" then
             restoredSessionKey = Helpers.unescapePersistentValue(value)
+        elseif colorFields[name] ~= nil then
+            local color = tonumber(value)
+            if color == nil or color < 0 or color > Core.LIMITS.MAX_UINT32 or color % 1 ~= 0 then
+                Helpers.debugLog("Rejected persistent client look with invalid " .. tostring(name) .. ".")
+                return false
+            end
+            restoredColors[colorFields[name]] = color
         elseif validSlots[name] then
             local identifier, displayName = tostring(value):match("^([^,]+),(.*)$")
             identifier = identifier ~= nil and Helpers.unescapePersistentValue(identifier) or nil
@@ -980,6 +999,13 @@ function Helpers.restorePersistentClientLookLine(line, source)
     if captured == nil then
         Helpers.debugLog("Rejected persistent client look without captured intent.")
         return false
+    end
+    for key, color in pairs(restoredColors) do
+        if restoredLook[key] == nil then
+            Helpers.debugLog("Rejected persistent client look with color but no " .. tostring(key) .. " item.")
+            return false
+        end
+        restoredLook[key].color = color
     end
 
     local sessionKey = Helpers.currentSessionKey()
@@ -1142,7 +1168,7 @@ function Helpers.loadPersistentClientLook()
             return false
         end
         if ok and existedBeforeLoad then
-            -- LoadClientLook quarantines malformed schema-v2 JSON. Never fall
+            -- LoadClientLook quarantines malformed JSON. Never fall
             -- back to an older legacy file after a corrupt primary existed,
             -- otherwise stale wardrobe intent could be applied automatically.
             -- Persist an empty v2 tombstone so the same stale legacy file also
@@ -1456,6 +1482,18 @@ function Helpers.itemEntityId(item)
     return 0
 end
 
+function Helpers.itemSpriteColor(item)
+    if item == nil then return nil end
+    local ok, packed = pcall(function()
+        return item.SpriteColor.PackedValue
+    end)
+    packed = ok and tonumber(packed) or nil
+    if packed == nil or packed < 0 or packed > Core.LIMITS.MAX_UINT32 or packed % 1 ~= 0 then
+        return nil
+    end
+    return packed
+end
+
 function Helpers.characterEntityId(character)
     if character == nil then return 0 end
     local ok, id = pcall(function()
@@ -1471,73 +1509,6 @@ function Helpers.findEntityById(id)
         return Entity.FindEntityByID(id)
     end)
     if ok then return entity end
-    return nil
-end
-
-function Helpers.collectionContains(collection, value)
-    if collection == nil or value == nil then return false end
-    local ok, result = pcall(function()
-        return collection.Contains(value)
-    end)
-    if ok then return result == true end
-    pcall(function()
-        for entry in collection do
-            if entry == value then result = true end
-        end
-    end)
-    return result == true
-end
-
-function Helpers.itemBelongsToCharacter(character, item)
-    if character == nil or item == nil then return false end
-    if isInAnyWearableSlot(character, item) then return true end
-    if character.Inventory ~= nil then
-        local ok, allItems = pcall(function()
-            return character.Inventory.AllItems
-        end)
-        if ok and Helpers.collectionContains(allItems, item) then return true end
-        local parentOk, parentInventory = pcall(function()
-            return item.ParentInventory
-        end)
-        if parentOk and parentInventory == character.Inventory then return true end
-    end
-    return false
-end
-
-function Helpers.findItemByIdentifier(character, identifier)
-    if character == nil or identifier == nil or identifier == "" then return nil end
-    for _, entry in ipairs(slots) do
-        local item = getSlotItem(character, entry.slot)
-        if item ~= nil and Helpers.itemIdentifier(item) == identifier then return item end
-    end
-    if character.Inventory ~= nil then
-        local ok, allItems = pcall(function()
-            return character.Inventory.AllItems
-        end)
-        if ok and allItems ~= nil then
-            pcall(function()
-                for item in allItems do
-                    if Helpers.itemIdentifier(item) == identifier then
-                        ok = item
-                        return
-                    end
-                end
-            end)
-            if ok ~= true and ok ~= false and ok ~= nil then return ok end
-        end
-    end
-    if Item ~= nil and Item.ItemList ~= nil then
-        local found = nil
-        pcall(function()
-            for item in Item.ItemList do
-                if Helpers.itemIdentifier(item) == identifier and Helpers.itemBelongsToCharacter(character, item) then
-                    found = item
-                    return
-                end
-            end
-        end)
-        if found ~= nil then return found end
-    end
     return nil
 end
 
@@ -1987,11 +1958,14 @@ function Helpers.tryCaptureVisualOverride(character, item)
     return true, tonumber(count) or 0
 end
 
-function Helpers.tryCaptureVisualOverridePrefab(character, identifier)
+function Helpers.tryCaptureVisualOverridePrefab(character, identifier, color)
     if Helpers.ensureVisualOverride() == nil or character == nil or identifier == nil or identifier == "" then
         return false, 0, "fashion prefab identifier is empty"
     end
     local ok, count = pcall(function()
+        if color ~= nil then
+            return VisualOverride.CaptureFashionPrefab(character, tostring(identifier), color)
+        end
         return VisualOverride.CaptureFashionPrefab(character, tostring(identifier))
     end)
     if not ok then return false, 0, tostring(count) end
@@ -2079,7 +2053,8 @@ function Helpers.visualSnapshot(character)
                 identifier = Helpers.itemIdentifier(item),
                 itemId = Helpers.itemEntityId(item),
                 name = Helpers.itemName(item),
-                slot = entry.key
+                slot = entry.key,
+                color = Helpers.itemSpriteColor(item)
             }
         else
             data[entry.key] = nil
@@ -2158,6 +2133,9 @@ function Helpers.writeProjectedV2Look(message, look)
         if identifier ~= nil then
             message.WriteString(key)
             message.WriteString(identifier)
+            local color = valid.colors[key]
+            message.WriteBoolean(color ~= nil)
+            if color ~= nil then message.WriteUInt32(color) end
         end
     end
     return true
@@ -2220,7 +2198,7 @@ function Helpers.sendNextProtocolCommand()
         return sentAny
     end
 
-    if protocolMode ~= "v2" or inFlightV2Command ~= nil then return false end
+    if protocolMode ~= "v3" or inFlightV2Command ~= nil then return false end
     local command = protocolCommandQueue[1]
     local baseRevision = reducerState ~= nil and tonumber(reducerState.revision) or 0
     if not Helpers.writeAndSendV2Command(command, baseRevision) then return false end
@@ -2243,7 +2221,7 @@ end
 function Helpers.sendV2Hello(forceSnapshot)
     if not Helpers.isMultiplayerClient() or Networking == nil then return false end
     local probing = protocolMode == "probing" and protocolHelloSentAt == nil
-    local requestingSnapshot = forceSnapshot == true and protocolMode == "v2"
+    local requestingSnapshot = forceSnapshot == true and protocolMode == "v3"
     if not probing and not requestingSnapshot then return false end
     local ok, reason = pcall(function()
         local message = Networking.Start(NET_V2_HELLO)
@@ -2273,11 +2251,11 @@ function Helpers.selectV1Protocol(reason)
 end
 
 function Helpers.selectV2Protocol(revision, capabilities)
-    protocolMode = "v2"
+    protocolMode = "v3"
     serverCapabilities = tonumber(capabilities) or 0
     local serverRevision = tonumber(revision) or 0
     dispatchReducer({ type = "RevisionObserved", revision = serverRevision })
-    Helpers.debugLog("Negotiated wardrobe protocol v2 at revision " .. tostring(serverRevision) ..
+    Helpers.debugLog("Negotiated wardrobe protocol v3 at revision " .. tostring(serverRevision) ..
         " with capabilities 0x" .. string.format("%02X", serverCapabilities) .. ".")
     Helpers.sendNextProtocolCommand()
     return true
@@ -2380,9 +2358,9 @@ function Helpers.processProtocolNegotiation()
         return
     end
 
-    if protocolMode == "v2" then Helpers.flushPendingVisibilitySync() end
+    if protocolMode == "v3" then Helpers.flushPendingVisibilitySync() end
 
-    if protocolMode == "v2" and inFlightV2Command ~= nil then
+    if protocolMode == "v3" and inFlightV2Command ~= nil then
         local elapsed = protocolClock() - (inFlightV2Command.sentAt or 0)
         if elapsed >= 1 then
             if (inFlightV2Command.attempts or 1) < 5 then
@@ -2402,7 +2380,7 @@ function Helpers.processProtocolNegotiation()
                 Helpers.sendNextProtocolCommand()
             end
         end
-    elseif protocolMode == "v2" and #protocolCommandQueue > 0 then
+    elseif protocolMode == "v3" and #protocolCommandQueue > 0 then
         local queued = protocolCommandQueue[1]
         local now = protocolClock()
         if now - (queued.lastUnsentAttemptAt or 0) >= 0.25 then
@@ -2443,9 +2421,8 @@ function Helpers.readNetworkLook(message)
     return characterId, data
 end
 
--- One real item can occupy multiple managed slots. Deduplicate by instance/id,
--- then fall back to one prefab capture per identifier when the original item no
--- longer exists (for example after a save removed it from inventory).
+-- One real item can occupy multiple managed slots. A colored look reuses only
+-- its exact item instance; otherwise prefab fallback owns the saved tint.
 function Helpers.captureFashionPayloadFromLook(character, lookData, diagnostics)
     if character == nil or lookData == nil then return false, 0, 0, "character or look is missing" end
 
@@ -2479,8 +2456,8 @@ function Helpers.captureFashionPayloadFromLook(character, lookData, diagnostics)
         return false, rememberedId > 0 and ("itemId " .. tostring(rememberedId)) or "item instance"
     end
 
-    local function rememberPrefabIdentifier(identifier)
-        local normalized = normalizedSavedIdentifier(identifier)
+    local function rememberPrefabIdentifier(identifier, color)
+        local normalized = normalizedSavedIdentifier(identifier) .. "@" .. tostring(color or "base")
         if normalized == "" then return false, "empty identifier" end
         if processedPrefabIdentifiers[normalized] then
             return true, normalized
@@ -2493,13 +2470,17 @@ function Helpers.captureFashionPayloadFromLook(character, lookData, diagnostics)
         local data = lookData[entry.key]
         local itemId = data ~= nil and tonumber(data.itemId) or 0
         local identifier = data ~= nil and tostring(data.identifier or "") or ""
+        local savedColor = data ~= nil and tonumber(data.color) or nil
         if data ~= nil and (itemId > 0 or identifier ~= "") then
             expectedItems = expectedItems + 1
             local item = Helpers.findEntityById(itemId)
             local foundBy = item ~= nil and "entity id" or "none"
-            if item == nil or Helpers.itemIdentifier(item) ~= identifier then
-                item = Helpers.findItemByIdentifier(character, identifier)
-                foundBy = item ~= nil and "character inventory identifier" or "none"
+            if item ~= nil and
+                (savedColor == nil or
+                    Helpers.itemIdentifier(item) ~= identifier or
+                    Helpers.itemSpriteColor(item) ~= savedColor) then
+                item = nil
+                foundBy = "entity id mismatch"
             end
             if item ~= nil then
                 local duplicate, duplicateKey = rememberRealItem(item, itemId)
@@ -2515,6 +2496,7 @@ function Helpers.captureFashionPayloadFromLook(character, lookData, diagnostics)
                     diagnostics[#diagnostics + 1] =
                         entry.key .. ": identifier=" .. tostring(identifier) ..
                         ", itemId=" .. tostring(itemId) ..
+                        ", savedColor=" .. tostring(savedColor or "base") ..
                         ", savedName=" .. tostring(data.name) ..
                         ", found=" .. foundBy ..
                         (duplicate and (", duplicate=reused real item " .. tostring(duplicateKey)) or "") ..
@@ -2523,19 +2505,21 @@ function Helpers.captureFashionPayloadFromLook(character, lookData, diagnostics)
                 end
                 if not capturedOk then return false, expectedItems, capturedItems, captureReason end
             else
-                local duplicate, duplicateKey = rememberPrefabIdentifier(identifier)
+                local duplicate, duplicateKey = rememberPrefabIdentifier(identifier, savedColor)
                 local captured = 0
                 local capturedOk = true
                 local captureReason = nil
                 if not duplicate then
                     uniqueItems = uniqueItems + 1
-                    capturedOk, captured, captureReason = Helpers.tryCaptureVisualOverridePrefab(character, identifier)
+                    capturedOk, captured, captureReason =
+                        Helpers.tryCaptureVisualOverridePrefab(character, identifier, savedColor)
                     if capturedOk then capturedItems = capturedItems + 1 end
                 end
                 if diagnostics ~= nil then
                     diagnostics[#diagnostics + 1] =
                         entry.key .. ": identifier=" .. tostring(identifier) ..
                         ", itemId=" .. tostring(itemId) ..
+                        ", savedColor=" .. tostring(savedColor or "base") ..
                         ", savedName=" .. tostring(data.name) ..
                         ", found=missing item instance" ..
                         (duplicate and (", duplicate=reused prefab " .. tostring(duplicateKey)) or "") ..
@@ -2693,7 +2677,7 @@ clientEffectAdapters.Capture = function(currentEffect)
         legacyHideHairForVisibility(visibility),
         visibility
     )
-    if domainLook == nil then return false, tostring(lookReason or "captured look failed schema v2 validation") end
+    if domainLook == nil then return false, tostring(lookReason or "captured look failed schema v3 validation") end
     rememberLegacyLookMetadata(lookData)
 
     local context = {
@@ -3766,14 +3750,14 @@ end
 
 if Networking ~= nil then
     Networking.Receive(NET_LOOK_APPLY, function(message)
-        if protocolMode == "v2" then return end
+        if protocolMode == "v3" then return end
         if protocolMode == "probing" then Helpers.selectV1Protocol("received a v1 look update") end
         local characterId, networkLook = Helpers.readNetworkLook(message)
         Helpers.handleNetworkLookApply(characterId, networkLook)
     end)
 
     Networking.Receive(NET_LOOK_CLEAR, function(message)
-        if protocolMode == "v2" then return end
+        if protocolMode == "v3" then return end
         if protocolMode == "probing" then Helpers.selectV1Protocol("received a v1 clear update") end
         local characterId = message.ReadUInt16()
         Helpers.handleNetworkLookClear(characterId)
@@ -3794,7 +3778,7 @@ if Networking ~= nil then
                 Helpers.debugLog("Ignored malformed v2 acknowledgement: " .. tostring(reason))
                 return
             end
-            if protocolMode ~= "v2" then Helpers.selectV2Protocol(0) end
+            if protocolMode ~= "v3" then Helpers.selectV2Protocol(0) end
 
             local effects = dispatchReducer({
                 type = "AckReceived",
@@ -3826,7 +3810,7 @@ if Networking ~= nil then
                 Helpers.debugLog("Ignored malformed v2 wardrobe state: " .. tostring(reason))
                 return
             end
-            if protocolMode ~= "v2" then Helpers.selectV2Protocol(0) end
+            if protocolMode ~= "v3" then Helpers.selectV2Protocol(0) end
 
             local characterId = tonumber(state.characterId) or 0
             local character = Helpers.findEntityById(characterId)

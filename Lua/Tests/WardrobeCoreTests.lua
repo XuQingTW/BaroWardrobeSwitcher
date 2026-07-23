@@ -61,6 +61,37 @@ local decodedLook = assert(Core.readLook(lookBuffer))
 assert(Core.lookEquals(look, decodedLook))
 assertEqual(decodedLook.hideHair, true)
 
+local packedRed = 0x7F1122FF
+local coloredLook = assert(Core.newLook(
+    true,
+    false,
+    { Head = "helmet", InnerClothes = "jumpsuit" },
+    nil,
+    { Head = packedRed, InnerClothes = 0 }
+))
+assertEqual(coloredLook.colors.Head, packedRed)
+assertEqual(coloredLook.colors.InnerClothes, 0)
+assertEqual(assert(Core.copyLook(coloredLook)).colors.Head, packedRed)
+assertEqual(assert(Core.toLegacyLook(coloredLook)).Head.color, packedRed)
+local coloredBuffer = newBuffer()
+assert(Core.writeLook(coloredBuffer, coloredLook))
+coloredBuffer.FinalizeForTransport()
+assert(Core.lookEquals(coloredLook, assert(Core.readLook(coloredBuffer))))
+local recoloredLook = assert(Core.newLook(
+    true,
+    false,
+    { Head = "helmet", InnerClothes = "jumpsuit" },
+    nil,
+    { Head = packedRed + 1, InnerClothes = 0 }
+))
+assert(not Core.lookEquals(coloredLook, recoloredLook),
+    "recoloring the same prefab must change look equality/signature")
+assert(Core.newLook(true, false, { Head = "helmet" }, nil, { Head = -1 }) == nil)
+assert(Core.newLook(true, false, { Head = "helmet" }, nil, { Head = 4294967296 }) == nil)
+assert(Core.newLook(true, false, { Head = "helmet" }, nil, { Head = 1.5 }) == nil)
+assert(Core.newLook(true, false, {}, nil, { Head = packedRed }) == nil)
+assert(Core.newLook(true, false, { Head = "helmet" }, nil, { Unknown = packedRed }) == nil)
+
 local triStateVisibility = {
     Hair = Core.ATTACHMENT_VISIBILITY.Show,
     Beard = Core.ATTACHMENT_VISIBILITY.Hide,
@@ -99,20 +130,6 @@ assert(Core.writeLook(triStateBuffer, triStateLook))
 triStateBuffer.FinalizeForTransport()
 local triStateDecoded = assert(Core.readLook(triStateBuffer))
 assert(Core.lookEquals(triStateLook, triStateDecoded))
-
-local legacyReaderBuffer = newBuffer()
-assert(Core.writeLook(legacyReaderBuffer, triStateLook))
-assertEqual(legacyReaderBuffer.ReadUInt16(), Core.LOOK_SCHEMA_VERSION)
-assertEqual(legacyReaderBuffer.ReadBoolean(), true)
-assertEqual(legacyReaderBuffer.ReadBoolean(), false,
-    "old v2 readers must see only the safe legacy hideHair projection")
-local legacySlotCount = legacyReaderBuffer.ReadUInt16()
-for _ = 1, legacySlotCount do
-    legacyReaderBuffer.ReadString()
-    legacyReaderBuffer.ReadString()
-end
-assertEqual(legacyReaderBuffer.LengthBits - legacyReaderBuffer.BitPosition, 32,
-    "old v2 readers must be able to ignore the complete optional look tail")
 
 local oldWireLook = newBuffer()
 oldWireLook.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
@@ -252,11 +269,25 @@ duplicateSlotBuffer.WriteBoolean(false)
 duplicateSlotBuffer.WriteUInt16(2)
 duplicateSlotBuffer.WriteString("Head")
 duplicateSlotBuffer.WriteString("helmet")
+duplicateSlotBuffer.WriteBoolean(false)
 duplicateSlotBuffer.WriteString("Head")
 duplicateSlotBuffer.WriteString("anotherhelmet")
+duplicateSlotBuffer.WriteBoolean(false)
 local duplicateLook, duplicateReason = tryReadLook(duplicateSlotBuffer)
 assert(duplicateLook == nil)
 assert(tostring(duplicateReason):find("duplicate", 1, true) ~= nil)
+
+local truncatedColorBuffer = newBuffer()
+truncatedColorBuffer.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
+truncatedColorBuffer.WriteBoolean(true)
+truncatedColorBuffer.WriteBoolean(false)
+truncatedColorBuffer.WriteUInt16(1)
+truncatedColorBuffer.WriteString("Head")
+truncatedColorBuffer.WriteString("helmet")
+truncatedColorBuffer.WriteBoolean(true)
+local truncatedColor, truncatedColorReason = tryReadLook(truncatedColorBuffer)
+assert(truncatedColor == nil)
+assert(tostring(truncatedColorReason):find("malformed", 1, true) ~= nil)
 
 local client = Core.newClientState({ characterKey = "42", look = look, revision = 4 })
 local pending, effects = Core.reduce(client, {
@@ -891,14 +922,19 @@ assertEqual(hairFailure.getState().look.hideHair, true)
 -- Strict legacy migration rejects truncation, duplicates, unknown fields and
 -- invalid booleans without mutating any runtime state.
 local legacy = assert(Core.parseLegacyClientLookLine(
-    "captured=true|active=false|auto=true|hidehair=true|Head=helmet,Ballistic Helmet"
+    "captured=true|active=false|auto=true|hidehair=true|Head=helmet,Ballistic Helmet|HeadColor=2131821311"
 ))
 assertEqual(legacy.look.slots.Head, "helmet")
+assertEqual(legacy.look.colors.Head, 2131821311)
 assertEqual(legacy.look.hideHair, true)
 assert(Core.parseLegacyClientLookLine("captured=true|Head=helmet") == nil)
 assert(Core.parseLegacyClientLookLine("captured=true|captured=false") == nil)
 assert(Core.parseLegacyClientLookLine("captured=true|mystery=value") == nil)
 assert(Core.parseLegacyClientLookLine("captured=yes") == nil)
+assert(Core.parseLegacyClientLookLine(
+    "captured=true|Head=helmet,name|HeadColor=4294967296") == nil)
+assert(Core.parseLegacyClientLookLine(
+    "captured=true|HeadColor=1") == nil)
 
 -- v1 has no ACK channel. A successful send completes Save/Clear/Forget
 -- locally; Apply remains pending until the v1 LOOK_APPLY frame is rendered.

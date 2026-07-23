@@ -15,7 +15,7 @@ namespace BaroWardrobeSwitcher
     /// </summary>
     public static partial class WardrobePersistence
     {
-        private const int SinglePlayerProfilesVersion = 2;
+        private const int SinglePlayerProfilesVersion = 3;
         private const string SinglePlayerProfilesFileName = "SinglePlayerProfiles.json";
         private const int MaximumSinglePlayerProfiles = 512;
         private const int MaximumDisplayNameBytes = 512;
@@ -122,6 +122,7 @@ namespace BaroWardrobeSwitcher
                 existing.AttachmentVisibility =
                     CopyAttachmentVisibility(look.AttachmentVisibility);
                 existing.Slots = CopySlots(look.Slots);
+                existing.Colors = CopyColors(look.Colors);
                 WriteSinglePlayerProfiles(document);
                 return true;
             }
@@ -199,7 +200,8 @@ namespace BaroWardrobeSwitcher
                             Captured = legacyLook.Captured,
                             AttachmentVisibility =
                                 CopyAttachmentVisibility(legacyLook.AttachmentVisibility),
-                            Slots = CopySlots(legacyLook.Slots)
+                            Slots = CopySlots(legacyLook.Slots),
+                            Colors = CopyColors(legacyLook.Colors)
                         });
                         imported = true;
                     }
@@ -266,7 +268,17 @@ namespace BaroWardrobeSwitcher
                     File.Copy(path, path + ".v1.bak", overwrite: true);
                     WriteSinglePlayerProfiles(migrated);
                     LogPersistenceInfo(
-                        "Migrated single-player wardrobe profiles from schema v1 to schema v2.");
+                        "Migrated single-player wardrobe profiles from schema v1 to schema v3.");
+                    return migrated;
+                }
+                if (version == 2)
+                {
+                    SinglePlayerProfilesDocument migrated = MigrateSinglePlayerProfilesV2(json);
+                    ValidateSinglePlayerProfiles(migrated);
+                    File.Copy(path, path + ".v2.bak", overwrite: true);
+                    WriteSinglePlayerProfiles(migrated);
+                    LogPersistenceInfo(
+                        "Migrated single-player wardrobe profiles from schema v2 to schema v3.");
                     return migrated;
                 }
                 if (version != SinglePlayerProfilesVersion)
@@ -332,7 +344,41 @@ namespace BaroWardrobeSwitcher
                         Captured = profile.Captured,
                         AttachmentVisibility =
                             CreateAttachmentVisibility(profile.HideHair),
-                        Slots = CopySlots(profile.Slots)
+                        Slots = CopySlots(profile.Slots),
+                        Colors = CreateEmptyColors()
+                    })
+                    .ToList()
+            };
+        }
+
+        private static SinglePlayerProfilesDocument MigrateSinglePlayerProfilesV2(string json)
+        {
+            LegacySinglePlayerProfilesV2Document legacy =
+                JsonSerializer.Deserialize<LegacySinglePlayerProfilesV2Document>(json, JsonOptions);
+            if (legacy == null || legacy.Version != 2)
+            {
+                throw new InvalidDataException(
+                    "Single-player wardrobe profile schema v2 is invalid.");
+            }
+
+            return new SinglePlayerProfilesDocument
+            {
+                Version = SinglePlayerProfilesVersion,
+                TransferToUnconfiguredCharacter = legacy.TransferToUnconfiguredCharacter,
+                ImportedLegacyCampaigns =
+                    legacy.ImportedLegacyCampaigns ?? new List<string>(),
+                Profiles = (legacy.Profiles ?? new List<LegacySinglePlayerProfileV2>())
+                    .Select(profile => new SinglePlayerProfile
+                    {
+                        CampaignHash = profile.CampaignHash,
+                        CharacterHash = profile.CharacterHash,
+                        DisplayName = profile.DisplayName,
+                        AutoApply = profile.AutoApply,
+                        Captured = profile.Captured,
+                        AttachmentVisibility =
+                            CopyAttachmentVisibility(profile.AttachmentVisibility),
+                        Slots = CopySlots(profile.Slots),
+                        Colors = CreateEmptyColors()
                     })
                     .ToList()
             };
@@ -398,7 +444,8 @@ namespace BaroWardrobeSwitcher
                     Captured = profile.Captured,
                     AttachmentVisibility =
                         CopyAttachmentVisibility(profile.AttachmentVisibility),
-                    Slots = profile.Slots
+                    Slots = profile.Slots,
+                    Colors = profile.Colors
                 };
                 ValidateDocument(look);
                 if (!look.Captured && !HasAnySlot(look.Slots))
@@ -409,6 +456,7 @@ namespace BaroWardrobeSwitcher
                 profile.AttachmentVisibility =
                     CopyAttachmentVisibility(look.AttachmentVisibility);
                 profile.Slots = CopySlots(look.Slots);
+                profile.Colors = CopyColors(look.Colors);
             }
         }
 
@@ -427,6 +475,7 @@ namespace BaroWardrobeSwitcher
                 "visibilityFaceAttachment=" + profile.AttachmentVisibility.FaceAttachment
             };
             AppendEncodedSlots(parts, profile.Slots);
+            AppendEncodedColors(parts, profile.Colors);
             return string.Join("|", parts);
         }
 
@@ -437,6 +486,20 @@ namespace BaroWardrobeSwitcher
             foreach (string key in SlotKeys)
             {
                 if (source.TryGetValue(key, out string value))
+                {
+                    copy[key] = value;
+                }
+            }
+            return copy;
+        }
+
+        private static Dictionary<string, uint?> CopyColors(Dictionary<string, uint?> source)
+        {
+            Dictionary<string, uint?> copy = CreateEmptyColors();
+            if (source == null) { return copy; }
+            foreach (string key in SlotKeys)
+            {
+                if (source.TryGetValue(key, out uint? value))
                 {
                     copy[key] = value;
                 }
@@ -527,6 +590,10 @@ namespace BaroWardrobeSwitcher
             [JsonRequired]
             [JsonPropertyName("slots")]
             public Dictionary<string, string> Slots { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("colors")]
+            public Dictionary<string, uint?> Colors { get; set; }
         }
 
         private sealed class LegacySinglePlayerProfilesDocument
@@ -573,6 +640,56 @@ namespace BaroWardrobeSwitcher
             [JsonRequired]
             [JsonPropertyName("hideHair")]
             public bool HideHair { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("slots")]
+            public Dictionary<string, string> Slots { get; set; }
+        }
+
+        private sealed class LegacySinglePlayerProfilesV2Document
+        {
+            [JsonRequired]
+            [JsonPropertyName("schemaVersion")]
+            public int Version { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("transferToUnconfiguredCharacter")]
+            public bool TransferToUnconfiguredCharacter { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("importedLegacyCampaigns")]
+            public List<string> ImportedLegacyCampaigns { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("profiles")]
+            public List<LegacySinglePlayerProfileV2> Profiles { get; set; }
+        }
+
+        private sealed class LegacySinglePlayerProfileV2
+        {
+            [JsonRequired]
+            [JsonPropertyName("campaignHash")]
+            public string CampaignHash { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("characterHash")]
+            public string CharacterHash { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("displayName")]
+            public string DisplayName { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("autoApply")]
+            public bool AutoApply { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("captured")]
+            public bool Captured { get; set; }
+
+            [JsonRequired]
+            [JsonPropertyName("attachmentVisibility")]
+            public AttachmentVisibilityDocument AttachmentVisibility { get; set; }
 
             [JsonRequired]
             [JsonPropertyName("slots")]

@@ -43,18 +43,18 @@ Conditional or required-item `StatusEffect` sounds are classified as gameplay al
 
 ## Persistence boundary
 
-Only stable identifiers and user intent are persisted. Runtime entity IDs and localized display names are never authoritative.
+Only stable identifiers, optional packed sprite colors, and user intent are persisted. Runtime entity IDs and localized display names are never authoritative.
 
-- Client: `ClientLook.json`, persistence schema 3.
-- Single-player: `SinglePlayerProfiles.json`, schema 2. It stores the global transfer toggle, imported campaign hashes, campaign/character-scoped profiles, and complete attachment visibility.
-- Server: `ServerLooks.json`, persistence schema 3, keyed by stable `Client.AccountId` representation.
+- Client: `ClientLook.json`, persistence schema 4.
+- Single-player: `SinglePlayerProfiles.json`, schema 3. It stores the global transfer toggle, imported campaign hashes, campaign/character-scoped profiles, complete attachment visibility, and optional colors.
+- Server: `ServerLooks.json`, persistence schema 4, keyed by stable `Client.AccountId` representation.
 - Anonymous clients: memory only for the current server session.
 
 Campaign save paths and stable character fingerprints are SHA-256 hashed before persistence. Character display names are diagnostic only. A campaign-less single-player scene uses memory-only profiles. Legacy `ClientLook.json` data is imported once per campaign into the first controlled non-bot character and never overwrites an existing profile. Import preserves the captured look but deliberately clears auto-apply intent, because a legacy saved look is not consent to override a new campaign's starting equipment.
 
-Wire look schema 2 and persistence schema 3 are separate constants. The wire prefix remains unchanged; its optional marker/version/mask tail is not a persistence version.
+Wire look schema 3 and persistence schema 4 are separate constants. Each network slot carries its identifier, a color-presence bit, and an optional packed color; the optional marker/version/mask tail remains independent of persistence.
 
-Writes use a same-directory temporary file and replacement/backup. Valid client/server v2 files migrate to v3 with `.v2.bak`; valid single-player v1 files migrate to v2 with `.v1.bak`. Corrupt files are quarantined instead of being applied.
+Writes use a same-directory temporary file and replacement/backup. Valid older client/server/profile files migrate with versioned backups. Missing legacy colors remain absent so Barotrauma uses each prefab's base color. Corrupt files are quarantined instead of being applied.
 
 ## Packaging
 

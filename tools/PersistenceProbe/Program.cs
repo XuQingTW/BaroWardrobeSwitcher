@@ -95,12 +95,13 @@ Directory.CreateDirectory(normalizedProbeRoot);
 List<string> failures = [];
 try
 {
-    Run("canonical-v3-json", TestCanonicalV3, failures);
+    Run("canonical-v4-json", TestCanonicalV4, failures);
     Run("persistence-diagnostic-contract", TestDiagnosticContract, failures);
     Run("private-file-log", TestPrivateFileLog, failures);
     Run("utf8-identifier-limit", TestUtf8IdentifierLimit, failures);
     Run("v1-migration-and-backup", TestV1Migration, failures);
     Run("v2-migration-and-backup", TestV2Migration, failures);
+    Run("v3-migration-and-backup", TestV3Migration, failures);
     Run("legacy-text-migration-and-backup", TestLegacyTextMigration, failures);
     Run("noncanonical-persistence-quarantine", TestNoncanonicalPersistenceQuarantine, failures);
     Run("atomic-replace-failure-preserves-old", TestAtomicFailure, failures);
@@ -108,6 +109,7 @@ try
     Run("single-player-transfer-default-and-round-trip", TestSinglePlayerTransfer, failures);
     Run("single-player-profile-isolation-and-delete", TestSinglePlayerProfileIsolation, failures);
     Run("single-player-v1-migration-and-backup", TestSinglePlayerV1Migration, failures);
+    Run("single-player-v2-migration-and-backup", TestSinglePlayerV2Migration, failures);
     Run("single-player-legacy-import-once", TestSinglePlayerLegacyImport, failures);
     Run("single-player-corrupt-quarantine", TestSinglePlayerCorruptQuarantine, failures);
     Run("single-player-atomic-failure-preserves-old", TestSinglePlayerAtomicFailure, failures);
@@ -129,13 +131,13 @@ if (failures.Count > 0)
 }
 return 0;
 
-void TestCanonicalV3()
+void TestCanonicalV4()
 {
     string directory = NewCaseDirectory("canonical");
     Assert(Save(
-            "schema=3|captured=true|active=true|auto=true|hidehair=false|" +
+            "schema=4|captured=true|active=true|auto=true|hidehair=false|" +
             "visibilityHair=show|visibilityBeard=hide|visibilityMoustache=auto|" +
-            "visibilityFaceAttachment=show|Head=divinghelmet,Display Name"),
+            "visibilityFaceAttachment=show|Head=divinghelmet,Display Name|HeadColor=2131821311"),
         "SaveClientLook rejected a valid canonical look.");
     string path = CurrentPath();
     Assert(Path.GetDirectoryName(path) == directory, "Test storage seam did not select the requested temp directory.");
@@ -147,12 +149,21 @@ void TestCanonicalV3()
         expectedHair: "show",
         expectedBeard: "hide",
         expectedMoustache: "auto",
-        expectedFaceAttachment: "show");
+        expectedFaceAttachment: "show",
+        expectedHeadColor: 2131821311);
     string loaded = Load();
     Assert(loaded.Contains("Head=divinghelmet,", StringComparison.Ordinal) &&
+           loaded.Contains("HeadColor=2131821311", StringComparison.Ordinal) &&
            loaded.Contains("visibilityHair=show", StringComparison.Ordinal) &&
            loaded.Contains("visibilityFaceAttachment=show", StringComparison.Ordinal),
         "Canonical attachment visibility did not round-trip through LoadClientLook.");
+    byte[] beforeInvalidColor = File.ReadAllBytes(path);
+    Assert(!Save("captured=true|Head=helmet,|HeadColor=4294967296"),
+        "An out-of-range encoded color was accepted.");
+    Assert(!Save("captured=true|HeadColor=1"),
+        "A color without a corresponding clothing slot was accepted.");
+    Assert(beforeInvalidColor.AsSpan().SequenceEqual(File.ReadAllBytes(path)),
+        "Rejected encoded colors changed the canonical client look.");
 }
 
 void TestPrivateFileLog()
@@ -174,7 +185,7 @@ void TestPrivateFileLog()
 void TestDiagnosticContract()
 {
     _ = NewCaseDirectory("diagnostic-contract");
-    Assert(string.Equals((string?)Invoke(getVersion), "0.5.2", StringComparison.Ordinal),
+    Assert(string.Equals((string?)Invoke(getVersion), "0.5.3", StringComparison.Ordinal),
         "WardrobePersistence did not report the current plugin version.");
 
     AppContext.SetData(FailurePointKey, "BeforeReplace");
@@ -274,6 +285,51 @@ void TestV2Migration()
     ValidateCanonicalFile(path, "v2helmet", expectedCaptured: true, expectedHideHair: false);
 }
 
+void TestV3Migration()
+{
+    _ = NewCaseDirectory("v3-migration");
+    string path = CurrentPath();
+    const string legacyJson = """
+        {
+          "schemaVersion": 3,
+          "captured": true,
+          "attachmentVisibility": {
+            "Hair": "show",
+            "Beard": "hide",
+            "Moustache": "auto",
+            "FaceAttachment": "show"
+          },
+          "slots": {
+            "Head": "v3helmet",
+            "Headset": null,
+            "InnerClothes": null,
+            "OuterClothes": null,
+            "Bag": null,
+            "HealthInterface": null
+          }
+        }
+        """;
+    File.WriteAllText(path, legacyJson, new UTF8Encoding(false));
+
+    string loaded = Load();
+    Assert(loaded.Contains("Head=v3helmet,", StringComparison.Ordinal) &&
+           !loaded.Contains("HeadColor=", StringComparison.Ordinal),
+        "Migrated v3 look did not preserve missing-color semantics.");
+    Assert(File.Exists(path + ".v3.bak"),
+        "v3 migration did not retain ClientLook.json.v3.bak.");
+    Assert(File.ReadAllText(path + ".v3.bak", Encoding.UTF8) == legacyJson,
+        "v3 migration backup does not match the original document.");
+    ValidateCanonicalFile(
+        path,
+        "v3helmet",
+        expectedCaptured: true,
+        expectedHideHair: false,
+        expectedHair: "show",
+        expectedBeard: "hide",
+        expectedMoustache: "auto",
+        expectedFaceAttachment: "show");
+}
+
 void TestLegacyTextMigration()
 {
     string directory = NewCaseDirectory("legacy-text-migration");
@@ -314,7 +370,19 @@ void TestNoncanonicalPersistenceQuarantine()
         ["v3-overlapping-authority"] =
             "{\"schemaVersion\":3,\"captured\":true,\"hideHair\":false,\"attachmentVisibility\":{" +
             "\"Hair\":\"auto\",\"Beard\":\"auto\",\"Moustache\":\"auto\",\"FaceAttachment\":\"auto\"}," +
-            "\"slots\":{" + validSlots + "}}"
+            "\"slots\":{" + validSlots + "}}",
+        ["v4-missing-colors"] =
+            "{\"schemaVersion\":4,\"captured\":true,\"attachmentVisibility\":{" +
+            "\"Hair\":\"auto\",\"Beard\":\"auto\",\"Moustache\":\"auto\",\"FaceAttachment\":\"auto\"}," +
+            "\"slots\":{" + validSlots + "}}",
+        ["v4-orphan-color"] =
+            "{\"schemaVersion\":4,\"captured\":true,\"attachmentVisibility\":{" +
+            "\"Hair\":\"auto\",\"Beard\":\"auto\",\"Moustache\":\"auto\",\"FaceAttachment\":\"auto\"}," +
+            "\"slots\":{" + validSlots + "},\"colors\":{\"Head\":1}}",
+        ["v4-unknown-color-slot"] =
+            "{\"schemaVersion\":4,\"captured\":true,\"attachmentVisibility\":{" +
+            "\"Hair\":\"auto\",\"Beard\":\"auto\",\"Moustache\":\"auto\",\"FaceAttachment\":\"auto\"}," +
+            "\"slots\":{" + validSlots + "},\"colors\":{\"Unknown\":1}}"
     };
 
     foreach ((string name, string json) in cases)
@@ -328,6 +396,7 @@ void TestNoncanonicalPersistenceQuarantine()
             name + " did not create exactly one timestamped corrupt file.");
         Assert(!File.Exists(path + ".v1.bak"), name + " was incorrectly treated as a v1 migration.");
         Assert(!File.Exists(path + ".v2.bak"), name + " was incorrectly treated as a v2 migration.");
+        Assert(!File.Exists(path + ".v3.bak"), name + " was incorrectly treated as a v3 migration.");
     }
 }
 
@@ -412,9 +481,9 @@ void TestSinglePlayerProfileIsolation()
             campaignA,
             characterA,
             "Alice",
-            "schema=3|captured=true|active=true|auto=true|hidehair=false|" +
+            "schema=4|captured=true|active=true|auto=true|hidehair=false|" +
             "visibilityHair=show|visibilityBeard=hide|visibilityMoustache=auto|" +
-            "visibilityFaceAttachment=show|Head=alphahelmet,"),
+            "visibilityFaceAttachment=show|Head=alphahelmet,|HeadColor=2131821311"),
         "Could not save the first campaign profile.");
     Assert(SaveProfile(
             campaignA,
@@ -430,6 +499,7 @@ void TestSinglePlayerProfileIsolation()
         "Could not save the cross-campaign profile.");
 
     Assert(LoadProfile(campaignA, characterA).Contains("Head=alphahelmet,", StringComparison.Ordinal) &&
+           LoadProfile(campaignA, characterA).Contains("HeadColor=2131821311", StringComparison.Ordinal) &&
            LoadProfile(campaignA, characterA).Contains("visibilityHair=show", StringComparison.Ordinal),
         "The first character profile did not round-trip.");
     Assert(LoadProfile(campaignA, characterB).Contains("Head=bobhelmet,", StringComparison.Ordinal),
@@ -468,6 +538,8 @@ void TestSinglePlayerProfileIsolation()
             expectedBeard: "hide",
             expectedMoustache: "auto",
             expectedFaceAttachment: "show");
+        Assert(alice.GetProperty("colors").GetProperty("Head").GetUInt32() == 2131821311,
+            "Single-player profile did not persist the custom clothing color.");
     }
 
     Assert(DeleteProfile(campaignA, characterA),
@@ -524,6 +596,57 @@ void TestSinglePlayerV1Migration()
            loaded.Contains("visibilityHair=hide", StringComparison.Ordinal) &&
            loaded.Contains("visibilityFaceAttachment=auto", StringComparison.Ordinal),
         "Single-player v1 migration did not preserve the legacy visibility preset.");
+    using JsonDocument migrated = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+    ValidateSinglePlayerRoot(migrated.RootElement);
+}
+
+void TestSinglePlayerV2Migration()
+{
+    _ = NewCaseDirectory("single-player-v2-migration");
+    const string campaign = "campaign:profile-v2.save";
+    const string character = "profile-v2-character";
+    string path = CurrentSinglePlayerProfilesPath();
+    string legacyJson = $$"""
+        {
+          "schemaVersion": 2,
+          "transferToUnconfiguredCharacter": false,
+          "importedLegacyCampaigns": [],
+          "profiles": [
+            {
+              "campaignHash": "{{HashKey(campaign)}}",
+              "characterHash": "{{HashKey(character)}}",
+              "displayName": "Migrated V2 Crew",
+              "autoApply": true,
+              "captured": true,
+              "attachmentVisibility": {
+                "Hair": "show",
+                "Beard": "hide",
+                "Moustache": "auto",
+                "FaceAttachment": "show"
+              },
+              "slots": {
+                "Head": "profilev2helmet",
+                "Headset": null,
+                "InnerClothes": null,
+                "OuterClothes": null,
+                "Bag": null,
+                "HealthInterface": null
+              }
+            }
+          ]
+        }
+        """;
+    File.WriteAllText(path, legacyJson, new UTF8Encoding(false));
+
+    string loaded = LoadProfile(campaign, character);
+    Assert(loaded.Contains("Head=profilev2helmet,", StringComparison.Ordinal) &&
+           loaded.Contains("visibilityHair=show", StringComparison.Ordinal) &&
+           !loaded.Contains("HeadColor=", StringComparison.Ordinal),
+        "Single-player v2 migration did not preserve missing-color semantics.");
+    Assert(File.Exists(path + ".v2.bak"),
+        "Single-player v2 migration did not retain .v2.bak.");
+    Assert(File.ReadAllText(path + ".v2.bak", Encoding.UTF8) == legacyJson,
+        "Single-player v2 backup does not match the original document.");
     using JsonDocument migrated = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
     ValidateSinglePlayerRoot(migrated.RootElement);
 }
@@ -726,8 +849,8 @@ void ValidateSinglePlayerRoot(JsonElement root)
     ];
     Assert(actualProperties.SequenceEqual(expectedProperties, StringComparer.Ordinal),
         "Single-player schema contains missing or extra top-level properties.");
-    Assert(root.GetProperty("schemaVersion").GetInt32() == 2,
-        "Single-player schema version is not 2.");
+    Assert(root.GetProperty("schemaVersion").GetInt32() == 3,
+        "Single-player schema version is not 3.");
     Assert(root.GetProperty("transferToUnconfiguredCharacter").ValueKind is
             JsonValueKind.True or JsonValueKind.False,
         "Single-player transfer setting is not a boolean.");
@@ -746,6 +869,7 @@ void ValidateSinglePlayerRoot(JsonElement root)
             "campaignHash",
             "captured",
             "characterHash",
+            "colors",
             "displayName",
             "attachmentVisibility",
             "slots"
@@ -762,6 +886,10 @@ void ValidateSinglePlayerRoot(JsonElement root)
             profile.GetProperty("slots").EnumerateObject().Select(property => property.Name).Order().ToArray();
         Assert(actualSlotKeys.SequenceEqual(SlotKeys.Order(), StringComparer.Ordinal),
             "Single-player profile does not contain exactly the six canonical slots.");
+        string[] actualColorKeys =
+            profile.GetProperty("colors").EnumerateObject().Select(property => property.Name).Order().ToArray();
+        Assert(actualColorKeys.SequenceEqual(SlotKeys.Order(), StringComparer.Ordinal),
+            "Single-player profile does not contain exactly the six canonical color slots.");
     }
 }
 
@@ -815,19 +943,20 @@ void ValidateCanonicalFile(
     string? expectedHair = null,
     string? expectedBeard = null,
     string? expectedMoustache = null,
-    string expectedFaceAttachment = "auto")
+    string expectedFaceAttachment = "auto",
+    uint? expectedHeadColor = null)
 {
     using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
     JsonElement root = document.RootElement;
     string[] actualProperties = root.EnumerateObject().Select(property => property.Name).Order().ToArray();
-    string[] expectedProperties = ["attachmentVisibility", "captured", "schemaVersion", "slots"];
+    string[] expectedProperties = ["attachmentVisibility", "captured", "colors", "schemaVersion", "slots"];
     Array.Sort(expectedProperties, StringComparer.Ordinal);
     Assert(actualProperties.SequenceEqual(expectedProperties, StringComparer.Ordinal),
-        "Schema v3 contains missing or extra top-level properties.");
-    Assert(root.GetProperty("schemaVersion").GetInt32() == 3, "Schema version is not 3.");
+        "Schema v4 contains missing or extra top-level properties.");
+    Assert(root.GetProperty("schemaVersion").GetInt32() == 4, "Schema version is not 4.");
     Assert(root.GetProperty("captured").GetBoolean() == expectedCaptured, "Captured intent mismatch.");
     Assert(!root.TryGetProperty("hideHair", out _),
-        "Schema v3 must not persist authoritative hideHair.");
+        "Schema v4 must not persist authoritative hideHair.");
     string legacyState = expectedHideHair ? "hide" : "auto";
     ValidateAttachmentVisibility(
         root.GetProperty("attachmentVisibility"),
@@ -839,7 +968,7 @@ void ValidateCanonicalFile(
     JsonElement slots = root.GetProperty("slots");
     string[] actualSlotKeys = slots.EnumerateObject().Select(property => property.Name).Order().ToArray();
     Assert(actualSlotKeys.SequenceEqual(SlotKeys.Order(), StringComparer.Ordinal),
-        "Schema v3 does not contain exactly the six canonical slots.");
+        "Schema v4 does not contain exactly the six canonical slots.");
     Assert(slots.GetProperty("Head").ValueKind == JsonValueKind.String &&
            slots.GetProperty("Head").GetString() == expectedHead,
         "Head slot is not persisted as a stable identifier string.");
@@ -847,6 +976,27 @@ void ValidateCanonicalFile(
     {
         Assert(slots.GetProperty(key).ValueKind == JsonValueKind.Null,
             key + " should be persisted as null.");
+    }
+
+    JsonElement colors = root.GetProperty("colors");
+    string[] actualColorKeys =
+        colors.EnumerateObject().Select(property => property.Name).Order().ToArray();
+    Assert(actualColorKeys.SequenceEqual(SlotKeys.Order(), StringComparer.Ordinal),
+        "Schema v4 does not contain exactly the six canonical color slots.");
+    foreach (string key in SlotKeys)
+    {
+        JsonElement color = colors.GetProperty(key);
+        if (key == "Head" && expectedHeadColor.HasValue)
+        {
+            Assert(color.ValueKind == JsonValueKind.Number &&
+                   color.GetUInt32() == expectedHeadColor.Value,
+                "Head custom color did not round-trip.");
+        }
+        else
+        {
+            Assert(color.ValueKind == JsonValueKind.Null,
+                key + " color should be persisted as null.");
+        }
     }
 }
 
