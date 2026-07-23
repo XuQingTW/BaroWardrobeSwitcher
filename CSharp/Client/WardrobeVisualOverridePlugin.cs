@@ -88,8 +88,8 @@ namespace BaroWardrobeSwitcher
 
     public static partial class WardrobePersistence
     {
-        public const string Version = "0.5.2";
-        private const int PersistenceVersion = 3;
+        public const string Version = "0.5.3";
+        private const int PersistenceVersion = 4;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
         private const string VisibilityAuto = "auto";
@@ -305,7 +305,8 @@ namespace BaroWardrobeSwitcher
                         Version = PersistenceVersion,
                         Captured = false,
                         AttachmentVisibility = CreateAttachmentVisibility(false),
-                        Slots = CreateEmptySlots()
+                        Slots = CreateEmptySlots(),
+                        Colors = CreateEmptyColors()
                     });
                 return true;
             }
@@ -329,6 +330,22 @@ namespace BaroWardrobeSwitcher
                 ValidateDocument(current);
                 return current;
             }
+            if (version == 3)
+            {
+                LegacyClientLookV3Document legacy =
+                    JsonSerializer.Deserialize<LegacyClientLookV3Document>(json, JsonOptions);
+                ClientLookDocument migratedDocument = new ClientLookDocument
+                {
+                    Version = PersistenceVersion,
+                    Captured = legacy.Captured,
+                    AttachmentVisibility = legacy.AttachmentVisibility,
+                    Slots = legacy.Slots,
+                    Colors = CreateEmptyColors()
+                };
+                ValidateDocument(migratedDocument);
+                migratedFromVersion = 3;
+                return migratedDocument;
+            }
             if (version == 2)
             {
                 LegacyClientLookV2Document legacy =
@@ -338,7 +355,8 @@ namespace BaroWardrobeSwitcher
                     Version = PersistenceVersion,
                     Captured = legacy.Captured,
                     AttachmentVisibility = CreateAttachmentVisibility(legacy.HideHair),
-                    Slots = legacy.Slots
+                    Slots = legacy.Slots,
+                    Colors = CreateEmptyColors()
                 };
                 ValidateDocument(migratedDocument);
                 migratedFromVersion = 2;
@@ -408,7 +426,8 @@ namespace BaroWardrobeSwitcher
                 Version = PersistenceVersion,
                 Captured = GetBoolean(parts, "captured"),
                 AttachmentVisibility = ParseAttachmentVisibility(parts),
-                Slots = ParseSlots(parts)
+                Slots = ParseSlots(parts),
+                Colors = ParseColors(parts)
             };
             return document;
         }
@@ -429,6 +448,7 @@ namespace BaroWardrobeSwitcher
                 "visibilityFaceAttachment=" + document.AttachmentVisibility.FaceAttachment
             };
             AppendEncodedSlots(parts, document.Slots);
+            AppendEncodedColors(parts, document.Colors);
             return string.Join("|", parts);
         }
 
@@ -439,8 +459,22 @@ namespace BaroWardrobeSwitcher
             {
                 if (!slots.TryGetValue(slotKey, out string identifier) || string.IsNullOrWhiteSpace(identifier)) { continue; }
                 // Display names and runtime item ids are intentionally not persisted in
-                // schema v3. The Lua facade still receives the legacy comma separator.
+                // schema v4. The Lua facade still receives the legacy comma separator.
                 parts.Add(slotKey + "=" + Escape(identifier) + ",");
+            }
+        }
+
+        private static void AppendEncodedColors(
+            List<string> parts,
+            Dictionary<string, uint?> colors)
+        {
+            if (parts == null || colors == null) { return; }
+            foreach (string slotKey in SlotKeys)
+            {
+                if (colors.TryGetValue(slotKey, out uint? color) && color.HasValue)
+                {
+                    parts.Add(slotKey + "Color=" + color.Value);
+                }
             }
         }
 
@@ -456,6 +490,22 @@ namespace BaroWardrobeSwitcher
                 slots[slotKey] = identifier;
             }
             return slots;
+        }
+
+        private static Dictionary<string, uint?> ParseColors(Dictionary<string, string> parts)
+        {
+            Dictionary<string, uint?> colors = CreateEmptyColors();
+            foreach (string slotKey in SlotKeys)
+            {
+                string field = slotKey + "Color";
+                if (!parts.TryGetValue(field, out string encodedValue)) { continue; }
+                if (!uint.TryParse(encodedValue, out uint color))
+                {
+                    throw new InvalidDataException("Encoded wardrobe color is invalid for slot " + slotKey + ".");
+                }
+                colors[slotKey] = color;
+            }
+            return colors;
         }
 
         private static Dictionary<string, string> ParseParts(string line)
@@ -670,7 +720,8 @@ namespace BaroWardrobeSwitcher
                 Version = PersistenceVersion,
                 Captured = captured,
                 AttachmentVisibility = ReadLegacyAttachmentVisibility(root),
-                Slots = slots
+                Slots = slots,
+                Colors = CreateEmptyColors()
             };
         }
 
@@ -721,6 +772,16 @@ namespace BaroWardrobeSwitcher
             return slots;
         }
 
+        private static Dictionary<string, uint?> CreateEmptyColors()
+        {
+            Dictionary<string, uint?> colors = new Dictionary<string, uint?>(StringComparer.Ordinal);
+            foreach (string key in SlotKeys)
+            {
+                colors[key] = null;
+            }
+            return colors;
+        }
+
         private static void ValidateDocument(ClientLookDocument document)
         {
             if (document == null) { throw new InvalidDataException("Client wardrobe document is empty."); }
@@ -734,8 +795,7 @@ namespace BaroWardrobeSwitcher
             {
                 if (!SlotKeys.Contains(key, StringComparer.Ordinal))
                 {
-                    document.Slots.Remove(key);
-                    continue;
+                    throw new InvalidDataException("Unknown wardrobe slot: " + key + ".");
                 }
                 string identifier = document.Slots[key]?.Trim();
                 if (string.IsNullOrWhiteSpace(identifier))
@@ -752,6 +812,23 @@ namespace BaroWardrobeSwitcher
             foreach (string key in SlotKeys)
             {
                 if (!document.Slots.ContainsKey(key)) { document.Slots[key] = null; }
+            }
+            document.Colors ??= CreateEmptyColors();
+            foreach (string key in document.Colors.Keys.ToList())
+            {
+                if (!SlotKeys.Contains(key, StringComparer.Ordinal))
+                {
+                    throw new InvalidDataException("Unknown wardrobe color slot: " + key + ".");
+                }
+                if (document.Colors[key].HasValue &&
+                    string.IsNullOrWhiteSpace(document.Slots[key]))
+                {
+                    throw new InvalidDataException("Wardrobe color has no item for slot " + key + ".");
+                }
+            }
+            foreach (string key in SlotKeys)
+            {
+                if (!document.Colors.ContainsKey(key)) { document.Colors[key] = null; }
             }
         }
 
@@ -875,6 +952,9 @@ namespace BaroWardrobeSwitcher
             [JsonRequired]
             [JsonPropertyName("slots")]
             public Dictionary<string, string> Slots { get; set; }
+            [JsonRequired]
+            [JsonPropertyName("colors")]
+            public Dictionary<string, uint?> Colors { get; set; }
 
         }
 
@@ -909,12 +989,28 @@ namespace BaroWardrobeSwitcher
             [JsonPropertyName("slots")]
             public Dictionary<string, string> Slots { get; set; }
         }
+
+        private sealed class LegacyClientLookV3Document
+        {
+            [JsonRequired]
+            [JsonPropertyName("schemaVersion")]
+            public int Version { get; set; }
+            [JsonRequired]
+            [JsonPropertyName("captured")]
+            public bool Captured { get; set; }
+            [JsonRequired]
+            [JsonPropertyName("attachmentVisibility")]
+            public AttachmentVisibilityDocument AttachmentVisibility { get; set; }
+            [JsonRequired]
+            [JsonPropertyName("slots")]
+            public Dictionary<string, string> Slots { get; set; }
+        }
     }
 
     public static class VisualOverride
     {
 
-        public const string Version = "0.5.2";
+        public const string Version = "0.5.3";
 
         public static string GetVersion()
         {
@@ -1353,6 +1449,7 @@ namespace BaroWardrobeSwitcher
             if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
                 !session.IsCommitted ||
                 session.HasPendingCapture ||
+                session.HasLiveItemSources ||
                 !HasFashionPayload(session))
             {
                 return false;
@@ -1453,6 +1550,10 @@ namespace BaroWardrobeSwitcher
                 {
                     session.AddOwnedTemporaryItem(item);
                 }
+                else
+                {
+                    session.MarkLiveItemSource();
+                }
             }
             catch (Exception ex)
             {
@@ -1470,6 +1571,19 @@ namespace BaroWardrobeSwitcher
         }
 
         public static int CaptureFashionPrefab(Character character, string identifier)
+        {
+            return CaptureFashionPrefabCore(character, identifier, null);
+        }
+
+        public static int CaptureFashionPrefab(Character character, string identifier, uint packedColor)
+        {
+            return CaptureFashionPrefabCore(character, identifier, packedColor);
+        }
+
+        private static int CaptureFashionPrefabCore(
+            Character character,
+            string identifier,
+            uint? packedColor)
         {
             if (character == null || string.IsNullOrWhiteSpace(identifier)) { return 0; }
 
@@ -1492,6 +1606,10 @@ namespace BaroWardrobeSwitcher
                     // animations and sounds, but it must never reserve a client-side
                     // entity ID. A server spawn can legitimately reuse that ID.
                     tempItem.FreeID();
+                    if (packedColor.HasValue)
+                    {
+                        tempItem.SpriteColor = new Color(packedColor.Value);
+                    }
                     int captured = CaptureFashionItemCore(character, tempItem, takeOwnership: true, out bool succeeded);
                     if (!succeeded) { return 0; }
                     // Ownership was transferred to the render session. It must outlive
@@ -1885,6 +2003,8 @@ namespace BaroWardrobeSwitcher
             color *= limb.Alpha;
             if (color.A <= 0) { return; }
 
+            // DrawWearable delegates to the engine's CalculateDrawParameters,
+            // which reads WearableComponent.Item.GetSpriteColor().
             SpriteEffects spriteEffect = limb.Dir > 0.0f ? SpriteEffects.None : SpriteEffects.FlipHorizontally;
             if (limb.Params.MirrorHorizontally)
             {

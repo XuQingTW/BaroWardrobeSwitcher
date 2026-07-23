@@ -1,13 +1,13 @@
 # Release test matrix
 
-This checklist is the release gate for v0.5.2. Automated checks must pass before packaging, and the single-player crew-profile matrix below must be completed in game before release. The pinned 1.13.4.0 compatibility target retains its previously verified renderer and multiplayer matrix.
+This checklist is the release gate for v0.5.3. Automated checks must pass before packaging, and the custom-color matrix below must be completed in game before release. The pinned 1.13.4.0 compatibility target retains its previously verified renderer and multiplayer matrix.
 
 ## Automated checks
 
 1. Run `scripts/Build.ps1` with explicit Barotrauma and LuaCs Publicized paths. Expected: zero warnings and errors; output only under `artifacts`.
 2. Run `scripts/Test-Compatibility.ps1 -RequireOptional`. Expected: every exact 1.13.4.0 target reports `PASS`.
 3. Run `scripts/Test-RendererContracts.ps1`. Expected: the crash characterizations, live-equipment mask transaction, `RenderSession` aggregate, attachment-visibility priority/no-wearable-refresh contract, and functional-equipment-alarm lifecycle report `PASS`.
-4. Run `scripts/Test-Persistence.ps1` with the same explicit paths. Expected: canonical client v3, client v1/v2 migration, single-player profile v2 and v1 migration, transfer round-trip, profile/campaign isolation, one-time inactive legacy import, quarantine, and atomic-failure cases report `PASS`.
+4. Run `scripts/Test-Persistence.ps1` with the same explicit paths. Expected: canonical client v4 color round-trip, client v1/v2/v3 migration, single-player profile v3 and v1/v2 migration, transfer round-trip, profile/campaign isolation, one-time inactive legacy import, quarantine, and atomic-failure cases report `PASS`.
 5. Run `scripts/Test-Lua.ps1`. Expected: every Lua source parses in Barotrauma's MoonSharp and every pure/authority test reports `PASS`.
 6. Run `scripts/verify_package.py`. Expected: metadata agrees, every runtime source is listed, and no generated file is present in the source package.
 7. Run `git diff --check` and confirm a build does not add working-tree changes outside ignored `artifacts`.
@@ -33,18 +33,18 @@ Expected:
 
 Run single-player, Windows host, and Linux dedicated server with at least two clients.
 
-- v0.5.2 client ↔ v0.5.2 server negotiates v2.
-- v0.5.2 client ↔ v1 server falls back after five seconds.
-- v1 client ↔ v0.5.2 server continues through the six old message names.
+- v0.5.3 client ↔ v0.5.3 server negotiates v3.
+- v0.5.3 client ↔ older server falls back to v1 after five seconds and displays prefab base colors.
+- Older client ↔ v0.5.3 server continues through the six v1 message names and displays prefab base colors.
 - Duplicate operation IDs return the original result without applying twice.
 - Out-of-order state is ignored; clear/forget followed by a late stale apply stays cleared.
 - Join, reconnect, round start/end, death/respawn, character replacement, and campaign/server changes preserve the documented intent.
 - On a P2P host, change session or scene while retaining the same controlled Character and while a command is awaiting acknowledgement. Reopening F8 must leave Save, Apply, and Clear usable after the new session binds.
 - An active look survives each character/scene replacement and renders exactly once after the initial-equipment gate. A saved-but-never-applied look stays inactive.
 - `Clear Look` and `Forget Saved Look` remain inactive across round start, reconnect, death/respawn, and character replacement in single-player, v1 bridge, and v2 flows.
-- Invalid version/slot, duplicate slot, truncated payload, identifier over 256 bytes, payload over 4 KiB, forged item ID/name, unknown prefab, and non-wearable slot are rejected atomically.
+- Invalid version/slot/color, orphan color, duplicate slot, truncated color/payload, identifier over 256 bytes, payload over 4 KiB, forged item ID/name/color, unknown prefab, and non-wearable slot are rejected atomically.
 - Optional look/hello tails accept only absent or complete supported extensions. Partial tails, unknown marker/version, unknown mask bits, and overlapping force-hide/show bits are rejected atomically.
-- A `visibility` command changes only the authoritative saved look's four-layer policy; client-supplied equipment slots cannot replace the server capture. Verify active broadcast, inactive state response, reject/timeout rollback, and old-v2 capability downgrade.
+- A `visibility` command changes only the authoritative saved look's four-layer policy; client-supplied equipment slots cannot replace the server capture. Verify active broadcast, inactive state response, reject/timeout rollback, missing-capability behavior, and mixed-version v1 fallback.
 - Anonymous clients synchronize only for the live server session; stable accounts migrate and reload `ServerLooks.json`.
 
 Expected steady state: no Wardrobe network traffic, persistence writes, or full-client scans until a relevant event occurs.
@@ -65,6 +65,11 @@ Use a campaign with at least the player and two controllable human NPC crew memb
 
 ## Gameplay behavior
 
+- Save and apply opaque and semi-transparent custom clothing colors in single-player, then clear/reapply, change scene, and restart. The exact packed color must return without being multiplied twice.
+- Repeat custom-color save/apply as multiplayer owner, observer, late joiner, and reconnecting player. Server Save must use the equipped entity color rather than a client-supplied value.
+- Apply two slots that use the same prefab identifier with different colors. Both visual entries must remain distinct.
+- Keep another inventory item with the same prefab but a different color. Applying the saved look must use the exact entity only when entity ID, identifier, and color all match; otherwise it must use the saved colored prefab fallback.
+- Load migrated client/server/profile documents from before color persistence. They must use prefab base colors, not opaque white.
 - Full inventory and partial unequip failure do not duplicate or destroy items.
 - Each appearance layer cycles `Auto -> Hide -> Show`, previews immediately, and survives scene changes, restart, single-player profile transfer, and multiplayer synchronization.
 - EA-HI/manual composite-head check: apply the appearance, set `Hair=Show`, then hide only the Beard/Moustache layers actually required. The modded head and decorations must remain present and must not revert to the Vanilla head.

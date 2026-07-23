@@ -48,6 +48,25 @@ for _, forbidden in ipairs({
 }) do
     assert(not clientSource:find(forbidden, 1, true), "facade state mirror returned: " .. forbidden)
 end
+local captureStart = assert(clientSource:find(
+    "function Helpers.captureFashionPayloadFromLook",
+    1,
+    true
+))
+local captureEnd = assert(clientSource:find(
+    "function Helpers.applyCapturedFashionToCharacterEquipment",
+    captureStart,
+    true
+))
+local captureSource = clientSource:sub(captureStart, captureEnd - 1)
+assert(captureSource:find("savedColor == nil", 1, true) ~= nil,
+    "a colorless saved look could incorrectly reuse a live item")
+assert(captureSource:find("Helpers.findItemByIdentifier(character", 1, true) == nil,
+    "saved-look capture must not select the first matching inventory prefab")
+assert(captureSource:find('.. "@" .. tostring(color or "base")', 1, true) ~= nil,
+    "prefab fallback dedupe must include the packed color")
+assert(clientSource:find("color = Helpers.itemSpriteColor(item)", 1, true) ~= nil,
+    "client visual snapshots must capture Item.SpriteColor.PackedValue")
 
 local localizedText = {}
 local textFile = nil
@@ -158,6 +177,7 @@ local lastForceShowMask = nil
 local activationCharacterIds = {}
 local activeCharacterIds = {}
 local capturedIdentifierByCharacterId = {}
+local capturedPrefabKeysByCharacterId = {}
 local prefabCaptureCount = 0
 local reuseCheckCount = 0
 local reusableCharacters = {}
@@ -190,9 +210,13 @@ local visualOverride = {
         reuseCheckCount = reuseCheckCount + 1
         return reusableCharacters[characterId(character)] == true
     end,
-    CaptureFashionPrefab = function(character, identifier)
+    CaptureFashionPrefab = function(character, identifier, packedColor)
         prefabCaptureCount = prefabCaptureCount + 1
         capturedIdentifierByCharacterId[characterId(character)] = tostring(identifier)
+        local id = characterId(character)
+        capturedPrefabKeysByCharacterId[id] = capturedPrefabKeysByCharacterId[id] or {}
+        capturedPrefabKeysByCharacterId[id][#capturedPrefabKeysByCharacterId[id] + 1] =
+            tostring(identifier) .. "@" .. tostring(packedColor or "base")
         return 1
     end,
     CaptureEmptyFashion = function() return true end,
@@ -431,7 +455,7 @@ hooks.think()
 
 assert(saveCalls == 1, "attachment visibility did not persist to the current character profile")
 assert(lastSaved ~= nil and
-    lastSaved:find("schema=3", 1, true) ~= nil and
+    lastSaved:find("schema=4", 1, true) ~= nil and
     lastSaved:find("hidehair=true", 1, true) ~= nil and
     lastSaved:find("visibilityHair=hide", 1, true) ~= nil and
     lastSaved:find("visibilityFaceAttachment=auto", 1, true) ~= nil,
@@ -760,7 +784,14 @@ do
     end
 
     local remoteId = 901
-    local remoteLook = assert(WardrobeCore.newLook(true, false, { Head = "helmet" }))
+    local remoteColor = 0x7F1122FF
+    local remoteLook = assert(WardrobeCore.newLook(
+        true,
+        false,
+        { Head = "helmet", InnerClothes = "helmet" },
+        nil,
+        { Head = remoteColor, InnerClothes = remoteColor + 1 }
+    ))
     local beforeLateEntity = activationCount
     deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })
     for _ = 1, 320 do hooks.think() end
@@ -774,6 +805,11 @@ do
         "a retained snapshot was not applied when the late Character appeared")
     assert(capturedIdentifierByCharacterId[remoteId] == "helmet",
         "the late Character received the wrong wardrobe look")
+    local remoteKeys = capturedPrefabKeysByCharacterId[remoteId] or {}
+    assert(#remoteKeys == 2 and
+           remoteKeys[1] == "helmet@" .. tostring(remoteColor) and
+           remoteKeys[2] == "helmet@" .. tostring(remoteColor + 1),
+        "same-prefab fallbacks with different colors were merged or recolored")
 
     local afterApply = activationCount
     deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })

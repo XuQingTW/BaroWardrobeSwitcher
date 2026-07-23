@@ -211,6 +211,7 @@ Type animController = RequireType("Barotrauma.AnimController");
 Type statusEffect = RequireType("Barotrauma.StatusEffect");
 Type animLoadInfo = RequireType("Barotrauma.StatusEffect+AnimLoadInfo");
 Type entity = RequireType("Barotrauma.Entity");
+Type item = RequireType("Barotrauma.Item");
 Type hull = RequireType("Barotrauma.Hull");
 Type itemComponent = RequireType("Barotrauma.Items.Components.ItemComponent");
 Type actionType = RequireType("Barotrauma.ActionType");
@@ -226,6 +227,10 @@ Type color = RequireExternalType("XNATypes.dll", "Microsoft.Xna.Framework.Color"
 Type vector2 = RequireExternalType("XNATypes.dll", "Microsoft.Xna.Framework.Vector2");
 Type spriteEffects = spriteBatch.Assembly.GetType("Microsoft.Xna.Framework.Graphics.SpriteEffects", throwOnError: true)!;
 
+RequireReadWriteProperty("Item.SpriteColor", item, "SpriteColor");
+RequirePublicProperty("Item.SpriteColor type", item, "SpriteColor", color);
+RequireReadWriteProperty("Color.PackedValue", color, "PackedValue");
+RequireConstructor("Color(uint)", color, new[] { typeof(uint) });
 RequirePublicProperty("Character.Info", character, "Info", characterInfo);
 RequirePublicStaticField("Character.CharacterList", character, "CharacterList");
 RequirePublicProperty("Character.IsBot", character, "IsBot", typeof(bool));

@@ -2,12 +2,12 @@
 
 LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored fashion visuals.
 
-Version 0.5.2 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It retains campaign-scoped single-player crew profiles, automatic NPC restoration, and four-layer appearance visibility without changing protocol version 2 or wire look schema 2. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
+Version 0.5.3 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It preserves per-item custom clothing colors across save, apply, scene changes, reconnects, and restarts using protocol/look schema 3. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
 
 ## Design
 
 - The currently worn equipment is the real set and keeps the real item effects.
-- A saved look persists only stable item identifiers and user intent; initialized renderer-owned sprite descriptors are rebuilt for each target character, then the captured real items are removed from active equipment.
+- A saved look persists stable item identifiers, optional per-item `SpriteColor.PackedValue` values, and user intent; initialized renderer-owned sprite descriptors are rebuilt for each target character, then the captured real items are removed from active equipment.
 - Wardrobe/fashion data never applies extra stats, buffs, resistances, oxygen, armor, or skill effects.
 - No panel is shown by default. Press `F8` to open or close the wardrobe panel.
 - In single-player, each human player-team crew member has an independent saved look. Multiplayer keeps the existing per-client saved-look behavior.
@@ -37,10 +37,10 @@ Version 0.5.2 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It r
 - The C# compatibility adapter is compiled from the source-only `CSharp/Client` folder by LuaCs.
 - At the start of each round, the mod posts a localized in-game notice that the wardrobe control panel opens with `F8`.
 - A successful C# load prints:
-  - `[Baro Wardrobe Switcher] C# visual override v0.5.2 initializing.`
+  - `[Baro Wardrobe Switcher] C# visual override v0.5.3 initializing.`
   - `[Baro Wardrobe Switcher] C# visual override loaded: ready.`
 - If the panel says `C#: unavailable` or `C#: missing required hooks`, enable C# scripting in LuaCs, accept this mod's C# prompt, and reload before saving or applying a look.
-- Multiplayer client looks use persistence schema-v3 `ClientLook.json`. Single-player crew profiles use schema-v2 `SinglePlayerProfiles.json`, scoped by a SHA-256 hash of the campaign save path and a SHA-256 hash of the character fingerprint. Both formats store the complete four-layer visibility object. Valid client v2 and single-player v1 files migrate automatically and retain `.v2.bak` / `.v1.bak` backups. Writes are atomic, corrupt files are quarantined, and raw campaign paths are never written to disk.
+- Multiplayer client looks use persistence schema-v4 `ClientLook.json`. Single-player crew profiles use schema-v3 `SinglePlayerProfiles.json`, scoped by a SHA-256 hash of the campaign save path and a SHA-256 hash of the character fingerprint. Both formats store the complete four-layer visibility object and a parallel optional color map. Valid older files migrate automatically with versioned backups; colors that were never stored remain absent and use the prefab base color. Writes are atomic, corrupt files are quarantined, and raw campaign paths are never written to disk.
 - A legacy `ClientLook.json` is imported at most once per campaign into the first controlled non-bot character, without overwriting an existing crew profile. The imported look is saved but inactive, even if the legacy file recorded active/auto-apply intent, so starting equipment remains visible until `Apply Saved Look` is pressed. The original file remains available for multiplayer. Single-player scenes without a campaign save path use memory-only profiles.
 - If two current crew members have the same stable fingerprint, automatic disk restoration is disabled for both rather than risking the wrong appearance.
 - This version is intentionally conservative: it avoids a permanent extra UI column.
@@ -53,11 +53,12 @@ Version 0.5.2 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It r
 - Fashion item sounds replace matching cosmetic real-equipment sounds while the look is active. The C# hook covers both `OnWearing <Sound>` status effects and item component `<sound type="...">` playback, can replace across those two sound sources when mods define the fashion and real gear differently, and keeps looping saved-fashion sounds alive even when the real equipment has no matching sound. Unconditional equipment ambience such as diving-suit loops can still be suppressed or replaced. Conditional and required-item status sounds are treated as gameplay alarms instead: they are never captured as fashion audio or added to the suppression set, so a real suit's low/empty-oxygen alarm starts and stops under Barotrauma's native oxygen, tank, and unequip rules. If alarm classification cannot be inspected on a future game build, the safe fallback is to allow the original sound.
 - Multiplayer uses a small server-side Lua sync helper. The server persists saved wardrobe item identifiers by client key, performs the server-authoritative removal, and broadcasts apply/clear events so other clients with LuaCs and C# scripting enabled can see the active look.
 - Apply requests carry stable visual identifiers so a look can be imported across campaigns and servers. The server resolves every identifier against its own `ItemPrefab` data, verifies the wearable/slot relationship, discards client item IDs and names, and broadcasts only canonical state.
-- Server persistence uses schema-v3 `ServerLooks.json` and stable `Client.AccountId` representations. Valid v2 files migrate with a `.v2.bak`; authoritative JSON no longer stores `hideHair`. Anonymous clients can sync during the current server session but are never persisted by display name.
+- Server persistence uses schema-v4 `ServerLooks.json` and stable `Client.AccountId` representations. Valid v2/v3 files migrate with versioned backups; authoritative JSON no longer stores `hideHair`. Anonymous clients can sync during the current server session but are never persisted by display name.
 - In multiplayer, `Clear Look` only deactivates the current visual look while keeping the saved look. `Forget Saved Look` also asks the server to delete the saved look for that client, so it will not be restored by later round-start or reconnect sync.
 - Saving a new outfit while an old multiplayer look is active clears the old server-side active look before storing the new saved identifiers, preventing other clients from keeping stale visuals.
-- Protocol 2 adds hello negotiation, operation IDs, revisions, acknowledgements, idempotent retry, and stale-command rejection. The original six message names remain as a v1 bridge in v0.5.2 and are scheduled for removal in v0.6.0.
-- Updated protocol-2 peers advertise attachment-visibility capability `0x01`. A complete four-byte optional look tail carries force-hide/show masks. Older v2 peers ignore the tail; when the server does not advertise support, the client keeps the detailed policy locally and sends only the safe legacy `hideHair` projection.
+- Protocol 3 retains hello negotiation, operation IDs, revisions, acknowledgements, idempotent retry, and stale-command rejection, and adds an optional `UInt32` color after each wire slot. The original six message names remain as a v1 bridge; mixed protocol versions fall back to v1 and therefore use prefab base colors.
+- Protocol-3 peers advertise attachment-visibility capability `0x01`. A complete four-byte optional look tail carries force-hide/show masks. When the server does not advertise support, the client keeps the detailed policy locally and sends only the safe legacy `hideHair` projection.
+- The renderer continues through Barotrauma's native `Item.GetSpriteColor()` path. Colored prefab fallbacks set `Item.SpriteColor` before capture; the mod does not recompute or double-multiply tint, limb alpha, or death color.
 - Server synchronization is event-driven: connect sends a targeted snapshot and accepted state changes broadcast once. There is no steady-state heartbeat or per-frame full-client scan; clients still hold early apply/clear messages briefly while a target character entity is spawning.
 
 ## Build and verification

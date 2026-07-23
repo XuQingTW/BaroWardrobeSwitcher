@@ -195,7 +195,13 @@ local canonicalApply = sendCommand({
     operationId = "op-canonical-apply",
     baseRevision = 1,
     kind = Core.COMMAND.Apply,
-    look = assert(Core.newLook(true, true, { Head = "helmet" }))
+    look = assert(Core.newLook(
+        true,
+        true,
+        { Head = "helmet" },
+        nil,
+        { Head = 0x7F0102FF }
+    ))
 })
 assert(canonicalApply.accepted and canonicalApply.revision == 2,
     "server must accept a valid wearable identifier for its declared slot")
@@ -203,8 +209,9 @@ assert(canonicalApply.accepted and canonicalApply.revision == 2,
 local canonicalStateMessage = Networking.sent[#Networking.sent - 1].message
 assert(canonicalStateMessage.name == Core.NET.V2_STATE, "apply must broadcast canonical state before its ack")
 local canonicalState = assert(Core.readState(canonicalStateMessage))
-assert(canonicalState.active and canonicalState.look.slots.Head == "helmet" and canonicalState.look.hideHair,
-    "server canonical state must retain only the stable identifier and user intent")
+assert(canonicalState.active and canonicalState.look.slots.Head == "helmet" and
+       canonicalState.look.colors.Head == 0x7F0102FF and canonicalState.look.hideHair,
+    "server canonical state must retain the stable identifier, packed color, and user intent")
 
 local clearAfterApply = sendCommand({
     clientSessionId = "client-session",
@@ -616,6 +623,18 @@ local stableClient = {
         TryUnwrap = function() return true, stableAccount end
     }
 }
+local authoritativeColor = 0x7F1122FF
+local stableSlots = {}
+local stableItem = {
+    Prefab = fakeHelmetPrefab,
+    SpriteColor = { PackedValue = authoritativeColor }
+}
+stableItem.Unequip = function() stableSlots[InvSlotType.Head] = nil end
+stableSlots[InvSlotType.Head] = stableItem
+stableClient.Character.Inventory = {
+    GetItemInLimbSlot = function(slot) return stableSlots[slot] end,
+    IsInLimbSlot = function(item, slot) return stableSlots[slot] == item end
+}
 connectedClients[3] = stableClient
 local stableHello = newBuffer()
 assert(Core.writeClientHello(stableHello, "stable-session"))
@@ -625,15 +644,25 @@ local stableSave = sendCommand({
     clientSessionId = "stable-session",
     operationId = "stable-save",
     baseRevision = 0,
-    kind = Core.COMMAND.Save
+    kind = Core.COMMAND.Save,
+    look = assert(Core.newLook(
+        true,
+        false,
+        { Head = "helmet" },
+        nil,
+        { Head = authoritativeColor + 1 }
+    ))
 }, stableClient)
 assert(stableSave.accepted and stableSave.revision == 1)
 local serverJsonPath = storageRoot .. "/ServerLooks.json"
 local persistedAfterSave = assert(memoryFiles[serverJsonPath])
-assert(persistedAfterSave:find('{"schemaVersion":3', 1, true) == 1)
+assert(persistedAfterSave:find('{"schemaVersion":4', 1, true) == 1)
 assert(persistedAfterSave:find('"attachmentVisibility"', 1, true) ~= nil and
        persistedAfterSave:find('"hideHair"', 1, true) == nil,
-    "server persistence v3 must store the complete visibility policy without authoritative hideHair")
+    "server persistence v4 must store the complete visibility policy without authoritative hideHair")
+assert(persistedAfterSave:find('"colors":{"Head":' .. tostring(authoritativeColor), 1, true) ~= nil and
+       persistedAfterSave:find(tostring(authoritativeColor + 1), 1, true) == nil,
+    "server Save must persist the equipped item's authoritative SpriteColor")
 assert(persistedAfterSave:find('"accountId":"stable-account"', 1, true) ~= nil,
     "stable AccountId must be the persistence key")
 assert(persistedAfterSave:find('"itemId"', 1, true) == nil and persistedAfterSave:find('"name"', 1, true) == nil,
@@ -720,10 +749,10 @@ memoryFiles[storageRoot .. "/ServerLooks.txt"] =
     "key=account:stale-account|active=true|Head=helmet,Stale Helmet\n"
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 local corruptGuard = assert(memoryFiles[serverJsonPath])
-assert(corruptGuard:find('"schemaVersion":3', 1, true) ~= nil and
+assert(corruptGuard:find('"schemaVersion":4', 1, true) ~= nil and
        corruptGuard:find('"records":[]', 1, true) ~= nil and
        corruptGuard:find("stale-account", 1, true) == nil,
-    "truncated persistence must be replaced with an empty durable v3 tombstone")
+    "truncated persistence must be replaced with an empty durable v4 tombstone")
 assert(memoryFiles[storageRoot .. "/ServerLooks.txt"] ~= nil,
     "a stale legacy source must not be imported in the same startup as corrupt-primary quarantine")
 local quarantinedJson = false
@@ -749,16 +778,18 @@ end
 
 memoryFiles[storageRoot .. "/ServerLooks.txt"] = nil
 memoryFiles[serverJsonPath] =
-    '{"schemaVersion":3,"records":[{"accountId":"missing-visibility-account",' ..
-    '"revision":1,"active":false,"sessionKey":null,"look":{"schemaVersion":2,' ..
-    '"captured":true,"slots":{"Head":"helmet"}}}],"pendingLegacySteamRecords":[],' ..
+    '{"schemaVersion":4,"records":[{"accountId":"missing-colors-account",' ..
+    '"revision":1,"active":false,"sessionKey":null,"look":{"schemaVersion":3,' ..
+    '"captured":true,"attachmentVisibility":{"Hair":"auto","Beard":"auto",' ..
+    '"Moustache":"auto","FaceAttachment":"auto"},"slots":{"Head":"helmet"}}}],' ..
+    '"pendingLegacySteamRecords":[],' ..
     '"migratedLegacySteamIds":[]}'
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 assert(memoryFiles[serverJsonPath]:find('"records":[]', 1, true) ~= nil and
-       memoryFiles[serverJsonPath]:find("missing-visibility-account", 1, true) == nil,
-    "server persistence v3 without attachmentVisibility must be quarantined")
-assert(quarantinedPersistenceContains("missing-visibility-account"),
-    "missing v3 attachmentVisibility did not preserve quarantine evidence")
+       memoryFiles[serverJsonPath]:find("missing-colors-account", 1, true) == nil,
+    "server persistence v4 without colors must be quarantined")
+assert(quarantinedPersistenceContains("missing-colors-account"),
+    "missing v4 colors did not preserve quarantine evidence")
 
 memoryFiles[serverJsonPath] =
     '{"schemaVersion":2,"records":[{"accountId":"missing-hidehair-account",' ..
@@ -826,14 +857,28 @@ assert(afterRestartResponse.revision == 1,
 
 memoryFiles[storageRoot .. "/ServerLooks.txt"] = nil
 memoryFiles[serverJsonPath] =
+    '{"schemaVersion":3,"records":[{"accountId":"legacy-v3-account","revision":1,' ..
+    '"active":false,"sessionKey":null,"look":{"schemaVersion":2,"captured":true,' ..
+    '"attachmentVisibility":{"Hair":"auto","Beard":"auto","Moustache":"auto",' ..
+    '"FaceAttachment":"auto"},"slots":{"Head":"helmet"}}}],' ..
+    '"pendingLegacySteamRecords":[],"migratedLegacySteamIds":[]}'
+loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+assert(memoryFiles[serverJsonPath]:find('"schemaVersion":4', 1, true) ~= nil and
+       memoryFiles[serverJsonPath]:find('"colors":{}', 1, true) ~= nil,
+    "valid server persistence v3 must migrate to v4 with missing colors")
+assert(memoryFiles[serverJsonPath .. ".v3.bak"] ~= nil,
+    "server persistence v3 migration must preserve a .v3.bak source")
+
+memoryFiles[storageRoot .. "/ServerLooks.txt"] = nil
+memoryFiles[serverJsonPath] =
     '{"schemaVersion":2,"records":[{"accountId":"max-account","revision":4294967295,' ..
     '"active":false,"sessionKey":null,"look":{"schemaVersion":2,"captured":true,' ..
     '"hideHair":false,"slots":{"Head":"helmet"}}}],"pendingLegacySteamRecords":[],' ..
     '"migratedLegacySteamIds":[]}'
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
-assert(memoryFiles[serverJsonPath]:find('"schemaVersion":3', 1, true) ~= nil and
+assert(memoryFiles[serverJsonPath]:find('"schemaVersion":4', 1, true) ~= nil and
        memoryFiles[serverJsonPath]:find('"attachmentVisibility"', 1, true) ~= nil,
-    "valid server persistence v2 must migrate to v3")
+    "valid server persistence v2 must migrate to v4")
 assert(memoryFiles[serverJsonPath .. ".v2.bak"] ~= nil,
     "server persistence v2 migration must preserve a .v2.bak source")
 local maxAccount = { StringRepresentation = "max-account" }

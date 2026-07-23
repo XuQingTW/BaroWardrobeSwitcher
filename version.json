@@ -1,8 +1,8 @@
 {
-  "modVersion": "0.5.2",
-  "protocolVersion": 2,
-  "lookSchemaVersion": 2,
-  "persistenceVersion": 3,
+  "modVersion": "0.5.3",
+  "protocolVersion": 3,
+  "lookSchemaVersion": 3,
+  "persistenceVersion": 4,
   "barotraumaGameVersion": "1.13.4.0",
   "declaredGameVersion": "1.13.4.0",
   "compatibilityStatus": "verified",
