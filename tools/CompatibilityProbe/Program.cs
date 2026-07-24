@@ -216,6 +216,7 @@ Type hull = RequireType("Barotrauma.Hull");
 Type itemComponent = RequireType("Barotrauma.Items.Components.ItemComponent");
 Type actionType = RequireType("Barotrauma.ActionType");
 Type networkClient = RequireType("Barotrauma.Networking.Client");
+Type guiComponent = RequireType("Barotrauma.GUIComponent");
 string monoGameFile = new[]
 {
     "MonoGame.Framework.Windows.NetStandard.dll",
@@ -242,6 +243,8 @@ RequirePublicProperty("CharacterInfo.SpeciesName", characterInfo, "SpeciesName")
 RequireAnyPublicField("CharacterInfo.HumanPrefabIds", characterInfo, "HumanPrefabIds");
 RequirePublicProperty("Entity.Removed", entity, "Removed", typeof(bool));
 RequireMethod("Entity.FreeID()", entity, "FreeID", Array.Empty<Type>(), typeof(void));
+RequireMethod("GUIComponent.RemoveFromGUIUpdateList(bool)", guiComponent, "RemoveFromGUIUpdateList",
+    new[] { typeof(bool) }, typeof(void));
 
 RequireMethod("Limb.Draw(SpriteBatch,Camera,Color?,bool)", limb, "Draw",
     new[] { spriteBatch, camera, typeof(Nullable<>).MakeGenericType(color), typeof(bool) }, typeof(void));

@@ -77,7 +77,9 @@ end
 local textXml = assert(textFile, "could not load Texts.xml"):read("*a")
 textFile:close()
 for tag, value in textXml:gmatch("<([^>]+)>([^<]*)</[^>]+>") do
-    if tag:find("barowardrobeswitcher.", 1, true) == 1 then localizedText[tag] = value end
+    if tag:find("barowardrobeswitcher.", 1, true) == 1 then
+        localizedText[tag] = value:gsub("&#10;", "\n")
+    end
 end
 TextManager = {
     ContainsTag = function(tag) return localizedText[tostring(tag)] ~= nil end,
@@ -322,6 +324,8 @@ Networking = {
     end
 }
 Game = { IsMultiplayer = false }
+local testTime = 0
+Timer = { GetTime = function() return testTime end }
 Character = { Controlled = nil, CharacterList = {} }
 ChatMessageType = {
     ServerMessageBoxInGame = "ServerMessageBoxInGame",
@@ -339,19 +343,42 @@ PlayerInput = {
 
 local buttons = {}
 local removedWidgets = 0
-local function widget()
-    return {
+local liveOverlayRoots = 0
+local visibleTexts = {}
+local function widget(onRemove)
+    local removed = false
+    local result = {
         RectTransform = {},
-        Remove = function() removedWidgets = removedWidgets + 1 end,
         AddToGUIUpdateList = function() end
     }
+    if onRemove ~= nil then
+        result.RemoveFromGUIUpdateList = function(alsoChildren)
+            assert(alsoChildren == true, "overlay removal must include child controls")
+            if removed then return end
+            removed = true
+            removedWidgets = removedWidgets + 1
+            onRemove()
+        end
+    end
+    return result
 end
 GUI = {
     Anchor = { Center = "Center" },
     RectTransform = function() return {} end,
-    Frame = function() return widget() end,
+    Frame = function(_, style)
+        if style == nil then
+            visibleTexts = {}
+            liveOverlayRoots = liveOverlayRoots + 1
+            return widget(function()
+                liveOverlayRoots = liveOverlayRoots - 1
+                visibleTexts = {}
+            end)
+        end
+        return widget()
+    end,
     LayoutGroup = function() return widget() end,
-    TextBlock = function()
+    TextBlock = function(_, text)
+        visibleTexts[#visibleTexts + 1] = tostring(text)
         return widget()
     end,
     Button = function(_, text)
@@ -392,6 +419,13 @@ profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("No Sta
 assert(dofile(clientPath) == nil)
 assert(loadCalls == 0, "single-player profiles should load only after a campaign character exists")
 
+local function hasVisibleText(expected)
+    for _, text in ipairs(visibleTexts) do
+        if text == expected then return true end
+    end
+    return false
+end
+
 local player = makeCharacter(42, 100, "Player Tester", false)
 local npc = makeCharacter(43, 200, "NPC Tester", true)
 local existingNpc = makeCharacter(44, 300, "Existing NPC", true)
@@ -400,6 +434,7 @@ Character.Controlled = player
 openPanel = true
 assert(type(hooks.think) == "function", "client think hook was not registered")
 hooks.think()
+assert(liveOverlayRoots == 1, "the initial wardrobe panel did not own exactly one overlay root")
 assert(loadCalls >= 2, "single-player crew profiles were not loaded during the one-shot crew scan")
 local importedPlayerProfileKey =
     profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Player Tester"))
@@ -408,6 +443,34 @@ assert(profiles[importedPlayerProfileKey] ~= nil and
     "the legacy client look was not imported into the first controlled profile")
 assert(activationCount == 0 and prefabCaptureCount == 0,
     "an imported legacy look activated before the player manually applied it")
+
+local tutorialText = assert(localizedText["barowardrobeswitcher.panel.tutorial"])
+local _, tutorialLineBreaks = tutorialText:gsub("\n", "")
+assert(tutorialLineBreaks == 4, "the new-player guide must render as five short lines")
+assert(hasVisibleText(tutorialText), "the new-player guide was not expanded by default")
+local hideTutorialButton = buttons["Hide New Player Guide"]
+assert(hideTutorialButton ~= nil and type(hideTutorialButton.OnClicked) == "function",
+    "the expanded guide did not expose its collapse control")
+local removesBeforeHideTutorial = removedWidgets
+hideTutorialButton.OnClicked()
+assert(removedWidgets == removesBeforeHideTutorial and hasVisibleText(tutorialText),
+    "collapsing the guide rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeHideTutorial + 1 and liveOverlayRoots == 1,
+    "collapsing the guide did not replace exactly one overlay on the next tick")
+assert(not hasVisibleText(tutorialText), "the collapsed guide text remained visible")
+
+local showTutorialButton = buttons["Show New Player Guide"]
+assert(showTutorialButton ~= nil and type(showTutorialButton.OnClicked) == "function",
+    "the collapsed guide did not expose its expand control")
+local removesBeforeShowTutorial = removedWidgets
+showTutorialButton.OnClicked()
+assert(removedWidgets == removesBeforeShowTutorial and not hasVisibleText(tutorialText),
+    "expanding the guide rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeShowTutorial + 1 and liveOverlayRoots == 1,
+    "expanding the guide did not replace exactly one overlay on the next tick")
+assert(hasVisibleText(tutorialText), "the expanded guide text did not return")
 
 assert(buttons["Appearance Layers..."] == nil and buttons["Forget Saved Look"] == nil,
     "additional wardrobe actions should be hidden in the default compact panel")
@@ -421,6 +484,8 @@ assert(removedWidgets == removesBeforeMoreOptions,
 hooks.think()
 assert(removedWidgets == removesBeforeMoreOptions + 1,
     "expanding More Options did not replace the previous overlay on the next tick")
+assert(liveOverlayRoots == 1, "expanding More Options left an old overlay root alive")
+assert(hasVisibleText(tutorialText), "More Options unexpectedly changed the guide state")
 local lessOptionsButton = buttons["Hide Additional Options"]
 assert(lessOptionsButton ~= nil and type(lessOptionsButton.OnClicked) == "function",
     "the expanded panel did not expose its collapse control")
@@ -431,6 +496,8 @@ assert(removedWidgets == removesBeforeLessOptions,
 hooks.think()
 assert(removedWidgets == removesBeforeLessOptions + 1,
     "collapsing More Options did not replace the expanded overlay on the next tick")
+assert(liveOverlayRoots == 1, "collapsing More Options left an old overlay root alive")
+assert(hasVisibleText(tutorialText), "collapsing More Options unexpectedly changed the guide state")
 buttons["More Options..."].OnClicked()
 hooks.think()
 
@@ -446,6 +513,7 @@ assert(removedWidgets == removesBeforeAppearanceLayers,
 hooks.think()
 assert(removedWidgets == removesBeforeAppearanceLayers + 1,
     "Appearance Layers did not replace the main overlay on the next tick")
+assert(liveOverlayRoots == 1, "Appearance Layers left the main overlay root alive")
 local hideStandardHairButton = buttons["Hide Standard Hair"]
 assert(hideStandardHairButton ~= nil and
     type(hideStandardHairButton.OnClicked) == "function",
@@ -761,6 +829,120 @@ assert(buttons["Save Current Outfit"].Enabled ~= false,
 assert(buttons["Apply Saved Look"].Enabled ~= false,
     "Apply stayed disabled after multiplayer Save completed")
 
+-- Apply remains serialized after its ACK until the authoritative state arrives.
+-- If that state is lost, the retained idempotent command must time out and
+-- release the controls instead of leaving ApplyPending forever.
+buttons["Apply Saved Look"].OnClicked()
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled == false,
+    "multiplayer controls were not disabled while Apply awaited server state")
+local timedApplyMessage = networkSent[#networkSent]
+assert(timedApplyMessage ~= nil and timedApplyMessage.name == WardrobeCore.NET.V2_COMMAND)
+local timedApply = assert(WardrobeCore.readCommand(timedApplyMessage))
+assert(timedApply.kind == WardrobeCore.COMMAND.Apply)
+local timedApplyAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(timedApplyAck, {
+    operationId = timedApply.operationId,
+    accepted = true,
+    revision = 2,
+    reason = ""
+}))
+timedApplyAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](timedApplyAck)
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled == false,
+    "accepted Apply unlocked before its authoritative state arrived")
+for _ = 1, 5 do
+    testTime = testTime + 1
+    hooks.think()
+end
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "Apply ACK without state did not time out and release the controls")
+
+-- A delayed state must complete the retained command, and the server's normal
+-- state-before-ACK ordering must not create a new false wait afterward.
+buttons["Apply Saved Look"].OnClicked()
+hooks.think()
+local delayedStateCommand = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+local delayedStateAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(delayedStateAck, {
+    operationId = delayedStateCommand.operationId,
+    accepted = true,
+    revision = 3,
+    reason = ""
+}))
+delayedStateAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](delayedStateAck)
+local delayedState = newNetworkBuffer(WardrobeCore.NET.V2_STATE)
+assert(WardrobeCore.writeState(delayedState, {
+    revision = 3,
+    characterId = Character.Controlled.ID,
+    active = true,
+    look = delayedStateCommand.look
+}))
+delayedState.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_STATE](delayedState)
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "authoritative Apply state did not release the controls")
+local sentAfterDelayedState = #networkSent
+testTime = testTime + 6
+hooks.think()
+assert(#networkSent == sentAfterDelayedState,
+    "completed Apply kept retrying after its delayed state arrived")
+
+buttons["Apply Saved Look"].OnClicked()
+hooks.think()
+local stateFirstCommand = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+local stateFirst = newNetworkBuffer(WardrobeCore.NET.V2_STATE)
+assert(WardrobeCore.writeState(stateFirst, {
+    revision = 4,
+    characterId = Character.Controlled.ID,
+    active = true,
+    look = stateFirstCommand.look
+}))
+stateFirst.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_STATE](stateFirst)
+local stateFirstAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(stateFirstAck, {
+    operationId = stateFirstCommand.operationId,
+    accepted = true,
+    revision = 4,
+    reason = ""
+}))
+stateFirstAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](stateFirstAck)
+hooks.think()
+local sentAfterStateFirst = #networkSent
+testTime = testTime + 6
+hooks.think()
+assert(#networkSent == sentAfterStateFirst,
+    "state-before-ACK Apply was incorrectly retained for retry")
+
+-- A matching but stale ACK must not discard the only timeout owner. Simulate
+-- the communication-control mod blocking every retry and verify bounded exit.
+buttons["Apply Saved Look"].OnClicked()
+hooks.think()
+local staleApplyCommand = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+local staleApplyAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(staleApplyAck, {
+    operationId = staleApplyCommand.operationId,
+    accepted = true,
+    revision = 3,
+    reason = ""
+}))
+staleApplyAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](staleApplyAck)
+local workingSend = Networking.Send
+Networking.Send = function() error("simulated blocked retry") end
+for _ = 1, 5 do
+    testTime = testTime + 1
+    hooks.think()
+end
+Networking.Send = workingSend
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "a stale Apply ACK discarded its timeout owner and left the controls disabled")
+
 local closeButton = buttons["Close"]
 assert(closeButton ~= nil and type(closeButton.OnClicked) == "function",
     "Close callback was not installed")
@@ -771,6 +953,7 @@ assert(removedWidgets == removesBeforeClose,
 hooks.think()
 assert(removedWidgets == removesBeforeClose + 1,
     "Close did not release the overlay on the next tick")
+assert(liveOverlayRoots == 0, "Close left an overlay root alive")
 
 -- A round snapshot can arrive long before a slow client creates the remote
 -- Character. Revisioned v2 state is authoritative for the whole round and must
@@ -883,17 +1066,21 @@ Character.CharacterList = { v1Character }
 gameSessionDataPath.SavePath = "p2p-session-a.save"
 assert(dofile(clientPath) == nil)
 hooks.roundStart()
-local deferredV1 = newNetworkBuffer(WardrobeCore.NET.V1_LOOK_APPLY)
-deferredV1.WriteUInt16(v1Character.ID)
-for index = 1, 6 do
-    deferredV1.WriteBoolean(index == 1)
-    if index == 1 then
-        deferredV1.WriteUInt16(0)
-        deferredV1.WriteString("helmet")
-        deferredV1.WriteString("Helmet")
+local function legacyApplyFrame(characterId)
+    local message = newNetworkBuffer(WardrobeCore.NET.V1_LOOK_APPLY)
+    message.WriteUInt16(characterId)
+    for index = 1, 6 do
+        message.WriteBoolean(index == 1)
+        if index == 1 then
+            message.WriteUInt16(0)
+            message.WriteString("helmet")
+            message.WriteString("Helmet")
+        end
     end
+    message.FinalizeForTransport()
+    return message
 end
-deferredV1.FinalizeForTransport()
+local deferredV1 = legacyApplyFrame(v1Character.ID)
 local beforeDeferredV1 = activationCount
 networkHandlers[WardrobeCore.NET.V1_LOOK_APPLY](deferredV1)
 assert(activationCount == beforeDeferredV1,
@@ -908,6 +1095,29 @@ assert(buttons["Save Current Outfit"].Enabled ~= false and
        buttons["Apply Saved Look"].Enabled ~= false and
        buttons["Clear Look"].Enabled ~= false,
     "deferred round-start look left F8 actions unbound")
+
+-- V1 has no ACK, so a missing LOOK_APPLY response needs its own deadline.
+buttons["Apply Saved Look"].OnClicked()
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled == false,
+    "v1 Apply did not enter the expected pending state")
+testTime = testTime + 5
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "a lost v1 LOOK_APPLY response left the wardrobe controls disabled")
+
+-- A normal legacy response clears that deadline; crossing it later must not
+-- turn the successfully rendered look into a timeout.
+buttons["Apply Saved Look"].OnClicked()
+hooks.think()
+networkHandlers[WardrobeCore.NET.V1_LOOK_APPLY](legacyApplyFrame(v1Character.ID))
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "a successful v1 LOOK_APPLY did not release the wardrobe controls")
+testTime = testTime + 6
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "a completed v1 Apply was incorrectly timed out afterward")
 openPanel = true
 hooks.think()
 

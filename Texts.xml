@@ -19,6 +19,7 @@
   <barowardrobeswitcher.panel.debug_log_hint>Diagnostics are written to WardrobeClient.log without filling the game console.</barowardrobeswitcher.panel.debug_log_hint>
   <barowardrobeswitcher.panel.log_file>Wardrobe log</barowardrobeswitcher.panel.log_file>
   <barowardrobeswitcher.panel.saved_file>Saved-look file</barowardrobeswitcher.panel.saved_file>
+  <barowardrobeswitcher.panel.tutorial>1. Save: Wear the look, then choose “Save Current Outfit.”&#10;   Saved outfit items are unequipped.&#10;2. Apply: Equip your stat gear, then apply the saved look.&#10;3. “Clear” stops the look; “Forget” deletes its save.&#10;Press F8 to close this panel.</barowardrobeswitcher.panel.tutorial>
   <barowardrobeswitcher.button.save>Save Current Outfit</barowardrobeswitcher.button.save>
   <barowardrobeswitcher.button.apply>Apply Saved Look</barowardrobeswitcher.button.apply>
   <barowardrobeswitcher.button.clear>Clear Look</barowardrobeswitcher.button.clear>
@@ -34,6 +35,8 @@
   <barowardrobeswitcher.button.dump_debug>Dump Debug Log</barowardrobeswitcher.button.dump_debug>
   <barowardrobeswitcher.button.more_options>More Options...</barowardrobeswitcher.button.more_options>
   <barowardrobeswitcher.button.less_options>Hide Additional Options</barowardrobeswitcher.button.less_options>
+  <barowardrobeswitcher.button.show_tutorial>Show New Player Guide</barowardrobeswitcher.button.show_tutorial>
+  <barowardrobeswitcher.button.hide_tutorial>Hide New Player Guide</barowardrobeswitcher.button.hide_tutorial>
   <barowardrobeswitcher.button.close>Close</barowardrobeswitcher.button.close>
   <barowardrobeswitcher.slot.head>Head</barowardrobeswitcher.slot.head>
   <barowardrobeswitcher.slot.headset>Headset</barowardrobeswitcher.slot.headset>

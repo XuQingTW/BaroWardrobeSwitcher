@@ -19,6 +19,7 @@
   <barowardrobeswitcher.panel.debug_log_hint>诊断会写入 WardrobeClient.log，不再刷满游戏控制台。</barowardrobeswitcher.panel.debug_log_hint>
   <barowardrobeswitcher.panel.log_file>衣柜日志</barowardrobeswitcher.panel.log_file>
   <barowardrobeswitcher.panel.saved_file>保存外观文件</barowardrobeswitcher.panel.saved_file>
+  <barowardrobeswitcher.panel.tutorial>1. 保存：穿上想要的造型，再点击“保存当前服装”。&#10;   保存后，服装会卸下。&#10;2. 套用：穿回属性装备，再套用已保存外观。&#10;3. “清除”只停止显示；“忘记”才会删除存档。&#10;按 F8 可关闭面板。</barowardrobeswitcher.panel.tutorial>
   <barowardrobeswitcher.button.save>保存当前服装</barowardrobeswitcher.button.save>
   <barowardrobeswitcher.button.apply>套用已保存外观</barowardrobeswitcher.button.apply>
   <barowardrobeswitcher.button.clear>清除外观</barowardrobeswitcher.button.clear>
@@ -34,6 +35,8 @@
   <barowardrobeswitcher.button.dump_debug>输出诊断到日志</barowardrobeswitcher.button.dump_debug>
   <barowardrobeswitcher.button.more_options>更多选项…</barowardrobeswitcher.button.more_options>
   <barowardrobeswitcher.button.less_options>收起更多选项</barowardrobeswitcher.button.less_options>
+  <barowardrobeswitcher.button.show_tutorial>展开新手教程</barowardrobeswitcher.button.show_tutorial>
+  <barowardrobeswitcher.button.hide_tutorial>收起新手教程</barowardrobeswitcher.button.hide_tutorial>
   <barowardrobeswitcher.button.close>关闭</barowardrobeswitcher.button.close>
   <barowardrobeswitcher.slot.head>头部</barowardrobeswitcher.slot.head>
   <barowardrobeswitcher.slot.headset>耳机</barowardrobeswitcher.slot.headset>

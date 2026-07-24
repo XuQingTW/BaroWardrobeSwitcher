@@ -150,6 +150,7 @@ local windowNeedsRefresh = false
 local overlayRoot = nil
 local attachmentPanelOpen = false
 local advancedPanelOpen = false
+local tutorialExpanded = true
 local lastCharacter = nil
 local buildWindow
 local buildAttachmentVisibilityWindow
@@ -195,6 +196,7 @@ local visibilitySyncPendingNegotiation = false
 local protocolHelloSentAt = nil
 local protocolCommandQueue = {}
 local inFlightV2Command = nil
+local pendingLegacyApply = nil
 local protocolOperationCounter = 0
 local reducerCharacterKey = nil
 local reducerHasUnboundLook = false
@@ -203,7 +205,7 @@ local clientEffectAdapters = {}
 
 local function protocolClock()
     local ok, value = pcall(function()
-        if Timer ~= nil and Timer.GetTime ~= nil then return Timer.GetTime end
+        if Timer ~= nil and Timer.GetTime ~= nil then return Timer.GetTime() end
         return nil
     end)
     if ok and tonumber(value) ~= nil then return tonumber(value) end
@@ -1444,7 +1446,17 @@ end
 
 function Helpers.resetOverlay()
     if overlayRoot ~= nil then
-        pcall(function() overlayRoot.Remove() end)
+        local oldRoot = overlayRoot
+        local hidden, hideReason = pcall(function() oldRoot.Visible = false end)
+        if not hidden then
+            Helpers.debugLog("Failed to hide the previous wardrobe overlay: " .. tostring(hideReason))
+        end
+        local removed, removeReason = pcall(function()
+            oldRoot.RemoveFromGUIUpdateList(true)
+        end)
+        if not removed then
+            Helpers.debugLog("Failed to remove the previous wardrobe overlay: " .. tostring(removeReason))
+        end
     end
     overlayRoot = nil
     window = nil
@@ -2186,6 +2198,10 @@ function Helpers.sendNextProtocolCommand()
             local command = table.remove(protocolCommandQueue, 1)
             local sent = Helpers.sendLegacyCommand(command)
             sentAny = sent or sentAny
+            if sent and command.reducerOwned == true and command.kind == COMMAND_APPLY then
+                command.sentAt = protocolClock()
+                pendingLegacyApply = command
+            end
             if command.reducerOwned == true and command.feedbackAwaitingFallback == true then
                 dispatchReducer({
                     type = sent and "CommandSendSucceeded" or "CommandSendFailed",
@@ -2215,6 +2231,21 @@ function Helpers.sendNextProtocolCommand()
             look = command.look
         })
     end
+    return true
+end
+
+-- An accepted Apply is not complete until its authoritative state renders.
+-- Keep the existing idempotent retry alive so a lost state packet is resent
+-- and the normal command timeout can release the UI instead of leaving it busy.
+function Helpers.completeAcknowledgedApplyState(revision)
+    local command = inFlightV2Command
+    if command == nil or command.kind ~= COMMAND_APPLY or command.awaitingState ~= true then return false end
+    if tonumber(revision) == nil or tonumber(revision) < (tonumber(command.acknowledgedRevision) or 0) then
+        return false
+    end
+    if protocolCommandQueue[1] == command then table.remove(protocolCommandQueue, 1) end
+    inFlightV2Command = nil
+    Helpers.sendNextProtocolCommand()
     return true
 end
 
@@ -2349,6 +2380,25 @@ end
 
 function Helpers.processProtocolNegotiation()
     if not Helpers.isMultiplayerClient() or Networking == nil then return end
+
+    -- Legacy Apply has no ACK. Bound the wait for its LOOK_APPLY response so a
+    -- filtered or lost packet cannot leave every wardrobe action disabled.
+    if pendingLegacyApply ~= nil then
+        if reducerState == nil or
+            reducerState.pendingOperationId ~= pendingLegacyApply.operationId then
+            pendingLegacyApply = nil
+        elseif protocolClock() - (pendingLegacyApply.sentAt or 0) >= 5 then
+            dispatchReducer({
+                type = "CommandTimedOut",
+                operationId = pendingLegacyApply.operationId,
+                reason = "v1 wardrobe apply response timed out"
+            })
+            Helpers.debugLog("v1 wardrobe apply timed out while waiting for the server look response: " ..
+                tostring(pendingLegacyApply.operationId))
+            pendingLegacyApply = nil
+        end
+    end
+
     if protocolMode == "probing" then
         Helpers.sendV2Hello()
         if protocolHelloSentAt ~= nil and
@@ -2364,10 +2414,11 @@ function Helpers.processProtocolNegotiation()
         local elapsed = protocolClock() - (inFlightV2Command.sentAt or 0)
         if elapsed >= 1 then
             if (inFlightV2Command.attempts or 1) < 5 then
-                if Helpers.writeAndSendV2Command(inFlightV2Command, inFlightV2Command.baseRevision or 0) then
-                    inFlightV2Command.attempts = (inFlightV2Command.attempts or 1) + 1
-                    inFlightV2Command.sentAt = protocolClock()
-                end
+                -- Count failed resend attempts as well; otherwise a broken
+                -- transport can retry forever without reaching the timeout.
+                inFlightV2Command.attempts = (inFlightV2Command.attempts or 1) + 1
+                inFlightV2Command.sentAt = protocolClock()
+                Helpers.writeAndSendV2Command(inFlightV2Command, inFlightV2Command.baseRevision or 0)
             else
                 dispatchReducer({
                     type = "CommandTimedOut",
@@ -3620,10 +3671,14 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             effectsContain(effects, "IgnoredSupersededState") then
             return false
         end
-        if effectsContain(effects, "IgnoredDuplicateState") then return true end
+        if effectsContain(effects, "IgnoredDuplicateState") then
+            Helpers.completeAcknowledgedApplyState(protocolRevision)
+            return true
+        end
         local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Active then
             Helpers.rememberNetworkLookApplied(character, networkLook, protocolLook)
+            Helpers.completeAcknowledgedApplyState(protocolRevision)
             return true
         end
         return false
@@ -3780,27 +3835,48 @@ if Networking ~= nil then
             end
             if protocolMode ~= "v3" then Helpers.selectV2Protocol(0) end
 
-            local effects = dispatchReducer({
-                type = "AckReceived",
-                operationId = ack.operationId,
-                accepted = ack.accepted,
-                revision = ack.revision,
-                reason = ack.reason
-            })
+            local matchingCommand = inFlightV2Command ~= nil and
+                inFlightV2Command.operationId == ack.operationId and inFlightV2Command or nil
+            local currentRevision = reducerState ~= nil and tonumber(reducerState.revision) or 0
+            local stateAlreadyApplied = reducerState ~= nil and
+                reducerState.phase == Core.PHASE.Active and reducerState.active == true and
+                currentRevision >= ack.revision
+            local awaitApplyState = matchingCommand ~= nil and
+                matchingCommand.kind == COMMAND_APPLY and ack.accepted == true and
+                ack.revision >= currentRevision and not stateAlreadyApplied
+            local effects
+            if awaitApplyState then
+                effects = dispatchReducer({ type = "RevisionObserved", revision = ack.revision })
+                matchingCommand.awaitingState = true
+                matchingCommand.acknowledgedRevision = ack.revision
+            else
+                effects = dispatchReducer({
+                    type = "AckReceived",
+                    operationId = ack.operationId,
+                    accepted = ack.accepted,
+                    revision = ack.revision,
+                    reason = ack.reason
+                })
+            end
             if effectsContain(effects, "IgnoredStaleAck") then
                 Helpers.debugLog("Ignored stale v2 acknowledgement for " .. tostring(ack.operationId) .. ".")
             end
 
-            if inFlightV2Command ~= nil and inFlightV2Command.operationId == ack.operationId then
+            if matchingCommand ~= nil then
                 if not ack.accepted then
                     lastOperation = "Server rejected wardrobe command: " .. tostring(ack.reason or "unknown reason")
                     Helpers.debugLog(lastOperation)
                 end
-                if protocolCommandQueue[1] ~= nil and protocolCommandQueue[1].operationId == ack.operationId then
-                    table.remove(protocolCommandQueue, 1)
+                local ignoredWhileStillPending =
+                    (effectsContain(effects, "IgnoredStaleAck") or
+                     effectsContain(effects, "IgnoredForeignAck")) and
+                    reducerState ~= nil and
+                    reducerState.pendingOperationId == matchingCommand.operationId
+                if not awaitApplyState and not ignoredWhileStillPending then
+                    if protocolCommandQueue[1] == matchingCommand then table.remove(protocolCommandQueue, 1) end
+                    inFlightV2Command = nil
+                    Helpers.sendNextProtocolCommand()
                 end
-                inFlightV2Command = nil
-                Helpers.sendNextProtocolCommand()
             end
         end)
 
@@ -3982,7 +4058,11 @@ function Helpers.addButton(parent, text, action, refresh, enabled)
         pcall(function() button.Enabled = false end)
     end
     button.OnClicked = function()
-        action()
+        local ok, reason = pcall(action)
+        if not ok then
+            lastOperation = "Wardrobe action failed; see WardrobeClient.log."
+            Helpers.debugLog("Wardrobe button action failed: " .. tostring(reason))
+        end
         if refresh ~= false then
             -- Rebuilding here would remove the button that Barotrauma is still
             -- dispatching. The think hook consumes this request next frame.
@@ -4096,7 +4176,8 @@ buildWindow = function()
     end
 
     local panelWidth = advancedPanelOpen and 0.48 or 0.44
-    local panelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.72) or 0.52
+    local basePanelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.72) or 0.52
+    local panelHeight = math.min(0.98, basePanelHeight + 0.04 + (tutorialExpanded and 0.20 or 0))
     local frame = GUI.Frame(
         GUI.RectTransform(Vector2(panelWidth, panelHeight), parent, GUI.Anchor.Center),
         "GUIFrame"
@@ -4113,6 +4194,14 @@ buildWindow = function()
     local view = Helpers.clientViewModelSnapshot(character, overrideState)
 
     Helpers.addText(list, tr("panel.title"))
+    Helpers.addButton(
+        list,
+        tutorialExpanded and tr("button.hide_tutorial") or tr("button.show_tutorial"),
+        function() tutorialExpanded = not tutorialExpanded end
+    )
+    if tutorialExpanded then
+        Helpers.addText(list, tr("panel.tutorial"))
+    end
     if view.singlePlayer then
         Helpers.addText(list, tr("panel.profile") .. ": " .. tostring(view.profileLabel))
     end
@@ -4310,6 +4399,7 @@ function Helpers.resetSavedLookForNewSession()
     protocolHelloSentAt = nil
     protocolCommandQueue = {}
     inFlightV2Command = nil
+    pendingLegacyApply = nil
     protocolOperationCounter = 0
     clientSessionId = createClientSessionId()
     reducerCharacterKey = nil
@@ -4456,6 +4546,9 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     pendingRoundStartProtocolLook = nil
     pendingNetworkAppliesByCharacterId = {}
     pendingNetworkClearsByCharacterId = {}
+    protocolCommandQueue = {}
+    inFlightV2Command = nil
+    pendingLegacyApply = nil
     pendingSinglePlayerRestores = {}
     singlePlayerFingerprintOwners = {}
     singlePlayerCharactersByRuntimeKey = {}

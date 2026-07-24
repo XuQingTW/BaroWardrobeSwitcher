@@ -1323,16 +1323,19 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "AckReceived" then
+        -- Acknowledgements are scoped to one pending operation. A delayed or
+        -- unrelated ACK must not advance the local revision and make the
+        -- matching server reply look stale.
+        if state.pendingOperationId == nil or event.operationId ~= state.pendingOperationId then
+            effects[#effects + 1] = effect("IgnoredForeignAck", { operationId = event.operationId })
+            return state, effects
+        end
         local revision = tonumber(event.revision) or -1
         if revision < state.revision then
             effects[#effects + 1] = effect("IgnoredStaleAck", { revision = revision })
             return state, effects
         end
         state.revision = revision
-        if state.pendingOperationId == nil or event.operationId ~= state.pendingOperationId then
-            effects[#effects + 1] = effect("IgnoredForeignAck", { operationId = event.operationId })
-            return state, effects
-        end
         if event.accepted ~= true then
             if state.pendingKind == Core.COMMAND.Save or
                 state.pendingKind == Core.COMMAND.Clear or

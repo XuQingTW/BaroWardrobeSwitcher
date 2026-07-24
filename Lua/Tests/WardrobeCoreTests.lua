@@ -329,6 +329,26 @@ awaitingAck = Core.reduce(awaitingAck, {
     kind = Core.COMMAND.Apply,
     look = look
 })
+local foreignAckState, foreignAckEffects = Core.reduce(awaitingAck, {
+    type = "AckReceived",
+    operationId = "another-session:999",
+    accepted = true,
+    revision = 999
+})
+assertEqual(foreignAckEffects[1].type, "IgnoredForeignAck")
+assertEqual(foreignAckState.revision, 8,
+    "a foreign acknowledgement must not advance the local revision")
+assertEqual(foreignAckState.pendingOperationId, "session-1:9")
+local matchingAfterForeign = Core.reduce(foreignAckState, {
+    type = "AckReceived",
+    operationId = "session-1:9",
+    accepted = true,
+    revision = 9
+})
+assertEqual(matchingAfterForeign.revision, 9,
+    "the matching acknowledgement was poisoned by a foreign revision")
+assertEqual(matchingAfterForeign.pendingOperationId, nil)
+
 local staleAckState, staleAckEffects = Core.reduce(awaitingAck, {
     type = "AckReceived",
     operationId = "session-1:9",
@@ -337,6 +357,17 @@ local staleAckState, staleAckEffects = Core.reduce(awaitingAck, {
 })
 assertEqual(staleAckState.phase, Core.PHASE.ApplyPending)
 assertEqual(staleAckEffects[1].type, "IgnoredStaleAck")
+
+local timedOutApply = Core.reduce(awaitingAck, {
+    type = "CommandTimedOut",
+    operationId = "session-1:9",
+    reason = "test timeout"
+})
+assertEqual(timedOutApply.phase, Core.PHASE.Faulted)
+assertEqual(timedOutApply.pendingOperationId, nil)
+assertEqual(timedOutApply.pendingKind, nil)
+assertEqual(Core.clientViewModel(timedOutApply).busy, false,
+    "an Apply timeout must release all busy-gated controls")
 
 local rejectedAckState = Core.reduce(awaitingAck, {
     type = "AckReceived",
