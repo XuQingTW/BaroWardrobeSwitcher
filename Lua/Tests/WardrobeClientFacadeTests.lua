@@ -180,6 +180,7 @@ local lastForceHideMask = nil
 local lastForceShowMask = nil
 local movementAnimationCalls = 0
 local lastUseFashionMovementAnimations = nil
+local movementAnimationByCharacterId = {}
 local activationCharacterIds = {}
 local activeCharacterIds = {}
 local capturedIdentifierByCharacterId = {}
@@ -233,9 +234,10 @@ local visualOverride = {
         lastForceShowMask = forceShowMask
         return true
     end,
-    SetUseFashionMovementAnimations = function(_, enabled)
+    SetUseFashionMovementAnimations = function(character, enabled)
         movementAnimationCalls = movementAnimationCalls + 1
         lastUseFashionMovementAnimations = enabled == true
+        movementAnimationByCharacterId[characterId(character)] = enabled == true
         return true
     end,
     ActivateFashionVisual = function(character)
@@ -558,6 +560,7 @@ assert(saveCalls == 1, "attachment visibility did not persist to the current cha
 assert(lastSaved ~= nil and
     lastSaved:find("schema=4", 1, true) ~= nil and
     lastSaved:find("hidehair=true", 1, true) ~= nil and
+    lastSaved:find("fashionMovement=true", 1, true) ~= nil and
     lastSaved:find("visibilityHair=hide", 1, true) ~= nil and
     lastSaved:find("visibilityFaceAttachment=auto", 1, true) ~= nil,
     "attachment visibility persistence did not store the complete policy")
@@ -787,7 +790,8 @@ local serverHello = newNetworkBuffer(WardrobeCore.NET.V2_HELLO)
 assert(WardrobeCore.writeServerHello(
     serverHello,
     0,
-    WardrobeCore.CAPABILITY.AttachmentVisibility
+    WardrobeCore.CAPABILITY.AttachmentVisibility +
+        WardrobeCore.CAPABILITY.MovementAnimationSource
 ))
 serverHello.FinalizeForTransport()
 assert(type(networkHandlers[WardrobeCore.NET.V2_HELLO]) == "function")
@@ -836,6 +840,25 @@ assert(finalApplyCount == applyCountAfterRejection,
     "a rejected multiplayer auto-apply was queued again without a state change")
 assert(buttons["Save Current Outfit"].Enabled ~= false,
     "multiplayer controls did not refresh after a rejected acknowledgement")
+
+local multiplayerMovementButton = buttons["Movement: Fashion Priority"]
+assert(multiplayerMovementButton ~= nil and type(multiplayerMovementButton.OnClicked) == "function")
+multiplayerMovementButton.OnClicked()
+hooks.think()
+local movementCommand = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+assert(movementCommand.kind == WardrobeCore.COMMAND.Animation and
+       movementCommand.look.useFashionMovementAnimations == false,
+    "multiplayer movement toggle did not send its authoritative animation command")
+local rejectedMovementAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(rejectedMovementAck, {
+    operationId = movementCommand.operationId,
+    accepted = false,
+    revision = 0,
+    reason = "synthetic rejection"
+}))
+rejectedMovementAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](rejectedMovementAck)
+hooks.think()
 
 -- Accepted commands also finish asynchronously. The open panel must rebuild
 -- after the acknowledgement instead of preserving its pending-state buttons.
@@ -1006,7 +1029,8 @@ do
         false,
         { Head = "helmet", InnerClothes = "helmet" },
         nil,
-        { Head = remoteColor, InnerClothes = remoteColor + 1 }
+        { Head = remoteColor, InnerClothes = remoteColor + 1 },
+        false
     ))
     local beforeLateEntity = activationCount
     deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })
@@ -1021,19 +1045,29 @@ do
         "a retained snapshot was not applied when the late Character appeared")
     assert(capturedIdentifierByCharacterId[remoteId] == "helmet",
         "the late Character received the wrong wardrobe look")
+    assert(movementAnimationByCharacterId[remoteId] == false,
+        "the late Character did not receive equipped-gear movement from the server snapshot")
     local remoteKeys = capturedPrefabKeysByCharacterId[remoteId] or {}
     assert(#remoteKeys == 2 and
            remoteKeys[1] == "helmet@" .. tostring(remoteColor) and
            remoteKeys[2] == "helmet@" .. tostring(remoteColor + 1),
         "same-prefab fallbacks with different colors were merged or recolored")
 
+    local updatedMovementLook = assert(WardrobeCore.copyLook(remoteLook))
+    updatedMovementLook.useFashionMovementAnimations = true
+    local beforeMovementOnlyUpdate = activationCount
+    deliverState({ revision = 11, characterId = remoteId, active = true, look = updatedMovementLook })
+    assert(activationCount == beforeMovementOnlyUpdate + 1 and
+           movementAnimationByCharacterId[remoteId] == true,
+        "an animation-only state update was deduplicated or not applied")
+
     local afterApply = activationCount
-    deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })
-    deliverState({ revision = 9, characterId = remoteId, active = false, look = remoteLook })
+    deliverState({ revision = 11, characterId = remoteId, active = true, look = updatedMovementLook })
+    deliverState({ revision = 10, characterId = remoteId, active = false, look = remoteLook })
     assert(activationCount == afterApply and activeCharacterIds[remoteId] == true,
         "duplicate or stale state replaced the accepted remote look")
-    deliverState({ revision = 11, characterId = remoteId, active = false, look = remoteLook })
-    deliverState({ revision = 10, characterId = remoteId, active = true, look = remoteLook })
+    deliverState({ revision = 12, characterId = remoteId, active = false, look = updatedMovementLook })
+    deliverState({ revision = 11, characterId = remoteId, active = true, look = updatedMovementLook })
     assert(activationCount == afterApply and activeCharacterIds[remoteId] ~= true,
         "an out-of-order state resurrected a newer cleared look")
 
@@ -1077,17 +1111,65 @@ do
         "round snapshot request replaced the negotiated client session")
 
     local beforeDeferredV2 = activationCount
-    local nextRoundLook = assert(WardrobeCore.newLook(true, false, { Head = "helmet" }))
+    local nextRoundLook = assert(WardrobeCore.newLook(
+        true,
+        false,
+        { Head = "helmet" },
+        nil,
+        nil,
+        false
+    ))
     deliverState({ revision = 20, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
     assert(activationCount == beforeDeferredV2,
         "a v2 round-start snapshot bypassed the initial equipment gate")
     for _ = 1, 15 do hooks.think() end
     assert(activationCount == beforeDeferredV2 + 1,
         "a deferred v2 round-start snapshot was not applied exactly once")
+    assert(movementAnimationByCharacterId[nextRoundCharacter.ID] == false,
+        "deferred round-start state lost its movement animation source")
     deliverState({ revision = 20, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
     deliverState({ revision = 19, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
     assert(activationCount == beforeDeferredV2 + 1,
         "duplicate or stale deferred v2 state rendered again")
+
+    -- Capabilities are independent. A relay may expose animation sync without
+    -- attachment visibility; the animation command and false setting must survive.
+    local movementOnlyHello = newNetworkBuffer(WardrobeCore.NET.V2_HELLO)
+    assert(WardrobeCore.writeServerHello(
+        movementOnlyHello,
+        20,
+        WardrobeCore.CAPABILITY.MovementAnimationSource
+    ))
+    movementOnlyHello.FinalizeForTransport()
+    networkHandlers[WardrobeCore.NET.V2_HELLO](movementOnlyHello)
+    openPanel = true
+    hooks.think()
+    local movementOnlyButton = buttons["Movement: Equipped Gear"]
+    assert(movementOnlyButton ~= nil and type(movementOnlyButton.OnClicked) == "function",
+        "movement-only capability did not expose the authoritative animation control")
+    movementOnlyButton.OnClicked()
+    hooks.think()
+    local movementOnlyCommand = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+    assert(movementOnlyCommand.kind == WardrobeCore.COMMAND.Animation and
+           movementOnlyCommand.look.useFashionMovementAnimations == true,
+        "movement-only capability rejected or truncated the animation command")
+    local movementOnlyRejection = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+    assert(WardrobeCore.writeAck(movementOnlyRejection, {
+        operationId = movementOnlyCommand.operationId,
+        accepted = false,
+        revision = 20,
+        reason = "synthetic rejection"
+    }))
+    movementOnlyRejection.FinalizeForTransport()
+    networkHandlers[WardrobeCore.NET.V2_ACK](movementOnlyRejection)
+    hooks.think()
+
+    buttons["Save Current Outfit"].OnClicked()
+    hooks.think()
+    local movementOnlySave = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+    assert(movementOnlySave.kind == WardrobeCore.COMMAND.Save and
+           movementOnlySave.look.useFashionMovementAnimations == false,
+        "movement-only capability dropped equipped-gear movement from Save")
 end
 
 -- Reload an isolated probing client to cover the compatibility bridge. The

@@ -4,12 +4,12 @@
 local Core = {}
 
 Core.MOD_VERSION = "0.5.3"
-Core.PROTOCOL_VERSION = 3
+Core.PROTOCOL_VERSION = 4
 Core.LOOK_SCHEMA_VERSION = 3
 Core.PERSISTENCE_VERSION = 4
 Core.HELLO_TIMEOUT_SECONDS = 5
 Core.LOOK_EXTENSION_MARKER = 0x57
-Core.LOOK_EXTENSION_VERSION = 1
+Core.LOOK_EXTENSION_VERSION = 2
 Core.HELLO_EXTENSION_MARKER = 0x57
 Core.HELLO_EXTENSION_VERSION = 1
 
@@ -63,7 +63,8 @@ Core.ATTACHMENT_VISIBILITY = {
 }
 
 Core.CAPABILITY = {
-    AttachmentVisibility = 0x01
+    AttachmentVisibility = 0x01,
+    MovementAnimationSource = 0x02
 }
 
 Core.LIMITS = {
@@ -93,7 +94,8 @@ Core.COMMAND = {
     Apply = "apply",
     Clear = "clear",
     Forget = "forget",
-    Visibility = "visibility"
+    Visibility = "visibility",
+    Animation = "animation"
 }
 
 local validCommands = {
@@ -101,7 +103,8 @@ local validCommands = {
     [Core.COMMAND.Apply] = true,
     [Core.COMMAND.Clear] = true,
     [Core.COMMAND.Forget] = true,
-    [Core.COMMAND.Visibility] = true
+    [Core.COMMAND.Visibility] = true,
+    [Core.COMMAND.Animation] = true
 }
 
 local function shallowCopy(source)
@@ -283,6 +286,10 @@ function Core.validateLook(value)
     if colorSource ~= nil and type(colorSource) ~= "table" then
         return nil, "colors must be a table"
     end
+    if value.useFashionMovementAnimations ~= nil and
+        type(value.useFashionMovementAnimations) ~= "boolean" then
+        return nil, "useFashionMovementAnimations must be a boolean"
+    end
 
     if isCanonical then
         for key, _ in pairs(slotSource) do
@@ -346,17 +353,19 @@ function Core.validateLook(value)
         captured = value.captured == true,
         hideHair = Core.legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
+        useFashionMovementAnimations = value.useFashionMovementAnimations ~= false,
         slots = slots,
         colors = colors
     }
 end
 
-function Core.newLook(captured, hideHair, slots, attachmentVisibility, colors)
+function Core.newLook(captured, hideHair, slots, attachmentVisibility, colors, useFashionMovementAnimations)
     return Core.validateLook({
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = captured == true,
         hideHair = hideHair == true,
         attachmentVisibility = attachmentVisibility,
+        useFashionMovementAnimations = useFashionMovementAnimations,
         slots = slots or {},
         colors = colors
     })
@@ -369,12 +378,13 @@ function Core.copyLook(look)
     return valid
 end
 
-function Core.fromLegacyLook(legacyLook, captured, hideHair, attachmentVisibility)
+function Core.fromLegacyLook(legacyLook, captured, hideHair, attachmentVisibility, useFashionMovementAnimations)
     return Core.validateLook({
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = captured == true,
         hideHair = hideHair == true,
         attachmentVisibility = attachmentVisibility,
+        useFashionMovementAnimations = useFashionMovementAnimations,
         slots = legacyLook or {}
     })
 end
@@ -421,6 +431,7 @@ function Core.parseLegacyClientLookLine(line)
     local autoApply = false
     local hideHair = false
     local attachmentVisibility = nil
+    local useFashionMovementAnimations = true
     local sessionKey = nil
     local colors = {}
 
@@ -456,6 +467,10 @@ function Core.parseLegacyClientLookLine(line)
             local reason
             hideHair, reason = booleanValue(name, value)
             if hideHair == nil then return nil, reason end
+        elseif name == "fashionMovement" then
+            local reason
+            useFashionMovementAnimations, reason = booleanValue(name, value)
+            if useFashionMovementAnimations == nil then return nil, reason end
         elseif name == "visibilityHair" or
             name == "visibilityBeard" or
             name == "visibilityMoustache" or
@@ -493,7 +508,13 @@ function Core.parseLegacyClientLookLine(line)
         if legacy[key] == nil then return nil, "color for " .. key .. " has no wardrobe item" end
         legacy[key].color = color
     end
-    local look, reason = Core.fromLegacyLook(legacy, captured, hideHair, attachmentVisibility)
+    local look, reason = Core.fromLegacyLook(
+        legacy,
+        captured,
+        hideHair,
+        attachmentVisibility,
+        useFashionMovementAnimations
+    )
     if look == nil then return nil, reason end
     if not Core.hasLook(look) then return nil, "legacy client look has no captured intent" end
     return {
@@ -521,7 +542,8 @@ function Core.lookSignature(look)
     local parts = {
         "v=" .. tostring(valid.schemaVersion),
         "captured=" .. tostring(valid.captured),
-        "hideHair=" .. tostring(valid.hideHair)
+        "hideHair=" .. tostring(valid.hideHair),
+        "fashionMovement=" .. tostring(valid.useFashionMovementAnimations)
     }
     for _, key in ipairs(Core.ATTACHMENT_KEYS) do
         parts[#parts + 1] = key .. "=" .. valid.attachmentVisibility[key]
@@ -568,6 +590,7 @@ function Core.writeLook(message, look)
     message.WriteByte(Core.LOOK_EXTENSION_VERSION)
     message.WriteByte(forceHide)
     message.WriteByte(forceShow)
+    message.WriteByte(valid.useFashionMovementAnimations and 1 or 0)
     return true
 end
 
@@ -600,8 +623,9 @@ function Core.readLook(message)
     end
 
     local attachmentVisibility = nil
+    local useFashionMovementAnimations = true
     local remainingBits = messageRemainingBits(message)
-    if remainingBits == 32 then
+    if remainingBits == 32 or remainingBits == 40 then
         local marker = message.ReadByte()
         local extensionVersion = message.ReadByte()
         local forceHide = message.ReadByte()
@@ -609,12 +633,23 @@ function Core.readLook(message)
         if marker ~= Core.LOOK_EXTENSION_MARKER then
             return nil, "unknown look extension marker " .. tostring(marker)
         end
-        if extensionVersion ~= Core.LOOK_EXTENSION_VERSION then
+        if extensionVersion ~= 1 and extensionVersion ~= Core.LOOK_EXTENSION_VERSION then
             return nil, "unsupported look extension version " .. tostring(extensionVersion)
+        end
+        if (extensionVersion == 1 and remainingBits ~= 32) or
+            (extensionVersion == Core.LOOK_EXTENSION_VERSION and remainingBits ~= 40) then
+            return nil, "malformed look extension length " .. tostring(remainingBits)
         end
         local visibility, visibilityReason = Core.attachmentVisibilityFromMasks(forceHide, forceShow)
         if visibility == nil then return nil, visibilityReason end
         attachmentVisibility = visibility
+        if extensionVersion == Core.LOOK_EXTENSION_VERSION then
+            local animationSource = message.ReadByte()
+            if animationSource ~= 0 and animationSource ~= 1 then
+                return nil, "invalid movement animation source"
+            end
+            useFashionMovementAnimations = animationSource == 1
+        end
     elseif remainingBits ~= 0 then
         return nil, "malformed look extension length " .. tostring(remainingBits)
     end
@@ -624,6 +659,7 @@ function Core.readLook(message)
         captured = captured,
         hideHair = hideHair,
         attachmentVisibility = attachmentVisibility,
+        useFashionMovementAnimations = useFashionMovementAnimations,
         slots = slots,
         colors = colors
     })
@@ -733,8 +769,8 @@ function Core.validateCommand(command)
     if (command.kind == Core.COMMAND.Clear or command.kind == Core.COMMAND.Forget) and look ~= nil then
         return nil, command.kind .. " command must not contain a look"
     end
-    if command.kind == Core.COMMAND.Visibility and look == nil then
-        return nil, "visibility command requires a look"
+    if (command.kind == Core.COMMAND.Visibility or command.kind == Core.COMMAND.Animation) and look == nil then
+        return nil, command.kind .. " command requires a look"
     end
 
     return {
@@ -916,6 +952,13 @@ local function attachmentVisibilityEffect(kind, look)
     })
 end
 
+local function movementAnimationEffect(kind, look)
+    return effect(kind, {
+        useFashionMovementAnimations =
+            look == nil or look.useFashionMovementAnimations ~= false
+    })
+end
+
 function Core.newClientState(options)
     options = options or {}
     local look = Core.copyLook(options.look)
@@ -991,6 +1034,16 @@ local function restoreAttachmentVisibilityRollback(state, effects, compensate)
     if compensate == true and rollbackActive and rollbackLook ~= nil then
         effects[#effects + 1] =
             attachmentVisibilityEffect("ApplyAttachmentVisibilityCompensation", rollbackLook)
+    end
+end
+
+local function restoreMovementAnimationRollback(state, effects, compensate)
+    local rollbackLook = Core.copyLook(state.rollbackLook)
+    local rollbackActive = state.rollbackActive == true
+    restoreRollback(state)
+    if compensate == true and rollbackActive and rollbackLook ~= nil then
+        effects[#effects + 1] =
+            movementAnimationEffect("ApplyMovementAnimationSourceCompensation", rollbackLook)
     end
 end
 
@@ -1103,6 +1156,40 @@ function Core.reduce(currentState, event)
             effects[#effects + 1] = effect("SendCommand", {
                 operationId = state.pendingOperationId,
                 kind = Core.COMMAND.Visibility,
+                baseRevision = state.revision,
+                look = Core.copyLook(updated)
+            })
+        else
+            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(updated) })
+        end
+        return state, effects
+    end
+
+    if event.type == "SetMovementAnimationSource" then
+        if state.look == nil then
+            state.error = "cannot change movement animation source without a saved look"
+            return state, effects
+        end
+        if state.pendingKind ~= nil then
+            state.error = "cannot change movement animation source while another operation is pending"
+            return state, effects
+        end
+        beginRollback(state)
+        state.pendingKind = Core.COMMAND.Animation
+        state.pendingOperationId = event.operationId
+        state.pendingRemote = event.remote == true
+        state.pendingServerAccepted = false
+        local updated = Core.copyLook(state.look)
+        updated.useFashionMovementAnimations = event.enabled == true
+        state.look = updated
+        state.error = nil
+        if state.active then
+            effects[#effects + 1] =
+                movementAnimationEffect("ApplyMovementAnimationSource", updated)
+        elseif state.pendingRemote then
+            effects[#effects + 1] = effect("SendCommand", {
+                operationId = state.pendingOperationId,
+                kind = Core.COMMAND.Animation,
                 baseRevision = state.revision,
                 look = Core.copyLook(updated)
             })
@@ -1272,7 +1359,8 @@ function Core.reduce(currentState, event)
         elseif event.awaitAck ~= true and state.pendingKind == Core.COMMAND.Forget then
             state.pendingRemote = false
             effects[#effects + 1] = effect("ClearRender", { remote = false, forget = true })
-        elseif event.awaitAck ~= true and state.pendingKind == Core.COMMAND.Visibility then
+        elseif event.awaitAck ~= true and
+            (state.pendingKind == Core.COMMAND.Visibility or state.pendingKind == Core.COMMAND.Animation) then
             state.pendingRemote = false
             effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
         end
@@ -1286,6 +1374,8 @@ function Core.reduce(currentState, event)
             restoreRollback(state)
         elseif state.pendingKind == Core.COMMAND.Visibility then
             restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
+        elseif state.pendingKind == Core.COMMAND.Animation then
+            restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
         end
         state.phase = Core.PHASE.Faulted
         state.error = tostring(event.reason or "network command could not be sent")
@@ -1343,6 +1433,8 @@ function Core.reduce(currentState, event)
                 restoreRollback(state)
             elseif state.pendingKind == Core.COMMAND.Visibility then
                 restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
+            elseif state.pendingKind == Core.COMMAND.Animation then
+                restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server rejected command")
@@ -1369,6 +1461,10 @@ function Core.reduce(currentState, event)
             state.phase = Core.PHASE.Saving
             effects[#effects + 1] = effect("ClearRender", { remote = true, save = true })
         elseif kind == Core.COMMAND.Visibility then
+            state.pendingRemote = false
+            state.pendingServerAccepted = true
+            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+        elseif kind == Core.COMMAND.Animation then
             state.pendingRemote = false
             state.pendingServerAccepted = true
             effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
@@ -1405,12 +1501,13 @@ function Core.reduce(currentState, event)
         end
 
         local pendingKindBeforeState = state.pendingKind
-        local confirmsPendingVisibility =
-            pendingKindBeforeState == Core.COMMAND.Visibility and
+        local confirmsPendingPreference =
+            (pendingKindBeforeState == Core.COMMAND.Visibility or
+                pendingKindBeforeState == Core.COMMAND.Animation) and
             look ~= nil and
             Core.lookEquals(state.look, look) and
             (state.pendingRemote == true or state.pendingServerAccepted == true)
-        if confirmsPendingVisibility then
+        if confirmsPendingPreference then
             state.revision = revision
             state.look = look
             state.active = event.active == true
@@ -1553,7 +1650,7 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "PersistenceSucceeded" then
-        if state.pendingKind == Core.COMMAND.Visibility then
+        if state.pendingKind == Core.COMMAND.Visibility or state.pendingKind == Core.COMMAND.Animation then
             clearPending(state)
             clearRollback(state)
         elseif state.pendingKind == Core.COMMAND.Save then
@@ -1600,13 +1697,41 @@ function Core.reduce(currentState, event)
         return state, effects
     end
 
-    if event.type == "PersistenceFailed" or event.type == "AttachmentVisibilityUpdateFailed" then
+    if event.type == "MovementAnimationSourceUpdateSucceeded" then
+        if state.pendingKind == Core.COMMAND.Animation then
+            if state.pendingRemote then
+                effects[#effects + 1] = effect("SendCommand", {
+                    operationId = state.pendingOperationId,
+                    kind = Core.COMMAND.Animation,
+                    baseRevision = state.revision,
+                    look = Core.copyLook(state.look)
+                })
+            else
+                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            end
+        end
+        return state, effects
+    end
+
+    if event.type == "PersistenceFailed" or event.type == "AttachmentVisibilityUpdateFailed" or
+        event.type == "MovementAnimationSourceUpdateFailed" then
         if state.pendingKind == Core.COMMAND.Visibility then
             if state.pendingServerAccepted then
                 clearPending(state)
                 clearRollback(state)
             else
                 restoreAttachmentVisibilityRollback(
+                    state,
+                    effects,
+                    event.type == "PersistenceFailed" and state.rollbackActive == true
+                )
+            end
+        elseif state.pendingKind == Core.COMMAND.Animation then
+            if state.pendingServerAccepted then
+                clearPending(state)
+                clearRollback(state)
+            else
+                restoreMovementAnimationRollback(
                     state,
                     effects,
                     event.type == "PersistenceFailed" and state.rollbackActive == true
@@ -1652,6 +1777,8 @@ function Core.reduce(currentState, event)
                 restoreRollback(state)
             elseif state.pendingKind == Core.COMMAND.Visibility then
                 restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
+            elseif state.pendingKind == Core.COMMAND.Animation then
+                restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server command timed out")
@@ -1672,7 +1799,8 @@ function Core.clientViewModel(state)
     local busy = phase == Core.PHASE.Saving or
         phase == Core.PHASE.ApplyPending or
         phase == Core.PHASE.ClearPending or
-        state.pendingKind == Core.COMMAND.Visibility
+        state.pendingKind == Core.COMMAND.Visibility or
+        state.pendingKind == Core.COMMAND.Animation
     return {
         phase = phase,
         revision = tonumber(state.revision) or 0,
@@ -1702,7 +1830,9 @@ local requiredClientEffects = {
     ClearRender = true,
     ClearRenderCompensation = true,
     ApplyAttachmentVisibility = true,
-    ApplyAttachmentVisibilityCompensation = true
+    ApplyAttachmentVisibilityCompensation = true,
+    ApplyMovementAnimationSource = true,
+    ApplyMovementAnimationSourceCompensation = true
 }
 
 local function successEventForEffect(currentEffect)
@@ -1732,6 +1862,12 @@ local function successEventForEffect(currentEffect)
         return { type = "AttachmentVisibilityUpdateSucceeded" }
     end
     if currentEffect.type == "ApplyAttachmentVisibilityCompensation" then
+        return { type = "CompensationSucceeded" }
+    end
+    if currentEffect.type == "ApplyMovementAnimationSource" then
+        return { type = "MovementAnimationSourceUpdateSucceeded" }
+    end
+    if currentEffect.type == "ApplyMovementAnimationSourceCompensation" then
         return { type = "CompensationSucceeded" }
     end
     return nil
@@ -1769,6 +1905,12 @@ local function failureEventForEffect(currentEffect, reason)
         return { type = "AttachmentVisibilityUpdateFailed", reason = message }
     end
     if currentEffect.type == "ApplyAttachmentVisibilityCompensation" then
+        return { type = "CompensationFailed", reason = message }
+    end
+    if currentEffect.type == "ApplyMovementAnimationSource" then
+        return { type = "MovementAnimationSourceUpdateFailed", reason = message }
+    end
+    if currentEffect.type == "ApplyMovementAnimationSourceCompensation" then
         return { type = "CompensationFailed", reason = message }
     end
     return nil

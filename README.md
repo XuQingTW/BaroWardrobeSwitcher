@@ -2,7 +2,7 @@
 
 LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored fashion visuals.
 
-Version 0.5.3 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It preserves per-item custom clothing colors across save, apply, scene changes, reconnects, and restarts using protocol/look schema 3. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
+Version 0.5.3 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It preserves per-item custom clothing colors across save, apply, scene changes, reconnects, and restarts using protocol 4 and look schema 3. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
 
 ## Design
 
@@ -56,8 +56,8 @@ Version 0.5.3 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It p
 - Server persistence uses schema-v4 `ServerLooks.json` and stable `Client.AccountId` representations. Valid v2/v3 files migrate with versioned backups; authoritative JSON no longer stores `hideHair`. Anonymous clients can sync during the current server session but are never persisted by display name.
 - In multiplayer, `Clear Look` only deactivates the current visual look while keeping the saved look. `Forget Saved Look` also asks the server to delete the saved look for that client, so it will not be restored by later round-start or reconnect sync.
 - Saving a new outfit while an old multiplayer look is active clears the old server-side active look before storing the new saved identifiers, preventing other clients from keeping stale visuals.
-- Protocol 3 retains hello negotiation, operation IDs, revisions, acknowledgements, idempotent retry, and stale-command rejection, and adds an optional `UInt32` color after each wire slot. The original six message names remain as a v1 bridge; mixed protocol versions fall back to v1 and therefore use prefab base colors.
-- Protocol-3 peers advertise attachment-visibility capability `0x01`. A complete four-byte optional look tail carries force-hide/show masks. When the server does not advertise support, the client keeps the detailed policy locally and sends only the safe legacy `hideHair` projection.
+- Protocol 4 retains hello negotiation, operation IDs, revisions, acknowledgements, idempotent retry, and stale-command rejection. It synchronizes each active look's movement-animation source in addition to optional per-slot colors. The original six message names remain as a v1 bridge; mixed protocol versions fall back to v1.
+- Protocol-4 peers advertise attachment visibility (`0x01`) and movement-animation source (`0x02`). The optional look tail carries force-hide/show masks plus the animation source; older look tails still default to fashion-priority movement.
 - The renderer continues through Barotrauma's native `Item.GetSpriteColor()` path. Colored prefab fallbacks set `Item.SpriteColor` before capture; the mod does not recompute or double-multiply tint, limb alpha, or death color.
 - Server synchronization is event-driven: connect sends a targeted snapshot and accepted state changes broadcast once. There is no steady-state heartbeat or per-frame full-client scan; clients still hold early apply/clear messages briefly while a target character entity is spawning.
 

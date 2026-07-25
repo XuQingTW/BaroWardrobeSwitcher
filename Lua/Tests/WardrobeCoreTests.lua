@@ -43,8 +43,11 @@ end
 
 local emptyLook = assert(Core.newLook(true, false, {}))
 assert(Core.hasLook(emptyLook), "captured empty look must be preserved")
+assertEqual(emptyLook.useFashionMovementAnimations, true,
+    "looks without an animation-source field must keep fashion-priority movement")
 assert(Core.validateLook({ schemaVersion = 99, slots = {} }) == nil)
 assert(Core.validateLook({ slots = { Unknown = "bad" } }) == nil)
+assert(Core.validateLook({ slots = {}, useFashionMovementAnimations = "false" }) == nil)
 
 local allSlots = {
     Head = "helmet",
@@ -60,6 +63,23 @@ assert(Core.writeLook(lookBuffer, look))
 local decodedLook = assert(Core.readLook(lookBuffer))
 assert(Core.lookEquals(look, decodedLook))
 assertEqual(decodedLook.hideHair, true)
+assertEqual(decodedLook.useFashionMovementAnimations, true)
+
+local equippedMovementLook = assert(Core.newLook(
+    true,
+    true,
+    allSlots,
+    nil,
+    nil,
+    false
+))
+assert(not Core.lookEquals(look, equippedMovementLook),
+    "movement animation source must participate in look equality/signatures")
+local equippedMovementBuffer = newBuffer()
+assert(Core.writeLook(equippedMovementBuffer, equippedMovementLook))
+equippedMovementBuffer.FinalizeForTransport()
+assertEqual(assert(Core.readLook(equippedMovementBuffer)).useFashionMovementAnimations, false,
+    "wire look round-trip lost equipped-gear movement")
 
 local packedRed = 0x7F1122FF
 local coloredLook = assert(Core.newLook(
@@ -138,6 +158,7 @@ oldWireLook.WriteBoolean(true)
 oldWireLook.WriteUInt16(0)
 oldWireLook.FinalizeForTransport()
 local migratedOldWireLook = assert(Core.readLook(oldWireLook))
+assertEqual(migratedOldWireLook.useFashionMovementAnimations, true)
 assertEqual(migratedOldWireLook.attachmentVisibility.Hair, "hide")
 assertEqual(migratedOldWireLook.attachmentVisibility.Beard, "hide")
 assertEqual(migratedOldWireLook.attachmentVisibility.Moustache, "hide")
@@ -151,6 +172,24 @@ local function lookPrefixBuffer()
     buffer.WriteUInt16(0)
     return buffer
 end
+
+local oldExtensionLook = lookPrefixBuffer()
+oldExtensionLook.WriteByte(Core.LOOK_EXTENSION_MARKER)
+oldExtensionLook.WriteByte(1)
+oldExtensionLook.WriteByte(0)
+oldExtensionLook.WriteByte(0)
+oldExtensionLook.FinalizeForTransport()
+assertEqual(assert(Core.readLook(oldExtensionLook)).useFashionMovementAnimations, true,
+    "v1 look extensions must default to fashion-priority movement")
+
+local invalidAnimationSource = lookPrefixBuffer()
+invalidAnimationSource.WriteByte(Core.LOOK_EXTENSION_MARKER)
+invalidAnimationSource.WriteByte(Core.LOOK_EXTENSION_VERSION)
+invalidAnimationSource.WriteByte(0)
+invalidAnimationSource.WriteByte(0)
+invalidAnimationSource.WriteByte(2)
+invalidAnimationSource.FinalizeForTransport()
+assert(Core.readLook(invalidAnimationSource) == nil)
 
 for byteCount = 1, 3 do
     local partial = lookPrefixBuffer()
@@ -882,6 +921,35 @@ local rejectedVisibility, rejectedEffects = Core.reduce(activeVisibilityRendered
 assertEqual(rejectedVisibility.look.attachmentVisibility.Hair, "hide")
 assertEqual(rejectedEffects[1].type, "ApplyAttachmentVisibilityCompensation")
 
+local activeAnimationPending, activeAnimationEffects = Core.reduce(
+    activeVisibilityState,
+    {
+        type = "SetMovementAnimationSource",
+        enabled = false,
+        remote = true,
+        operationId = "animation-active"
+    }
+)
+assertEqual(activeAnimationEffects[1].type, "ApplyMovementAnimationSource")
+assertEqual(activeAnimationEffects[1].useFashionMovementAnimations, false)
+local activeAnimationRendered, animationRenderedEffects = Core.reduce(
+    activeAnimationPending,
+    { type = "MovementAnimationSourceUpdateSucceeded" }
+)
+assertEqual(animationRenderedEffects[1].type, "SendCommand")
+assertEqual(animationRenderedEffects[1].kind, Core.COMMAND.Animation)
+assertEqual(animationRenderedEffects[1].look.useFashionMovementAnimations, false)
+local rejectedAnimation, rejectedAnimationEffects = Core.reduce(activeAnimationRendered, {
+    type = "AckReceived",
+    operationId = "animation-active",
+    accepted = false,
+    revision = 10,
+    reason = "denied"
+})
+assertEqual(rejectedAnimation.look.useFashionMovementAnimations, true)
+assertEqual(rejectedAnimationEffects[1].type, "ApplyMovementAnimationSourceCompensation")
+assertEqual(rejectedAnimationEffects[1].useFashionMovementAnimations, true)
+
 local inactiveRemotePending, inactiveRemoteEffects = Core.reduce(
     inactiveVisibilityState,
     {
@@ -953,15 +1021,18 @@ assertEqual(hairFailure.getState().look.hideHair, true)
 -- Strict legacy migration rejects truncation, duplicates, unknown fields and
 -- invalid booleans without mutating any runtime state.
 local legacy = assert(Core.parseLegacyClientLookLine(
-    "captured=true|active=false|auto=true|hidehair=true|Head=helmet,Ballistic Helmet|HeadColor=2131821311"
+    "captured=true|active=false|auto=true|hidehair=true|fashionMovement=false|" ..
+    "Head=helmet,Ballistic Helmet|HeadColor=2131821311"
 ))
 assertEqual(legacy.look.slots.Head, "helmet")
 assertEqual(legacy.look.colors.Head, 2131821311)
 assertEqual(legacy.look.hideHair, true)
+assertEqual(legacy.look.useFashionMovementAnimations, false)
 assert(Core.parseLegacyClientLookLine("captured=true|Head=helmet") == nil)
 assert(Core.parseLegacyClientLookLine("captured=true|captured=false") == nil)
 assert(Core.parseLegacyClientLookLine("captured=true|mystery=value") == nil)
 assert(Core.parseLegacyClientLookLine("captured=yes") == nil)
+assert(Core.parseLegacyClientLookLine("captured=true|fashionMovement=yes|Head=helmet,") == nil)
 assert(Core.parseLegacyClientLookLine(
     "captured=true|Head=helmet,name|HeadColor=4294967296") == nil)
 assert(Core.parseLegacyClientLookLine(

@@ -200,7 +200,8 @@ local canonicalApply = sendCommand({
         true,
         { Head = "helmet" },
         nil,
-        { Head = 0x7F0102FF }
+        { Head = 0x7F0102FF },
+        false
     ))
 })
 assert(canonicalApply.accepted and canonicalApply.revision == 2,
@@ -210,8 +211,9 @@ local canonicalStateMessage = Networking.sent[#Networking.sent - 1].message
 assert(canonicalStateMessage.name == Core.NET.V2_STATE, "apply must broadcast canonical state before its ack")
 local canonicalState = assert(Core.readState(canonicalStateMessage))
 assert(canonicalState.active and canonicalState.look.slots.Head == "helmet" and
-       canonicalState.look.colors.Head == 0x7F0102FF and canonicalState.look.hideHair,
-    "server canonical state must retain the stable identifier, packed color, and user intent")
+       canonicalState.look.colors.Head == 0x7F0102FF and canonicalState.look.hideHair and
+       canonicalState.look.useFashionMovementAnimations == false,
+    "server canonical state must retain identifiers, color, visibility, and movement source")
 
 local clearAfterApply = sendCommand({
     clientSessionId = "client-session",
@@ -264,7 +266,8 @@ do
     assert(#lateStates == 1, "a player without a saved look received an unexpected own state")
     local lateSnapshot = lateStates[1]
     assert(lateSnapshot.active and lateSnapshot.revision == 4 and
-        lateSnapshot.characterId == 143 and lateSnapshot.look.slots.Head == "helmet",
+        lateSnapshot.characterId == 143 and lateSnapshot.look.slots.Head == "helmet" and
+        lateSnapshot.look.useFashionMovementAnimations == false,
         "a late client did not receive the active next-round wardrobe snapshot")
 
     local sentBeforeOwnHello = #Networking.sent
@@ -305,7 +308,8 @@ do
     end
     assert(announcedToExistingClient ~= nil and announcedToExistingClient.active and
         announcedToExistingClient.revision == 1 and
-        announcedToExistingClient.look.slots.Head == "helmet",
+        announcedToExistingClient.look.slots.Head == "helmet" and
+        announcedToExistingClient.look.useFashionMovementAnimations == true,
         "a ready late client did not reannounce its active look to an existing client")
 
     Hook.handlers["client.disconnected"](lateClient)
@@ -418,8 +422,9 @@ assert(Core.writeClientHello(visibilityHello, "visibility-session"))
 Networking.handlers[Core.NET.V2_HELLO](visibilityHello, visibilityClient)
 local visibilityServerHello =
     assert(Core.readServerHello(lastSentMessage(Core.NET.V2_HELLO, visibilityClient.Connection)))
-assert(visibilityServerHello.capabilities == Core.CAPABILITY.AttachmentVisibility,
-    "new server hello must advertise full attachment visibility synchronization")
+assert(visibilityServerHello.capabilities ==
+        Core.CAPABILITY.AttachmentVisibility + Core.CAPABILITY.MovementAnimationSource,
+    "new server hello must advertise visibility and movement-animation synchronization")
 
 local visibilityApply = sendCommand({
     clientSessionId = "visibility-session",
@@ -455,17 +460,41 @@ assert(activeVisibilityState.active and
        activeVisibilityState.look.attachmentVisibility.FaceAttachment == "show",
     "visibility command must retain authoritative slots and broadcast the merged active policy")
 
+local animationAck = sendCommand({
+    clientSessionId = "visibility-session",
+    operationId = "animation-active-update",
+    baseRevision = 2,
+    kind = Core.COMMAND.Animation,
+    -- Invalid client slots must be ignored just like the visibility policy path.
+    look = assert(Core.newLook(
+        true,
+        false,
+        { Head = "not-a-real-prefab" },
+        requestedVisibility,
+        nil,
+        false
+    ))
+}, visibilityClient)
+assert(animationAck.accepted and animationAck.revision == 3)
+local activeAnimationState = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, visibilityClient.Connection)))
+assert(activeAnimationState.active and
+       activeAnimationState.look.slots.Head == "helmet" and
+       activeAnimationState.look.attachmentVisibility.Hair == "show" and
+       activeAnimationState.look.useFashionMovementAnimations == false,
+    "animation command must retain authoritative slots/visibility and broadcast its value")
+
 local visibilityClear = sendCommand({
     clientSessionId = "visibility-session",
     operationId = "visibility-clear",
-    baseRevision = 2,
+    baseRevision = 3,
     kind = Core.COMMAND.Clear
 }, visibilityClient)
-assert(visibilityClear.accepted and visibilityClear.revision == 3)
+assert(visibilityClear.accepted and visibilityClear.revision == 4)
 local inactiveVisibilityAck = sendCommand({
     clientSessionId = "visibility-session",
     operationId = "visibility-inactive-update",
-    baseRevision = 3,
+    baseRevision = 4,
     kind = Core.COMMAND.Visibility,
     look = assert(Core.newLook(
         true,
@@ -474,19 +503,20 @@ local inactiveVisibilityAck = sendCommand({
         Core.attachmentVisibilityFromLegacy(false)
     ))
 }, visibilityClient)
-assert(inactiveVisibilityAck.accepted and inactiveVisibilityAck.revision == 4)
+assert(inactiveVisibilityAck.accepted and inactiveVisibilityAck.revision == 5)
 local inactiveVisibilityState = assert(Core.readState(
     lastSentMessage(Core.NET.V2_STATE, visibilityClient.Connection)))
 assert(not inactiveVisibilityState.active and
        inactiveVisibilityState.look.slots.Head == "helmet" and
-       inactiveVisibilityState.look.attachmentVisibility.Hair == "auto",
-    "inactive visibility command must return the updated authoritative saved look")
+       inactiveVisibilityState.look.attachmentVisibility.Hair == "auto" and
+       inactiveVisibilityState.look.useFashionMovementAnimations == false,
+    "inactive visibility command must preserve animation source in the authoritative look")
 
 local overlappingVisibility = newBuffer()
 overlappingVisibility.WriteUInt16(Core.PROTOCOL_VERSION)
-overlappingVisibility.WriteString("visibility-session")
+    overlappingVisibility.WriteString("visibility-session")
 overlappingVisibility.WriteString("visibility-overlap")
-overlappingVisibility.WriteUInt32(4)
+    overlappingVisibility.WriteUInt32(5)
 overlappingVisibility.WriteString(Core.COMMAND.Visibility)
 overlappingVisibility.WriteBoolean(true)
 overlappingVisibility.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
@@ -495,14 +525,15 @@ overlappingVisibility.WriteBoolean(false)
 overlappingVisibility.WriteUInt16(0)
 overlappingVisibility.WriteByte(Core.LOOK_EXTENSION_MARKER)
 overlappingVisibility.WriteByte(Core.LOOK_EXTENSION_VERSION)
-overlappingVisibility.WriteByte(0x01)
-overlappingVisibility.WriteByte(0x01)
+    overlappingVisibility.WriteByte(0x01)
+    overlappingVisibility.WriteByte(0x01)
+    overlappingVisibility.WriteByte(1)
 Networking.handlers[Core.NET.V2_COMMAND](overlappingVisibility, visibilityClient)
 local overlappingVisibilityAck =
     assert(Core.readAck(Networking.sent[#Networking.sent].message))
 assert(not overlappingVisibilityAck.accepted and
        overlappingVisibilityAck.reason == "malformed_look" and
-       overlappingVisibilityAck.revision == 4,
+       overlappingVisibilityAck.revision == 5,
     "overlapping visibility masks must be rejected without changing revision")
 
 local noLookClient = {

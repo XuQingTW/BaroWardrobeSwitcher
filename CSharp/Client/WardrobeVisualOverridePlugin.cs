@@ -425,6 +425,8 @@ namespace BaroWardrobeSwitcher
             {
                 Version = PersistenceVersion,
                 Captured = GetBoolean(parts, "captured"),
+                UseFashionMovementAnimations =
+                    GetBooleanOrDefault(parts, "fashionMovement", defaultValue: true),
                 AttachmentVisibility = ParseAttachmentVisibility(parts),
                 Slots = ParseSlots(parts),
                 Colors = ParseColors(parts)
@@ -442,6 +444,8 @@ namespace BaroWardrobeSwitcher
                 "active=false",
                 "auto=" + document.Captured.ToString().ToLowerInvariant(),
                 "hidehair=" + LegacyHideHair(document.AttachmentVisibility).ToString().ToLowerInvariant(),
+                "fashionMovement=" +
+                    document.UseFashionMovementAnimations.ToString().ToLowerInvariant(),
                 "visibilityHair=" + document.AttachmentVisibility.Hair,
                 "visibilityBeard=" + document.AttachmentVisibility.Beard,
                 "visibilityMoustache=" + document.AttachmentVisibility.Moustache,
@@ -528,6 +532,19 @@ namespace BaroWardrobeSwitcher
             return parts != null &&
                    parts.TryGetValue(key, out string value) &&
                    string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool GetBooleanOrDefault(
+            Dictionary<string, string> parts,
+            string key,
+            bool defaultValue)
+        {
+            if (parts == null || !parts.TryGetValue(key, out string value))
+            {
+                return defaultValue;
+            }
+            if (bool.TryParse(value, out bool parsed)) { return parsed; }
+            throw new InvalidDataException("Encoded wardrobe " + key + " boolean is invalid.");
         }
 
         private static AttachmentVisibilityDocument ParseAttachmentVisibility(
@@ -946,6 +963,8 @@ namespace BaroWardrobeSwitcher
             [JsonRequired]
             [JsonPropertyName("captured")]
             public bool Captured { get; set; }
+            [JsonPropertyName("useFashionMovementAnimations")]
+            public bool UseFashionMovementAnimations { get; set; } = true;
             [JsonRequired]
             [JsonPropertyName("attachmentVisibility")]
             public AttachmentVisibilityDocument AttachmentVisibility { get; set; }

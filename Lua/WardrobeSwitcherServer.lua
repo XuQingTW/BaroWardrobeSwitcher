@@ -4,10 +4,10 @@ if not SERVER then return end
 
 local Core = assert(
     type(WardrobeCore) == "table" and
-    tonumber(WardrobeCore.PROTOCOL_VERSION) == 3 and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 4 and
     type(WardrobeCore.NET) == "table" and
     WardrobeCore,
-    "Baro Wardrobe Switcher requires WardrobeCore protocol 3")
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 4")
 local NET = Core.NET
 local PROTOCOL_VERSION = Core.PROTOCOL_VERSION
 local LOOK_SCHEMA_VERSION = Core.LOOK_SCHEMA_VERSION
@@ -21,7 +21,9 @@ local MAX_SEEN_OPERATIONS = Core.LIMITS.MAX_SEEN_OPERATIONS
 local MAX_REVISION = Core.LIMITS.MAX_UINT32
 local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
 local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
+local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
 local COMMAND_VISIBILITY = Core.COMMAND.Visibility
+local COMMAND_ANIMATION = Core.COMMAND.Animation
 
 local CharacterInventory = nil
 local Client = nil
@@ -117,6 +119,7 @@ local function cloneLook(look)
         captured = look.captured == true,
         hideHair = legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
+        useFashionMovementAnimations = look.useFashionMovementAnimations ~= false,
         slots = {}
     }
     for _, entry in ipairs(slots) do
@@ -469,6 +472,8 @@ local function encodeLookJson(look)
     local members = {
         '"schemaVersion":' .. tostring(LOOK_SCHEMA_VERSION),
         '"captured":' .. tostring(look ~= nil and look.captured == true),
+        '"useFashionMovementAnimations":' ..
+            tostring(look == nil or look.useFashionMovementAnimations ~= false),
         '"attachmentVisibility":' .. encodeAttachmentVisibilityJson(
             look ~= nil and look.attachmentVisibility or nil
         )
@@ -612,10 +617,13 @@ local function validateStoredLook(raw, persistenceVersion)
             schemaVersion = true,
             captured = true,
             attachmentVisibility = true,
+            useFashionMovementAnimations = true,
             slots = true,
             colors = true
         }) or raw.hideHair ~= nil or type(raw.attachmentVisibility) ~= "table" or
-            type(raw.colors) ~= "table" then
+            type(raw.colors) ~= "table" or
+            (raw.useFashionMovementAnimations ~= nil and
+                type(raw.useFashionMovementAnimations) ~= "boolean") then
             return nil
         end
         visibility = Core.validateAttachmentVisibility(raw.attachmentVisibility, false)
@@ -648,6 +656,8 @@ local function validateStoredLook(raw, persistenceVersion)
         captured = raw.captured == true,
         hideHair = legacyHideHair(visibility),
         attachmentVisibility = visibility,
+        useFashionMovementAnimations =
+            persistenceVersion ~= PERSISTENCE_VERSION or raw.useFashionMovementAnimations ~= false,
         slots = {}
     }
     local count = 0
@@ -1022,6 +1032,7 @@ local function canonicalizeLook(raw, requireCaptured)
         captured = raw.captured == true,
         hideHair = legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
+        useFashionMovementAnimations = raw.useFashionMovementAnimations ~= false,
         slots = {}
     }
     local count, payloadBytes = 0, 16
@@ -1062,6 +1073,8 @@ local function captureAuthoritativeLook(character, clientLook)
         captured = true,
         hideHair = legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
+        useFashionMovementAnimations =
+            type(clientLook) ~= "table" or clientLook.useFashionMovementAnimations ~= false,
         slots = {}
     }
     for _, entry in ipairs(slots) do
@@ -1465,21 +1478,28 @@ local function commitApply(session, character, look)
     return true, "ok"
 end
 
-local function commitVisibility(session, requestedLook)
+local function commitVisualPreference(session, requestedLook, preference)
     if not canAdvanceRevision(session) then return false, "revision_exhausted" end
     if session.savedLook == nil then return false, "look_unavailable" end
-    if type(requestedLook) ~= "table" then return false, "visibility_unavailable" end
-    local attachmentVisibility, visibilityReason =
-        Core.validateAttachmentVisibility(requestedLook.attachmentVisibility, requestedLook.hideHair == true)
-    if attachmentVisibility == nil then return false, visibilityReason or "invalid_attachment_visibility" end
+    if type(requestedLook) ~= "table" then return false, preference .. "_unavailable" end
 
-    -- Only merge the visibility policy into the authoritative server capture.
-    -- Client-supplied slots are deliberately ignored so this command cannot be
-    -- used to replace or smuggle equipment identifiers.
+    -- Preference commands merge only their own policy field. Client-supplied
+    -- slots are deliberately ignored so they cannot replace equipment IDs.
     local merged = cloneLook(session.savedLook)
-    merged.attachmentVisibility = Core.validateAttachmentVisibility(attachmentVisibility, false) or
-        Core.attachmentVisibilityFromLegacy(false)
-    merged.hideHair = legacyHideHair(merged.attachmentVisibility)
+    if preference == COMMAND_VISIBILITY then
+        local attachmentVisibility, visibilityReason =
+            Core.validateAttachmentVisibility(requestedLook.attachmentVisibility, requestedLook.hideHair == true)
+        if attachmentVisibility == nil then
+            return false, visibilityReason or "invalid_attachment_visibility"
+        end
+        merged.attachmentVisibility = Core.validateAttachmentVisibility(attachmentVisibility, false) or
+            Core.attachmentVisibilityFromLegacy(false)
+        merged.hideHair = legacyHideHair(merged.attachmentVisibility)
+    elseif preference == COMMAND_ANIMATION then
+        merged.useFashionMovementAnimations = requestedLook.useFashionMovementAnimations ~= false
+    else
+        return false, "unknown_preference"
+    end
 
     local previous = snapshotCommitState(session)
     nextRevision(session)
@@ -1540,7 +1560,8 @@ local validCommandKinds = {
     apply = true,
     clear = true,
     forget = true,
-    [COMMAND_VISIBILITY] = true
+    [COMMAND_VISIBILITY] = true,
+    [COMMAND_ANIMATION] = true
 }
 
 local function validateV2Envelope(command)
@@ -1557,7 +1578,10 @@ local function validateV2Envelope(command)
     local envelopeBytes = 16 + byteLength(command.clientSessionId) + byteLength(command.operationId) + byteLength(command.kind)
     if envelopeBytes > MAX_PAYLOAD_BYTES then return false, "payload_too_large" end
     if (command.kind == "clear" or command.kind == "forget") and command.hasLook then return false, "unexpected_look" end
-    if command.kind == COMMAND_VISIBILITY and not command.hasLook then return false, "missing_look" end
+    if (command.kind == COMMAND_VISIBILITY or command.kind == COMMAND_ANIMATION) and
+        not command.hasLook then
+        return false, "missing_look"
+    end
     return true
 end
 
@@ -1585,7 +1609,7 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     local written, writeReason = Core.writeServerHello(
         response,
         math.max(0, session.revision),
-        CAPABILITY_ATTACHMENT_VISIBILITY
+        CAPABILITY_ATTACHMENT_VISIBILITY + CAPABILITY_MOVEMENT_ANIMATION_SOURCE
     )
     if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
     Networking.Send(response, client.Connection)
@@ -1637,7 +1661,9 @@ Networking.Receive(NET.V2_COMMAND, function(message, client)
         if character ~= nil and look ~= nil then accepted, reason = commitApply(session, character, look)
         elseif look == nil and reason == nil then reason = "look_unavailable" end
     elseif command.kind == COMMAND_VISIBILITY then
-        accepted, reason = commitVisibility(session, command.look)
+        accepted, reason = commitVisualPreference(session, command.look, COMMAND_VISIBILITY)
+    elseif command.kind == COMMAND_ANIMATION then
+        accepted, reason = commitVisualPreference(session, command.look, COMMAND_ANIMATION)
     elseif command.kind == "clear" then
         accepted, reason = commitClear(session, false)
     elseif command.kind == "forget" then
@@ -1678,7 +1704,8 @@ end
 local function selectLegacyProtocol(session)
     if session == nil then return false end
     if session.protocol == PROTOCOL_VERSION then
-        warn("Ignored a legacy wardrobe command after this connection negotiated protocol v3.")
+        warn("Ignored a legacy wardrobe command after this connection negotiated protocol " ..
+            tostring(PROTOCOL_VERSION) .. ".")
         return false
     end
     session.protocol = 1

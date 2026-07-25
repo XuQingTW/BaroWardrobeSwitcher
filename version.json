@@ -1,6 +1,6 @@
 {
   "modVersion": "0.5.3",
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "lookSchemaVersion": 3,
   "persistenceVersion": 4,
   "barotraumaGameVersion": "1.13.4.0",

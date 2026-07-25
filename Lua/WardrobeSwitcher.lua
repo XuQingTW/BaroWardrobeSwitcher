@@ -3,10 +3,10 @@
 local MOD_NAME = "Baro Wardrobe Switcher"
 local Core = assert(
     type(WardrobeCore) == "table" and
-    tonumber(WardrobeCore.PROTOCOL_VERSION) == 3 and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 4 and
     type(WardrobeCore.NET) == "table" and
     WardrobeCore,
-    "Baro Wardrobe Switcher requires WardrobeCore protocol 3")
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 4")
 local EXPECTED_CSHARP_VERSION = tostring(Core.MOD_VERSION)
 local NET = Core.NET
 local NET_SAVE_REQUEST = NET.V1_SAVE_REQUEST
@@ -24,9 +24,11 @@ local COMMAND_APPLY = Core.COMMAND.Apply
 local COMMAND_CLEAR = Core.COMMAND.Clear
 local COMMAND_FORGET = Core.COMMAND.Forget
 local COMMAND_VISIBILITY = Core.COMMAND.Visibility
+local COMMAND_ANIMATION = Core.COMMAND.Animation
 local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
 local ATTACHMENT_VISIBILITY = Core.ATTACHMENT_VISIBILITY
 local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
+local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
 
 if SERVER then return end
 
@@ -194,6 +196,9 @@ local persistenceFailureReason
 local protocolMode = "probing"
 local serverCapabilities = 0
 local visibilitySyncPendingNegotiation = false
+local movementAnimationSyncPendingNegotiation = false
+-- Forward declaration: persistence helpers are defined before the UI/render helpers.
+local currentMovementAnimationSource
 local protocolHelloSentAt = nil
 local protocolCommandQueue = {}
 local inFlightV2Command = nil
@@ -294,6 +299,11 @@ local function serverSupportsAttachmentVisibility()
         math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_ATTACHMENT_VISIBILITY) % 2 == 1
 end
 
+local function serverSupportsMovementAnimationSource()
+    return protocolMode == "v3" and
+        math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_MOVEMENT_ANIMATION_SOURCE) % 2 == 1
+end
+
 local function lookDataHasSavedLook(lookData, captured)
     if captured == true then return true end
     lookData = lookData or {}
@@ -347,12 +357,13 @@ local function rememberLegacyLookMetadata(lookData)
     end
 end
 
-local function domainLookFromLegacy(lookData, captured, hairHidden, visibility)
+local function domainLookFromLegacy(lookData, captured, hairHidden, visibility, movementAnimationSource)
     local look = Core.fromLegacyLook(
         lookData or {},
         captured == true,
         hairHidden == true,
-        visibility
+        visibility,
+        movementAnimationSource
     )
     return look
 end
@@ -659,6 +670,7 @@ function Helpers.encodePersistentClientLook(lookData, captured, active, auto, vi
         "active=" .. tostring(active == true),
         "auto=" .. tostring(auto == true),
         "hidehair=" .. tostring(hairHidden == true),
+        "fashionMovement=" .. tostring(currentMovementAnimationSource()),
         "visibilityHair=" .. visibility.Hair,
         "visibilityBeard=" .. visibility.Beard,
         "visibilityMoustache=" .. visibility.Moustache,
@@ -924,6 +936,7 @@ function Helpers.restorePersistentClientLookLine(line, source)
     local auto = false
     local restoredHideHair = false
     local restoredAttachmentVisibility = nil
+    local restoredMovementAnimationSource = true
     local restoredSessionKey = nil
     local restoredColors = {}
     local seen = {}
@@ -960,6 +973,9 @@ function Helpers.restorePersistentClientLookLine(line, source)
         elseif name == "hidehair" then
             restoredHideHair = parseBoolean(name, value)
             if restoredHideHair == nil then return false end
+        elseif name == "fashionMovement" then
+            restoredMovementAnimationSource = parseBoolean(name, value)
+            if restoredMovementAnimationSource == nil then return false end
         elseif name == "visibilityHair" or
             name == "visibilityBeard" or
             name == "visibilityMoustache" or
@@ -1022,13 +1038,15 @@ function Helpers.restorePersistentClientLookLine(line, source)
         restoredLook,
         captured,
         restoredHideHair,
-        restoredAttachmentVisibility
+        restoredAttachmentVisibility,
+        restoredMovementAnimationSource
     )
     if domainLook == nil then
         Helpers.debugLog("Rejected persistent client look: " .. tostring(lookReason))
         return false
     end
     rememberLegacyLookMetadata(restoredLook)
+    useFashionMovementAnimations = restoredMovementAnimationSource
     persistentClientLookLoaded = true
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
@@ -2033,6 +2051,18 @@ function Helpers.setAttachmentVisibilityVisual(character, value)
     return result == true
 end
 
+currentMovementAnimationSource = function()
+    if not (Game ~= nil and Game.IsMultiplayer == true) or
+        movementAnimationSyncPendingNegotiation or
+        protocolMode == "v1" or
+        (protocolMode == "v3" and not serverSupportsMovementAnimationSource()) then
+        return useFashionMovementAnimations == true
+    end
+    local look = reducerState.look
+    if look ~= nil then return look.useFashionMovementAnimations ~= false end
+    return useFashionMovementAnimations == true
+end
+
 function Helpers.setFashionMovementAnimationsVisual(character, enabled)
     if Helpers.ensureVisualOverride() == nil or character == nil then return false end
     local ok, result = pcall(function()
@@ -2143,7 +2173,12 @@ function Helpers.sendLegacyCommand(command)
     return ok == true
 end
 
-function Helpers.writeProjectedV2Look(message, look)
+function Helpers.writeProjectedV2Look(
+    message,
+    look,
+    includeAttachmentVisibility,
+    includeMovementAnimationSource
+)
     local valid, reason = Core.validateLook(look)
     if valid == nil then return false, reason end
     message.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
@@ -2164,6 +2199,19 @@ function Helpers.writeProjectedV2Look(message, look)
             if color ~= nil then message.WriteUInt32(color) end
         end
     end
+    if includeAttachmentVisibility == true or includeMovementAnimationSource == true then
+        local forceHide, forceShow = 0, 0
+        if includeAttachmentVisibility == true then
+            forceHide, forceShow = Core.attachmentVisibilityMasks(valid.attachmentVisibility)
+        end
+        message.WriteByte(Core.LOOK_EXTENSION_MARKER)
+        message.WriteByte(includeMovementAnimationSource == true and Core.LOOK_EXTENSION_VERSION or 1)
+        message.WriteByte(forceHide)
+        message.WriteByte(forceShow)
+        if includeMovementAnimationSource == true then
+            message.WriteByte(valid.useFashionMovementAnimations and 1 or 0)
+        end
+    end
     return true
 end
 
@@ -2171,7 +2219,7 @@ function Helpers.writeAndSendV2Command(command, baseRevision)
     if Networking == nil or command == nil then return false end
     local ok, reason = pcall(function()
         local message = Networking.Start(NET_V2_COMMAND)
-        if serverSupportsAttachmentVisibility() then
+        if serverSupportsAttachmentVisibility() and serverSupportsMovementAnimationSource() then
             local written, writeReason = Core.writeCommand(message, {
                 clientSessionId = clientSessionId,
                 operationId = command.operationId,
@@ -2182,7 +2230,13 @@ function Helpers.writeAndSendV2Command(command, baseRevision)
             if not written then error(writeReason) end
         else
             if command.kind == COMMAND_VISIBILITY then
-                error("server does not advertise attachment visibility support")
+                if not serverSupportsAttachmentVisibility() then
+                    error("server does not advertise attachment visibility support")
+                end
+            elseif command.kind == COMMAND_ANIMATION then
+                if not serverSupportsMovementAnimationSource() then
+                    error("server does not advertise movement animation synchronization support")
+                end
             end
             message.WriteUInt16(Core.PROTOCOL_VERSION)
             message.WriteString(clientSessionId)
@@ -2191,7 +2245,12 @@ function Helpers.writeAndSendV2Command(command, baseRevision)
             message.WriteString(command.kind)
             message.WriteBoolean(command.look ~= nil)
             if command.look ~= nil then
-                local written, writeReason = Helpers.writeProjectedV2Look(message, command.look)
+                local written, writeReason = Helpers.writeProjectedV2Look(
+                    message,
+                    command.look,
+                    serverSupportsAttachmentVisibility(),
+                    serverSupportsMovementAnimationSource()
+                )
                 if not written then error(writeReason) end
             end
         end
@@ -2290,6 +2349,7 @@ function Helpers.selectV1Protocol(reason)
     protocolMode = "v1"
     serverCapabilities = 0
     visibilitySyncPendingNegotiation = false
+    movementAnimationSyncPendingNegotiation = false
     inFlightV2Command = nil
     Helpers.debugLog("Using v1 wardrobe protocol" .. (reason ~= nil and (": " .. tostring(reason)) or "."))
     Helpers.sendNextProtocolCommand()
@@ -2300,7 +2360,8 @@ function Helpers.selectV2Protocol(revision, capabilities)
     serverCapabilities = tonumber(capabilities) or 0
     local serverRevision = tonumber(revision) or 0
     dispatchReducer({ type = "RevisionObserved", revision = serverRevision })
-    Helpers.debugLog("Negotiated wardrobe protocol v3 at revision " .. tostring(serverRevision) ..
+    Helpers.debugLog("Negotiated wardrobe protocol " .. tostring(Core.PROTOCOL_VERSION) ..
+        " at revision " .. tostring(serverRevision) ..
         " with capabilities 0x" .. string.format("%02X", serverCapabilities) .. ".")
     Helpers.sendNextProtocolCommand()
     return true
@@ -2324,20 +2385,40 @@ function Helpers.flushPendingVisibilitySync()
     return true
 end
 
+function Helpers.flushPendingMovementAnimationSync()
+    if not movementAnimationSyncPendingNegotiation then return false end
+    if not serverSupportsMovementAnimationSource() or not Helpers.hasSavedLook() then
+        movementAnimationSyncPendingNegotiation = false
+        return false
+    end
+    local state = reducerState
+    if state == nil or state.pendingKind ~= nil then return false end
+    movementAnimationSyncPendingNegotiation = false
+    dispatchReducer({
+        type = "SetMovementAnimationSource",
+        enabled = useFashionMovementAnimations == true,
+        remote = true,
+        operationId = nextOperationId()
+    })
+    return true
+end
+
 -- Commands may be queued before protocol negotiation completes. The queue owns
 -- v2 ordering/retries while reducerOwned prevents the same request from being
 -- introduced into the state machine twice.
 function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, reducerOwned, domainLookOverride)
     if not Helpers.isMultiplayerClient() or Networking == nil then return false end
     local domainLook = nil
-    if kind == COMMAND_VISIBILITY then
-        if not serverSupportsAttachmentVisibility() then
-            Helpers.debugLog("Kept attachment visibility local because the server did not advertise support.")
+    if kind == COMMAND_VISIBILITY or kind == COMMAND_ANIMATION then
+        local supported = kind == COMMAND_VISIBILITY and serverSupportsAttachmentVisibility() or
+            kind == COMMAND_ANIMATION and serverSupportsMovementAnimationSource()
+        if not supported then
+            Helpers.debugLog("Kept visual preference local because the server did not advertise support.")
             return false
         end
         domainLook = Core.copyLook(domainLookOverride)
         if domainLook == nil then
-            Helpers.debugLog("Refused to queue invalid attachment visibility.")
+            Helpers.debugLog("Refused to queue an invalid visual preference.")
             return false
         end
     elseif kind == COMMAND_SAVE or kind == COMMAND_APPLY then
@@ -2347,7 +2428,8 @@ function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, red
                 lookData or {},
                 captured == true,
                 legacyHideHairForVisibility(visibility),
-                visibility
+                visibility,
+                currentMovementAnimationSource()
             )
         if domainLook == nil then
             Helpers.debugLog("Refused to queue invalid wardrobe look for " .. tostring(kind) .. ".")
@@ -2422,7 +2504,10 @@ function Helpers.processProtocolNegotiation()
         return
     end
 
-    if protocolMode == "v3" then Helpers.flushPendingVisibilitySync() end
+    if protocolMode == "v3" then
+        Helpers.flushPendingVisibilitySync()
+        Helpers.flushPendingMovementAnimationSync()
+    end
 
     if protocolMode == "v3" and inFlightV2Command ~= nil then
         local elapsed = protocolClock() - (inFlightV2Command.sentAt or 0)
@@ -2616,7 +2701,13 @@ function Helpers.captureFashionPayloadFromLook(character, lookData, diagnostics)
     return true, expectedItems, capturedItems, nil
 end
 
-function Helpers.applyCapturedFashionToCharacterEquipment(character, lookData, recapturePayload, visibilityValue)
+function Helpers.applyCapturedFashionToCharacterEquipment(
+    character,
+    lookData,
+    recapturePayload,
+    visibilityValue,
+    movementAnimationSource
+)
     if character == nil then return false, 0 end
 
     local look = lookData or currentLegacyLook()
@@ -2653,9 +2744,13 @@ function Helpers.applyCapturedFashionToCharacterEquipment(character, lookData, r
         end
     end
 
-    -- Animation source is a local viewing preference, not part of the saved look.
-    -- Apply it after a new render session is committed and before activation.
-    Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
+    -- Apply the authoritative per-look choice after committing the new renderer
+    -- session. Legacy/v1 looks keep the observer's previous local preference.
+    local animationSource = useFashionMovementAnimations
+    if Helpers.isMultiplayerClient() and type(movementAnimationSource) == "boolean" then
+        animationSource = movementAnimationSource
+    end
+    Helpers.setFashionMovementAnimationsVisual(character, animationSource)
 
     local current = Helpers.snapshot(character)
     local equippedItems = {}
@@ -2685,7 +2780,7 @@ function Helpers.applyCapturedFashionToCharacterEquipment(character, lookData, r
     return true, visualItems, nil
 end
 
-function Helpers.applyNetworkLook(character, networkLook, visibilityValue)
+function Helpers.applyNetworkLook(character, networkLook, visibilityValue, movementAnimationSource)
     local diagnostics = {}
     if character == nil or networkLook == nil then return false, diagnostics end
     local visualStatus = Helpers.visualOverrideStatus()
@@ -2720,7 +2815,8 @@ function Helpers.applyNetworkLook(character, networkLook, visibilityValue)
         character,
         networkLook,
         false,
-        visibilityValue
+        visibilityValue,
+        movementAnimationSource
     )
     diagnostics[#diagnostics + 1] = "activated=" .. tostring(activated == true) .. ", expectedItems=" .. tostring(expectedItems) .. ", capturedItems=" .. tostring(capturedItems)
     return activated == true, diagnostics
@@ -2744,7 +2840,8 @@ clientEffectAdapters.Capture = function(currentEffect)
         lookData,
         true,
         legacyHideHairForVisibility(visibility),
-        visibility
+        visibility,
+        currentMovementAnimationSource()
     )
     if domainLook == nil then return false, tostring(lookReason or "captured look failed schema v3 validation") end
     rememberLegacyLookMetadata(lookData)
@@ -2958,7 +3055,8 @@ clientEffectAdapters.Render = function(currentEffect)
         applied, diagnostics = Helpers.applyNetworkLook(
             character,
             lookData,
-            currentEffect.look.attachmentVisibility
+            currentEffect.look.attachmentVisibility,
+            currentEffect.look.useFashionMovementAnimations
         )
     else
         local reason
@@ -2967,7 +3065,8 @@ clientEffectAdapters.Render = function(currentEffect)
             character,
             lookData,
             not reuseCapturedSession,
-            currentEffect.look.attachmentVisibility
+            currentEffect.look.attachmentVisibility,
+            currentEffect.look.useFashionMovementAnimations
         )
         diagnostics = reason ~= nil and { reason } or
             (reuseCapturedSession and { "reused committed renderer session" } or {})
@@ -3002,7 +3101,8 @@ clientEffectAdapters.RenderCompensation = function(currentEffect)
         character,
         lookData,
         true,
-        currentEffect.look.attachmentVisibility
+        currentEffect.look.attachmentVisibility,
+        currentEffect.look.useFashionMovementAnimations
     )
     if applied then return { type = "CompensationSucceeded" } end
     return { type = "CompensationFailed", reason = reason }
@@ -3068,6 +3168,29 @@ clientEffectAdapters.ApplyAttachmentVisibilityCompensation = function(currentEff
         return { type = "CompensationSucceeded" }
     end
     return { type = "CompensationFailed", reason = "attachment visibility rollback failed" }
+end
+
+clientEffectAdapters.ApplyMovementAnimationSource = function(currentEffect)
+    local character = controlled()
+    if character == nil then return false, "no controlled character" end
+    if Helpers.setFashionMovementAnimationsVisual(
+        character,
+        currentEffect.useFashionMovementAnimations == true
+    ) then
+        return { type = "MovementAnimationSourceUpdateSucceeded" }
+    end
+    return false, "renderer rejected movement animation source"
+end
+
+clientEffectAdapters.ApplyMovementAnimationSourceCompensation = function(currentEffect)
+    local character = controlled()
+    if character ~= nil and Helpers.setFashionMovementAnimationsVisual(
+        character,
+        currentEffect.useFashionMovementAnimations == true
+    ) then
+        return { type = "CompensationSucceeded" }
+    end
+    return { type = "CompensationFailed", reason = "movement animation source rollback failed" }
 end
 
 function Helpers.saveFashionAndUnequip()
@@ -3493,7 +3616,8 @@ function Helpers.processPendingSinglePlayerRestores()
                     character,
                     lookData,
                     true,
-                    state.look.attachmentVisibility
+                    state.look.attachmentVisibility,
+                    state.look.useFashionMovementAnimations
                 )
                 if applied then
                     state.active = true
@@ -3605,7 +3729,10 @@ function Helpers.networkApplySignature(character, networkLook, protocolLook)
     local key = characterStateKey(character)
     if key == nil then return nil end
     local visibility = protocolLook ~= nil and protocolLook.attachmentVisibility or nil
+    local animationSource = protocolLook ~= nil and
+        tostring(protocolLook.useFashionMovementAnimations ~= false) or "legacy"
     return key .. "|" .. lookDataSignature(networkLook, true, visibility) ..
+        "|fashionMovement=" .. animationSource ..
         "|" .. Helpers.equipmentSignature(character)
 end
 
@@ -3675,7 +3802,8 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             networkLook,
             true,
             hairHidden,
-            protocolLook ~= nil and protocolLook.attachmentVisibility or nil
+            protocolLook ~= nil and protocolLook.attachmentVisibility or nil,
+            useFashionMovementAnimations
         )
         rememberLegacyLookMetadata(networkLook)
         local effects = dispatchReducer({
@@ -3712,7 +3840,8 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             networkLook,
             true,
             legacyHideHairForVisibility(visibility),
-            visibility
+            visibility,
+            useFashionMovementAnimations
         )
         rememberLegacyLookMetadata(networkLook)
         dispatchReducer({ type = "LocalApplyRequested", look = domainLook })
@@ -3739,7 +3868,16 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             protocolLook.attachmentVisibility or
             Core.attachmentVisibilityFromLegacy(hairHidden == true)
     end
-    local applied, diagnostics = Helpers.applyNetworkLook(character, networkLook, networkVisibility)
+    local networkAnimationSource = nil
+    if protocolRevision ~= nil and protocolLook ~= nil then
+        networkAnimationSource = protocolLook.useFashionMovementAnimations ~= false
+    end
+    local applied, diagnostics = Helpers.applyNetworkLook(
+        character,
+        networkLook,
+        networkVisibility,
+        networkAnimationSource
+    )
     if applied then
         Helpers.rememberNetworkLookApplied(character, networkLook, protocolLook)
     end
@@ -3927,6 +4065,11 @@ if Networking ~= nil then
                     state.look.hideHair =
                         legacyHideHairForVisibility(state.look.attachmentVisibility)
                 end
+            end
+            if belongsToControlledCharacter and
+                not serverSupportsMovementAnimationSource() and
+                state.look ~= nil then
+                state.look.useFashionMovementAnimations = currentMovementAnimationSource()
             end
 
             if not belongsToControlledCharacter then
@@ -4128,7 +4271,7 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         singlePlayer = isSinglePlayerClient(),
         profileLabel = Helpers.singlePlayerProfileLabel(character),
         transferEnabled = transferToUnconfiguredCharacter == true,
-        useFashionMovementAnimations = useFashionMovementAnimations == true,
+        useFashionMovementAnimations = currentMovementAnimationSource(),
         overrideLabel = tostring(overrideState.label),
         overrideDetails = overrideState.details
     }
@@ -4178,6 +4321,33 @@ function Helpers.updateAttachmentVisibility(nextVisibility)
     lastOperation = remote and
         "Appearance-layer visibility update sent to the server." or
         "Appearance-layer visibility saved locally."
+    return true
+end
+
+function Helpers.updateMovementAnimationSource(enabled)
+    local character = controlled()
+    useFashionMovementAnimations = enabled == true
+    if not Helpers.hasSavedLook() or not Helpers.isMultiplayerClient() then
+        return Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
+    end
+    if protocolMode == "probing" then
+        movementAnimationSyncPendingNegotiation = true
+        return Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
+    end
+    if not serverSupportsMovementAnimationSource() then
+        return Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
+    end
+    dispatchReducer({
+        type = "SetMovementAnimationSource",
+        enabled = useFashionMovementAnimations,
+        remote = true,
+        operationId = nextOperationId()
+    })
+    local state = reducerState
+    if state ~= nil and state.phase == Core.PHASE.Faulted then
+        Helpers.log("Movement-animation source update failed: " .. tostring(state.error))
+        return false
+    end
     return true
 end
 
@@ -4245,8 +4415,7 @@ buildWindow = function()
                 tr("button.animation_fashion") or
                 tr("button.animation_equipment"),
             function()
-                useFashionMovementAnimations = not useFashionMovementAnimations
-                Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
+                Helpers.updateMovementAnimationSource(not view.useFashionMovementAnimations)
             end,
             true,
             overrideState.ready
@@ -4427,6 +4596,7 @@ function Helpers.resetSavedLookForNewSession()
     protocolMode = "probing"
     serverCapabilities = 0
     visibilitySyncPendingNegotiation = false
+    movementAnimationSyncPendingNegotiation = false
     protocolHelloSentAt = nil
     protocolCommandQueue = {}
     inFlightV2Command = nil

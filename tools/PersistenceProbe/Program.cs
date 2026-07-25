@@ -135,7 +135,7 @@ void TestCanonicalV4()
 {
     string directory = NewCaseDirectory("canonical");
     Assert(Save(
-            "schema=4|captured=true|active=true|auto=true|hidehair=false|" +
+            "schema=4|captured=true|active=true|auto=true|hidehair=false|fashionMovement=false|" +
             "visibilityHair=show|visibilityBeard=hide|visibilityMoustache=auto|" +
             "visibilityFaceAttachment=show|Head=divinghelmet,Display Name|HeadColor=2131821311"),
         "SaveClientLook rejected a valid canonical look.");
@@ -150,13 +150,15 @@ void TestCanonicalV4()
         expectedBeard: "hide",
         expectedMoustache: "auto",
         expectedFaceAttachment: "show",
+        expectedFashionMovement: false,
         expectedHeadColor: 2131821311);
     string loaded = Load();
     Assert(loaded.Contains("Head=divinghelmet,", StringComparison.Ordinal) &&
            loaded.Contains("HeadColor=2131821311", StringComparison.Ordinal) &&
            loaded.Contains("visibilityHair=show", StringComparison.Ordinal) &&
-           loaded.Contains("visibilityFaceAttachment=show", StringComparison.Ordinal),
-        "Canonical attachment visibility did not round-trip through LoadClientLook.");
+           loaded.Contains("visibilityFaceAttachment=show", StringComparison.Ordinal) &&
+           loaded.Contains("fashionMovement=false", StringComparison.Ordinal),
+        "Canonical visibility or movement-animation source did not round-trip through LoadClientLook.");
     byte[] beforeInvalidColor = File.ReadAllBytes(path);
     Assert(!Save("captured=true|Head=helmet,|HeadColor=4294967296"),
         "An out-of-range encoded color was accepted.");
@@ -944,17 +946,21 @@ void ValidateCanonicalFile(
     string? expectedBeard = null,
     string? expectedMoustache = null,
     string expectedFaceAttachment = "auto",
+    bool expectedFashionMovement = true,
     uint? expectedHeadColor = null)
 {
     using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
     JsonElement root = document.RootElement;
     string[] actualProperties = root.EnumerateObject().Select(property => property.Name).Order().ToArray();
-    string[] expectedProperties = ["attachmentVisibility", "captured", "colors", "schemaVersion", "slots"];
+    string[] expectedProperties =
+        ["attachmentVisibility", "captured", "colors", "schemaVersion", "slots", "useFashionMovementAnimations"];
     Array.Sort(expectedProperties, StringComparer.Ordinal);
     Assert(actualProperties.SequenceEqual(expectedProperties, StringComparer.Ordinal),
         "Schema v4 contains missing or extra top-level properties.");
     Assert(root.GetProperty("schemaVersion").GetInt32() == 4, "Schema version is not 4.");
     Assert(root.GetProperty("captured").GetBoolean() == expectedCaptured, "Captured intent mismatch.");
+    Assert(root.GetProperty("useFashionMovementAnimations").GetBoolean() == expectedFashionMovement,
+        "Movement-animation source mismatch.");
     Assert(!root.TryGetProperty("hideHair", out _),
         "Schema v4 must not persist authoritative hideHair.");
     string legacyState = expectedHideHair ? "hide" : "auto";
