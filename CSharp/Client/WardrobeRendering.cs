@@ -302,6 +302,7 @@ namespace BaroWardrobeSwitcher
         private readonly Dictionary<WearableSprite, FashionSpriteDescriptor> descriptorsBySprite =
             new Dictionary<WearableSprite, FashionSpriteDescriptor>();
         private readonly List<Item> ownedTemporaryItems = new List<Item>();
+        private readonly List<Limb> ownedAppendageLimbs = new List<Limb>();
         private readonly Dictionary<Limb, object> activeDraws = new Dictionary<Limb, object>();
         private RenderSession pendingCapture;
         private bool disposed;
@@ -323,6 +324,10 @@ namespace BaroWardrobeSwitcher
         public HashSet<InvSlotType> SavedSlots { get; set; } = new HashSet<InvSlotType>();
 
         public List<object> FashionAnimations { get; } = new List<object>();
+
+        // This is a local rendering preference. It deliberately stays outside the
+        // saved-look/network schema so clients can choose their own animation source.
+        public bool UseFashionMovementAnimations { get; set; } = true;
 
         public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();
 
@@ -424,6 +429,35 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        public bool HasOwnedAppendages => ownedAppendageLimbs.Count > 0;
+
+        public bool OwnsAppendage(Limb limb)
+        {
+            return limb != null && ownedAppendageLimbs.Contains(limb);
+        }
+
+        public void SetOwnedAppendages(IEnumerable<Limb> limbs)
+        {
+            RemoveOwnedAppendages();
+            if (limbs == null) { return; }
+            ownedAppendageLimbs.AddRange(limbs.Where(limb => limb != null).Distinct());
+        }
+
+        public void RemoveOwnedAppendages()
+        {
+            List<Limb> appendages = ownedAppendageLimbs.ToList();
+            ownedAppendageLimbs.Clear();
+            if (Character == null || Character.Removed || Character.AnimController == null) { return; }
+
+            // Match the game's AfflictionHusk cleanup path, but keep shutdown cleanup
+            // best-effort so a stale mod limb cannot crash the client.
+            foreach (Limb limb in appendages)
+            {
+                if (limb == null || limb.Removed) { continue; }
+                try { Character.AnimController.RemoveLimb(limb); } catch { }
+            }
+        }
+
         public void MarkLiveItemSource()
         {
             HasLiveItemSources = true;
@@ -484,6 +518,7 @@ namespace BaroWardrobeSwitcher
             disposed = true;
             IsActive = false;
             AbortPendingCapture();
+            RemoveOwnedAppendages();
             activeDraws.Clear();
 
             foreach (FashionSpriteDescriptor descriptor in descriptorsBySprite.Values.Distinct().ToList())

@@ -110,6 +110,37 @@ $contracts = @(
             "session.SuppressedEquipmentSounds.Remove(statusEffect);",
             "if (!FashionEffectPolicy.ShouldCaptureStatusSound(statusEffect)) { continue; }"
         )
+    },
+    @{
+        Name = "xds-appendage-compatibility"
+        Source = $renderer
+        Required = @(
+            "internal static bool ShouldSuppressEquipmentAppendage(Limb limb)",
+            "session.SavedSlots.Contains(InvSlotType.Bag)",
+            "session.EmptySlots.Contains(InvSlotType.Bag)",
+            "GetItemInLimbSlot(InvSlotType.Bag)",
+            'private const string Xds01EngineIdentifier = "Wf_New_XDS01_Engine";',
+            'private const string Xds01EngineAfflictionIdentifier = "XDS01engine";',
+            "private static bool EnsureXdsFashionAppendage(Character character, RenderSession session)",
+            "AfflictionHusk.AttachHuskAppendage(character, huskPrefab, huskedSpeciesName)",
+            "session.SetOwnedAppendages(appendages);",
+            "session.OwnsAppendage(limb)",
+            "session.RemoveOwnedAppendages();",
+            "limb.type != LimbType.None",
+            'private const string Xds01AppendageTexture = "Wf_New_XDS01_Engine_limb.png";'
+        )
+    },
+    @{
+        Name = "movement-animation-source"
+        Source = $all
+        Required = @(
+            "public bool UseFashionMovementAnimations { get; set; } = true;",
+            "public static bool SetUseFashionMovementAnimations(Character character, bool enabled)",
+            "session.UseFashionMovementAnimations = enabled;",
+            "if (!session.UseFashionMovementAnimations) { return true; }",
+            "!session.UseFashionMovementAnimations ||",
+            "session.FashionAnimations.Count == 0"
+        )
     }
 )
 
@@ -118,6 +149,9 @@ foreach ($contract in $contracts) {
 }
 
 if ($all.Contains(".MemberwiseClone(")) { throw "Renderer resources must not be shallow-cloned." }
+if ($renderer.Contains("CharacterHealth.ApplyAffliction")) {
+    throw "Experimental XDS rendering must not apply gameplay afflictions."
+}
 
 $visibility = Get-Section $renderer `
     "private static bool ShouldHideAttachmentForFashion(" `
@@ -135,4 +169,23 @@ Assert-Order "temporary-item-id-and-color" $fallback @(
     "tempItem.FreeID();",
     "tempItem.SpriteColor = new Color(packedColor.Value);",
     "CaptureFashionItemCore(character, tempItem"
+)
+
+$xdsAppendage = Get-Section $renderer `
+    "private static bool EnsureXdsFashionAppendage(Character character, RenderSession session)" `
+    "internal static bool TryOverrideDrawWearable("
+Assert-Order "xds-experimental-appendage-lifecycle" $xdsAppendage @(
+    "AfflictionHusk.AttachHuskAppendage(character, huskPrefab, huskedSpeciesName);",
+    "appendages.Count != Xds01ExpectedAppendageLimbCount",
+    "session.SetOwnedAppendages(appendages);",
+    "return true;"
+)
+
+$limbDrawPrefix = Get-Section $renderer `
+    "private static bool Prefix(Limb __instance, out VisualOverride.LimbRenderTransaction __state)" `
+    "private static void Postfix("
+Assert-Order "appendage-check-before-render-transaction" $limbDrawPrefix @(
+    "ShouldSuppressEquipmentAppendage(__instance)",
+    "return false;",
+    "BeginLimbDraw(__instance)"
 )

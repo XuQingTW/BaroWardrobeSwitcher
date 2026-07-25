@@ -86,6 +86,8 @@ TextManager = {
     Get = function(tag) return localizedText[tostring(tag)] end
 }
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.save"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_fashion"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_equipment"))
 assert(not TextManager.ContainsTag("barowardrobeswitcher.button.hide_hair"))
 SERVER = false
 CLIENT = true
@@ -176,6 +178,8 @@ local activationCount = 0
 local attachmentVisibilityCalls = 0
 local lastForceHideMask = nil
 local lastForceShowMask = nil
+local movementAnimationCalls = 0
+local lastUseFashionMovementAnimations = nil
 local activationCharacterIds = {}
 local activeCharacterIds = {}
 local capturedIdentifierByCharacterId = {}
@@ -227,6 +231,11 @@ local visualOverride = {
         attachmentVisibilityCalls = attachmentVisibilityCalls + 1
         lastForceHideMask = forceHideMask
         lastForceShowMask = forceShowMask
+        return true
+    end,
+    SetUseFashionMovementAnimations = function(_, enabled)
+        movementAnimationCalls = movementAnimationCalls + 1
+        lastUseFashionMovementAnimations = enabled == true
         return true
     end,
     ActivateFashionVisual = function(character)
@@ -486,6 +495,30 @@ assert(removedWidgets == removesBeforeMoreOptions + 1,
     "expanding More Options did not replace the previous overlay on the next tick")
 assert(liveOverlayRoots == 1, "expanding More Options left an old overlay root alive")
 assert(hasVisibleText(tutorialText), "More Options unexpectedly changed the guide state")
+local fashionMovementButton = buttons["Movement: Fashion Priority"]
+assert(fashionMovementButton ~= nil and type(fashionMovementButton.OnClicked) == "function",
+    "More Options did not expose the default fashion-priority movement setting")
+local removesBeforeEquipmentMovement = removedWidgets
+fashionMovementButton.OnClicked()
+assert(removedWidgets == removesBeforeEquipmentMovement,
+    "changing the movement source rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeEquipmentMovement + 1 and liveOverlayRoots == 1,
+    "changing to equipped movement did not replace exactly one overlay on the next tick")
+assert(movementAnimationCalls == 1 and lastUseFashionMovementAnimations == false,
+    "the equipped-gear movement choice was not passed to the renderer")
+local equipmentMovementButton = buttons["Movement: Equipped Gear"]
+assert(equipmentMovementButton ~= nil and type(equipmentMovementButton.OnClicked) == "function",
+    "the equipped-gear movement choice did not update its button label")
+local removesBeforeFashionMovement = removedWidgets
+equipmentMovementButton.OnClicked()
+assert(removedWidgets == removesBeforeFashionMovement,
+    "restoring fashion movement rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeFashionMovement + 1 and liveOverlayRoots == 1,
+    "restoring fashion movement did not replace exactly one overlay on the next tick")
+assert(movementAnimationCalls == 2 and lastUseFashionMovementAnimations == true,
+    "the fashion-priority movement choice was not passed to the renderer")
 local lessOptionsButton = buttons["Hide Additional Options"]
 assert(lessOptionsButton ~= nil and type(lessOptionsButton.OnClicked) == "function",
     "the expanded panel did not expose its collapse control")

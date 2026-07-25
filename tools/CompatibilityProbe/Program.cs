@@ -54,6 +54,19 @@ Type RequireType(string fullName)
     return type;
 }
 
+Type RequireGameOrCoreType(string fullName)
+{
+    Type? type =
+        game.GetType(fullName, throwOnError: false) ??
+        gameCore?.GetType(fullName, throwOnError: false);
+    if (type is null)
+    {
+        failures.Add($"type missing: {fullName}");
+        return typeof(void);
+    }
+    return type;
+}
+
 Type RequireExternalType(string assemblyFile, string fullName)
 {
     string path = Path.Combine(installDir, assemblyFile);
@@ -206,6 +219,7 @@ Type camera = RequireType("Barotrauma.Camera");
 Type wearableSprite = RequireType("Barotrauma.WearableSprite");
 Type sprite = RequireType("Barotrauma.Sprite");
 Type character = RequireType("Barotrauma.Character");
+Type characterInventory = RequireType("Barotrauma.CharacterInventory");
 Type characterInfo = RequireType("Barotrauma.CharacterInfo");
 Type animController = RequireType("Barotrauma.AnimController");
 Type statusEffect = RequireType("Barotrauma.StatusEffect");
@@ -215,6 +229,13 @@ Type item = RequireType("Barotrauma.Item");
 Type hull = RequireType("Barotrauma.Hull");
 Type itemComponent = RequireType("Barotrauma.Items.Components.ItemComponent");
 Type actionType = RequireType("Barotrauma.ActionType");
+Type afflictionHusk = RequireType("Barotrauma.AfflictionHusk");
+Type afflictionPrefab = RequireType("Barotrauma.AfflictionPrefab");
+Type afflictionPrefabHusk = RequireType("Barotrauma.AfflictionPrefabHusk");
+Type characterParams = RequireType("Barotrauma.CharacterParams");
+Type ragdoll = RequireType("Barotrauma.Ragdoll");
+Type identifier = RequireGameOrCoreType("Barotrauma.Identifier");
+Type contentXElement = RequireType("Barotrauma.ContentXElement");
 Type networkClient = RequireType("Barotrauma.Networking.Client");
 Type guiComponent = RequireType("Barotrauma.GUIComponent");
 string monoGameFile = new[]
@@ -233,6 +254,9 @@ RequirePublicProperty("Item.SpriteColor type", item, "SpriteColor", color);
 RequireReadWriteProperty("Color.PackedValue", color, "PackedValue");
 RequireConstructor("Color(uint)", color, new[] { typeof(uint) });
 RequirePublicProperty("Character.Info", character, "Info", characterInfo);
+RequirePublicProperty("Character.Inventory", character, "Inventory", characterInventory);
+RequireAnyPublicField("Character.AnimController", character, "AnimController");
+RequirePublicField("Character.Params", character, "Params", characterParams);
 RequirePublicStaticField("Character.CharacterList", character, "CharacterList");
 RequirePublicProperty("Character.IsBot", character, "IsBot", typeof(bool));
 RequirePublicProperty("Character.IsHuman", character, "IsHuman", typeof(bool));
@@ -250,6 +274,16 @@ RequireMethod("Limb.Draw(SpriteBatch,Camera,Color?,bool)", limb, "Draw",
     new[] { spriteBatch, camera, typeof(Nullable<>).MakeGenericType(color), typeof(bool) }, typeof(void));
 RequireMethod("Limb.DrawWearable(WearableSprite,float,SpriteBatch,Color,float,SpriteEffects)", limb, "DrawWearable",
     new[] { wearableSprite, typeof(float), spriteBatch, color, typeof(float), spriteEffects }, typeof(void));
+RequireMethod("AfflictionHusk.AttachHuskAppendage(...)", afflictionHusk, "AttachHuskAppendage",
+    new[] { character, afflictionPrefabHusk, identifier, contentXElement, ragdoll },
+    typeof(List<>).MakeGenericType(limb));
+RequireMethod("AfflictionHusk.GetHuskedSpeciesName(CharacterParams,AfflictionPrefabHusk)",
+    afflictionHusk, "GetHuskedSpeciesName",
+    new[] { characterParams, afflictionPrefabHusk }, identifier);
+RequireMethod("Ragdoll.RemoveLimb(Limb)", ragdoll, "RemoveLimb", new[] { limb }, typeof(void));
+RequirePublicStaticField("AfflictionPrefab.Prefabs", afflictionPrefab, "Prefabs");
+RequireMethod("CharacterInventory.GetItemInLimbSlot(InvSlotType)", characterInventory, "GetItemInLimbSlot",
+    new[] { RequireType("Barotrauma.InvSlotType") }, item);
 FieldInfo? limbParamsField = limb.GetField("Params", AllMembers);
 RequirePublicField("Limb.Params", limb, "Params", limbParamsField?.FieldType ?? typeof(void));
 RequirePublicProperty("LimbParams.ID", limbParamsField?.FieldType ?? typeof(void), "ID", typeof(int));

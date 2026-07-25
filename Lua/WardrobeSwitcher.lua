@@ -151,6 +151,7 @@ local overlayRoot = nil
 local attachmentPanelOpen = false
 local advancedPanelOpen = false
 local tutorialExpanded = true
+local useFashionMovementAnimations = true
 local lastCharacter = nil
 local buildWindow
 local buildAttachmentVisibilityWindow
@@ -2032,6 +2033,19 @@ function Helpers.setAttachmentVisibilityVisual(character, value)
     return result == true
 end
 
+function Helpers.setFashionMovementAnimationsVisual(character, enabled)
+    if Helpers.ensureVisualOverride() == nil or character == nil then return false end
+    local ok, result = pcall(function()
+        return VisualOverride.SetUseFashionMovementAnimations(character, enabled == true)
+    end)
+    if not ok then
+        Helpers.log("Movement-animation source update failed: " .. tostring(result) ..
+            ". Reload the mod so LuaCs recompiles the C# plugin.")
+        return false
+    end
+    return result == true
+end
+
 function Helpers.applyVisualOverrideToItem(character, item, carrier)
     if Helpers.ensureVisualOverride() == nil or character == nil or item == nil then return false end
     local ok, result = pcall(function()
@@ -2638,6 +2652,10 @@ function Helpers.applyCapturedFashionToCharacterEquipment(character, lookData, r
             return false, 0
         end
     end
+
+    -- Animation source is a local viewing preference, not part of the saved look.
+    -- Apply it after a new render session is committed and before activation.
+    Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
 
     local current = Helpers.snapshot(character)
     local equippedItems = {}
@@ -4110,6 +4128,7 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         singlePlayer = isSinglePlayerClient(),
         profileLabel = Helpers.singlePlayerProfileLabel(character),
         transferEnabled = transferToUnconfiguredCharacter == true,
+        useFashionMovementAnimations = useFashionMovementAnimations == true,
         overrideLabel = tostring(overrideState.label),
         overrideDetails = overrideState.details
     }
@@ -4176,7 +4195,7 @@ buildWindow = function()
     end
 
     local panelWidth = advancedPanelOpen and 0.48 or 0.44
-    local basePanelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.72) or 0.52
+    local basePanelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.78) or 0.52
     local panelHeight = math.min(0.98, basePanelHeight + 0.04 + (tutorialExpanded and 0.20 or 0))
     local frame = GUI.Frame(
         GUI.RectTransform(Vector2(panelWidth, panelHeight), parent, GUI.Anchor.Center),
@@ -4220,6 +4239,18 @@ buildWindow = function()
         Helpers.addButton(list, tr("button.attachment_layers"), function()
             attachmentPanelOpen = true
         end, true, view.canSetAttachmentVisibility)
+        Helpers.addButton(
+            list,
+            view.useFashionMovementAnimations and
+                tr("button.animation_fashion") or
+                tr("button.animation_equipment"),
+            function()
+                useFashionMovementAnimations = not useFashionMovementAnimations
+                Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
+            end,
+            true,
+            overrideState.ready
+        )
         if view.singlePlayer then
             Helpers.addButton(
                 list,

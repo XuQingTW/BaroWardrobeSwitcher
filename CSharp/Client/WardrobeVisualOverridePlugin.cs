@@ -1062,6 +1062,10 @@ namespace BaroWardrobeSwitcher
         private const int DefaultFallbackDepthPadding = 8;
         private const int RecessedFallbackDepthStart = -32;
         private const float FashionAnimationPriorityBoost = 10000.0f;
+        private const string Xds01EngineIdentifier = "Wf_New_XDS01_Engine";
+        private const string Xds01EngineAfflictionIdentifier = "XDS01engine";
+        private const string Xds01AppendageTexture = "Wf_New_XDS01_Engine_limb.png";
+        private const int Xds01ExpectedAppendageLimbCount = 6;
         private static readonly WearableType[] FashionHideableAttachmentTypes =
         {
             WearableType.Hair,
@@ -1338,6 +1342,7 @@ namespace BaroWardrobeSwitcher
             foreach (RenderSession session in RenderSessions.Values)
             {
                 session.IsActive = false;
+                session.RemoveOwnedAppendages();
                 session.ForceHideAttachmentMask = 0;
                 session.ForceShowAttachmentMask = 0;
                 session.EmptySlots.Clear();
@@ -1353,6 +1358,7 @@ namespace BaroWardrobeSwitcher
                 session.SuppressedEquipmentSounds.Clear();
                 session.SuppressedEquipmentComponentSounds.Clear();
                 session.IsActive = false;
+                session.RemoveOwnedAppendages();
                 session.ForceHideAttachmentMask = 0;
                 session.ForceShowAttachmentMask = 0;
                 session.EmptySlots.Clear();
@@ -1702,6 +1708,18 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
+        public static bool SetUseFashionMovementAnimations(Character character, bool enabled)
+        {
+            if (character == null ||
+                !RenderSessions.TryGetValue(character, out RenderSession session))
+            {
+                return false;
+            }
+
+            session.UseFashionMovementAnimations = enabled;
+            return true;
+        }
+
         // Compatibility wrapper for v0.5.1 Lua and third-party integrations.
         public static bool SetHideHair(Character character, bool hideHair)
         {
@@ -1749,6 +1767,11 @@ namespace BaroWardrobeSwitcher
                 LuaCsLogger.Log("[Baro Wardrobe Switcher] Fashion activation refused: " + (error ?? "render session missing") + ".");
                 return false;
             }
+            if (!EnsureXdsFashionAppendage(character, session))
+            {
+                session.IsActive = false;
+                return false;
+            }
             session.IsActive = true;
             drawOverrideLogCount = 0;
             virtualDrawErrorLogCount = 0;
@@ -1763,6 +1786,82 @@ namespace BaroWardrobeSwitcher
             drawOverrideHiddenAttachmentCount = 0;
             RefreshWearables(character);
             return true;
+        }
+
+        private static bool EnsureXdsFashionAppendage(Character character, RenderSession session)
+        {
+            bool needsXdsAppendage =
+                session.SavedSlots.Contains(InvSlotType.Bag) &&
+                session.Descriptors.Any(descriptor =>
+                    descriptor.AllowedSlots.Contains(InvSlotType.Bag) &&
+                    string.Equals(
+                        descriptor.SourceIdentifier,
+                        Xds01EngineIdentifier,
+                        StringComparison.OrdinalIgnoreCase));
+            if (!needsXdsAppendage)
+            {
+                session.RemoveOwnedAppendages();
+                return true;
+            }
+            if (session.HasOwnedAppendages) { return true; }
+            if (character.Params == null || character.AnimController == null) { return false; }
+
+            HashSet<Limb> limbsBeforeAttach =
+                new HashSet<Limb>(character.AnimController.Limbs.Where(limb => limb != null));
+            try
+            {
+                Identifier identifier = new Identifier(Xds01EngineAfflictionIdentifier);
+                if (!AfflictionPrefab.Prefabs.TryGet(identifier, out AfflictionPrefab prefab) ||
+                    !(prefab is AfflictionPrefabHusk huskPrefab))
+                {
+                    LuaCsLogger.Log(
+                        "[Baro Wardrobe Switcher] XDS-01 appendage prefab was not found; fashion activation refused.");
+                    return false;
+                }
+
+                Identifier huskedSpeciesName =
+                    AfflictionHusk.GetHuskedSpeciesName(character.Params, huskPrefab);
+                List<Limb> appendages =
+                    AfflictionHusk.AttachHuskAppendage(character, huskPrefab, huskedSpeciesName);
+                if (appendages == null ||
+                    appendages.Count != Xds01ExpectedAppendageLimbCount)
+                {
+                    session.SetOwnedAppendages(appendages);
+                    session.RemoveOwnedAppendages();
+                    LuaCsLogger.Log(
+                        "[Baro Wardrobe Switcher] XDS-01 appendage creation returned " +
+                        (appendages?.Count ?? 0) +
+                        " of " +
+                        Xds01ExpectedAppendageLimbCount +
+                        " limbs; fashion activation refused.");
+                    return false;
+                }
+
+                // Experimental exact-appearance path: use the content mod's native
+                // limbs and joints without applying its afflictions or item effects.
+                session.SetOwnedAppendages(appendages);
+                LuaCsLogger.Log(
+                    "[Baro Wardrobe Switcher] XDS-01 fashion appendage created with " +
+                    appendages.Count +
+                    " render limbs.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                session.RemoveOwnedAppendages();
+                foreach (Limb addedLimb in character.AnimController.Limbs
+                             .Where(limb => limb != null && !limbsBeforeAttach.Contains(limb))
+                             .ToList())
+                {
+                    try { character.AnimController.RemoveLimb(addedLimb); } catch { }
+                }
+                LuaCsLogger.Log(
+                    "[Baro Wardrobe Switcher] XDS-01 appendage creation failed: " +
+                    ex.GetType().Name +
+                    ": " +
+                    ex.Message);
+                return false;
+            }
         }
 
         internal static bool TryOverrideDrawWearable(Limb limb, WearableSprite original, out WearableSprite replacement, out bool skipOriginal)
@@ -1929,6 +2028,61 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        internal static bool ShouldSuppressEquipmentAppendage(Limb limb)
+        {
+            if (limb?.character == null ||
+                limb.type != LimbType.None ||
+                limb.Params == null ||
+                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                !session.IsActive ||
+                (!session.SavedSlots.Contains(InvSlotType.Bag) &&
+                 !session.EmptySlots.Contains(InvSlotType.Bag)))
+            {
+                return false;
+            }
+
+            // Never suppress the appendage created for the saved XDS fashion itself.
+            // The checks below are only for an actually equipped XDS engine.
+            if (session.OwnsAppendage(limb)) { return false; }
+
+            // XDS-01 draws its visible engine as six AfflictionHusk appendage limbs;
+            // the Bag Wearable itself contains only transparent placeholder sprites.
+            // Keep this compatibility rule tightly scoped because the public API does
+            // not expose which affliction created a runtime limb.
+            Item bagItem = limb.character.Inventory?.GetItemInLimbSlot(InvSlotType.Bag);
+            if (!string.Equals(
+                    bagItem?.Prefab?.Identifier.ToString(),
+                    Xds01EngineIdentifier,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            string name = limb.Params.Name ?? string.Empty;
+            bool matchesAppendage =
+                name == "Engine" ||
+                 name == "Wing1" ||
+                 name == "Wing2" ||
+                 name == "Helmet" ||
+                 name == "RightLegRing" ||
+                 name == "LeftLegRing";
+            if (!matchesAppendage) { return false; }
+
+            string spritePath;
+            try
+            {
+                spritePath = limb.Sprite?.FullPath ?? limb.Sprite?.FilePath?.Value ?? string.Empty;
+            }
+            catch
+            {
+                return false;
+            }
+            return string.Equals(
+                Path.GetFileName(spritePath),
+                Xds01AppendageTexture,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         internal static Exception EndLimbDraw(Limb limb, LimbRenderTransaction transaction, Exception exception = null)
         {
             Exception cleanupException = null;
@@ -2054,9 +2208,9 @@ namespace BaroWardrobeSwitcher
         {
             Character character = animController?.Character;
             if (!IsCharacterActive(character) || !HasCapability("animation")) { return true; }
-            bool hasFashionAnimations = RenderSessions.TryGetValue(character, out RenderSession session) &&
-                                        session.FashionAnimations.Count > 0;
-            if (hasFashionAnimations) { return true; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return true; }
+            if (!session.UseFashionMovementAnimations) { return true; }
+            if (session.FashionAnimations.Count > 0) { return true; }
 
             return !FashionEffectPolicy.IsLargeEquipmentMovementAnimation(animationInfo);
         }
@@ -2065,7 +2219,12 @@ namespace BaroWardrobeSwitcher
         {
             Character character = animController?.Character;
             if (!IsCharacterActive(character) || !HasCapability("animation")) { return; }
-            if (!RenderSessions.TryGetValue(character, out RenderSession session) || session.FashionAnimations.Count == 0) { return; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
+                !session.UseFashionMovementAnimations ||
+                session.FashionAnimations.Count == 0)
+            {
+                return;
+            }
             if (TryLoadTemporaryAnimationMethod == null)
             {
                 LogAnimationError("AnimController.TryLoadTemporaryAnimation method was not found.");
@@ -3284,9 +3443,15 @@ namespace BaroWardrobeSwitcher
 
     internal static class LimbDrawPatch
     {
-        private static void Prefix(Limb __instance, out VisualOverride.LimbRenderTransaction __state)
+        private static bool Prefix(Limb __instance, out VisualOverride.LimbRenderTransaction __state)
         {
+            __state = null;
+            if (VisualOverride.ShouldSuppressEquipmentAppendage(__instance))
+            {
+                return false;
+            }
             __state = VisualOverride.BeginLimbDraw(__instance);
+            return true;
         }
 
         private static void Postfix(

@@ -25,6 +25,8 @@
   <barowardrobeswitcher.button.clear>清除外觀</barowardrobeswitcher.button.clear>
   <barowardrobeswitcher.button.forget>忘記已儲存外觀</barowardrobeswitcher.button.forget>
   <barowardrobeswitcher.button.attachment_layers>外觀圖層…</barowardrobeswitcher.button.attachment_layers>
+  <barowardrobeswitcher.button.animation_fashion>移動動畫：時裝優先</barowardrobeswitcher.button.animation_fashion>
+  <barowardrobeswitcher.button.animation_equipment>移動動畫：實際裝備</barowardrobeswitcher.button.animation_equipment>
   <barowardrobeswitcher.button.hide_standard_hair>隱藏標準頭髮</barowardrobeswitcher.button.hide_standard_hair>
   <barowardrobeswitcher.button.all_auto>全部自動</barowardrobeswitcher.button.all_auto>
   <barowardrobeswitcher.button.back>返回</barowardrobeswitcher.button.back>
