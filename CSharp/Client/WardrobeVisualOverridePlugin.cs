@@ -1360,6 +1360,7 @@ namespace BaroWardrobeSwitcher
         {
             foreach (RenderSession session in RenderSessions.Values)
             {
+                session.SuppressedEquipmentAnimations.Clear();
                 session.IsActive = false;
                 session.RemoveOwnedAppendages();
                 session.ForceHideAttachmentMask = 0;
@@ -1374,6 +1375,7 @@ namespace BaroWardrobeSwitcher
             if (character == null) { return; }
             if (RenderSessions.TryGetValue(character, out RenderSession session))
             {
+                session.SuppressedEquipmentAnimations.Clear();
                 session.SuppressedEquipmentSounds.Clear();
                 session.SuppressedEquipmentComponentSounds.Clear();
                 session.IsActive = false;
@@ -1679,6 +1681,7 @@ namespace BaroWardrobeSwitcher
         {
             if (character == null) { return false; }
             RenderSession session = GetCaptureSession(character);
+            session.SuppressedEquipmentAnimations.Clear();
             session.SavedSlots = ParseSlotCsv(savedSlotsCsv);
             session.EmptySlots = ParseSlotCsv(emptySlotsCsv);
             LuaCsLogger.Log(
@@ -1758,6 +1761,7 @@ namespace BaroWardrobeSwitcher
                 return false;
             }
 
+            if (HasCapability("animation")) { RegisterSuppressedEquipmentAnimations(character, item); }
             if (HasCapability("statusSound")) { RegisterSuppressedEquipmentSounds(character, item); }
             if (HasCapability("itemSound")) { RegisterSuppressedEquipmentComponentSounds(character, item); }
 
@@ -2229,6 +2233,7 @@ namespace BaroWardrobeSwitcher
             if (!IsCharacterActive(character) || !HasCapability("animation")) { return true; }
             if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return true; }
             if (!session.UseFashionMovementAnimations) { return true; }
+            if (session.SuppressedEquipmentAnimations.Contains(animationInfo)) { return false; }
             if (session.FashionAnimations.Count > 0) { return true; }
 
             return !FashionEffectPolicy.IsLargeEquipmentMovementAnimation(animationInfo);
@@ -2239,7 +2244,6 @@ namespace BaroWardrobeSwitcher
             Character character = animController?.Character;
             if (!IsCharacterActive(character) || !HasCapability("animation")) { return; }
             if (!RenderSessions.TryGetValue(character, out RenderSession session) ||
-                !session.UseFashionMovementAnimations ||
                 session.FashionAnimations.Count == 0)
             {
                 return;
@@ -2252,6 +2256,11 @@ namespace BaroWardrobeSwitcher
 
             foreach (object animationInfo in session.FashionAnimations)
             {
+                if (!session.UseFashionMovementAnimations &&
+                    FashionEffectPolicy.IsMovementAnimation(animationInfo))
+                {
+                    continue;
+                }
                 try
                 {
                     TryLoadTemporaryAnimationMethod.Invoke(animController, new[] { animationInfo, false });
@@ -2282,7 +2291,12 @@ namespace BaroWardrobeSwitcher
 
             foreach ((ItemComponent Component, ActionType ActionType) fashionSound in session.FashionComponentSounds)
             {
-                if (fashionSound.Component == null || !HasLoopingComponentSound(fashionSound.Component, fashionSound.ActionType)) { continue; }
+                if (fashionSound.Component == null ||
+                    !FashionEffectPolicy.ShouldKeepComponentLoopAlive(fashionSound.ActionType) ||
+                    !HasLoopingComponentSound(fashionSound.Component, fashionSound.ActionType))
+                {
+                    continue;
+                }
                 TryPlaySpecificFashionComponentSound(character, fashionSound.Component, fashionSound.ActionType, character);
             }
         }
@@ -2325,6 +2339,7 @@ namespace BaroWardrobeSwitcher
                 if (!component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> statusEffects)) { continue; }
                 foreach (StatusEffect statusEffect in statusEffects)
                 {
+                    if (!FashionEffectPolicy.ShouldCaptureStatusEffect(statusEffect)) { continue; }
                     IEnumerable animations = AnimationsToTriggerField.GetValue(statusEffect) as IEnumerable;
                     if (animations == null) { continue; }
                     foreach (object animationInfo in animations)
@@ -2396,6 +2411,30 @@ namespace BaroWardrobeSwitcher
             }
 
             return count;
+        }
+
+        private static void RegisterSuppressedEquipmentAnimations(Character character, Item item)
+        {
+            if (character == null || item?.Components == null || AnimationsToTriggerField == null) { return; }
+            if (!RenderSessions.TryGetValue(character, out RenderSession session)) { return; }
+
+            foreach (ItemComponent component in item.Components)
+            {
+                if (component?.statusEffectLists == null) { continue; }
+                if (!component.statusEffectLists.TryGetValue(ActionType.OnWearing, out List<StatusEffect> statusEffects)) { continue; }
+                foreach (StatusEffect statusEffect in statusEffects)
+                {
+                    IEnumerable animations = AnimationsToTriggerField.GetValue(statusEffect) as IEnumerable;
+                    if (animations == null) { continue; }
+                    foreach (object animationInfo in animations)
+                    {
+                        if (FashionEffectPolicy.ShouldSuppressEquipmentAnimation(item, animationInfo))
+                        {
+                            session.SuppressedEquipmentAnimations.Add(animationInfo);
+                        }
+                    }
+                }
+            }
         }
 
         private static void RegisterSuppressedEquipmentSounds(Character character, Item item)
@@ -2649,22 +2688,18 @@ namespace BaroWardrobeSwitcher
             if (character == null || fashionSounds == null || fashionSounds.Count == 0) { return false; }
 
             int cursor = session.FashionComponentSoundCursor;
-            for (int pass = 0; pass < 2; pass++)
+            for (int offset = 0; offset < fashionSounds.Count; offset++)
             {
-                for (int offset = 0; offset < fashionSounds.Count; offset++)
-                {
-                    int index = (cursor + offset) % fashionSounds.Count;
-                    (ItemComponent Component, ActionType ActionType) fashionSound = fashionSounds[index];
-                    if (fashionSound.Component == null) { continue; }
-                    if (pass == 0 && fashionSound.ActionType != actionType) { continue; }
+                int index = (cursor + offset) % fashionSounds.Count;
+                (ItemComponent Component, ActionType ActionType) fashionSound = fashionSounds[index];
+                if (fashionSound.Component == null || fashionSound.ActionType != actionType) { continue; }
 
-                    session.FashionComponentSoundCursor = (index + 1) % fashionSounds.Count;
-                    return TryPlaySpecificFashionComponentSound(
-                        character,
-                        fashionSound.Component,
-                        fashionSound.ActionType,
-                        user ?? character);
-                }
+                session.FashionComponentSoundCursor = (index + 1) % fashionSounds.Count;
+                return TryPlaySpecificFashionComponentSound(
+                    character,
+                    fashionSound.Component,
+                    fashionSound.ActionType,
+                    user ?? character);
             }
 
             return false;

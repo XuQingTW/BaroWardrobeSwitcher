@@ -88,6 +88,11 @@ local fakeHelmetPrefab = {
         end
     }
 }
+local gameSessionDataPath = {}
+local gameSession = {
+    DataPath = gameSessionDataPath,
+    GameMode = { Preset = { Identifier = "sandbox" } }
+}
 LuaUserData = {
     CreateStatic = function(name)
         if name == "Barotrauma.ItemPrefab" then
@@ -95,6 +100,9 @@ LuaUserData = {
         end
         if name == "Barotrauma.Networking.Client" then
             return { ClientList = connectedClients }
+        end
+        if name == "Barotrauma.GameMain" then
+            return { GameSession = gameSession }
         end
         if name == "System.Environment" then
             return { GetFolderPath = function() return "/local" end }
@@ -696,6 +704,9 @@ assert(persistedAfterSave:find('"colors":{"Head":' .. tostring(authoritativeColo
     "server Save must persist the equipped item's authoritative SpriteColor")
 assert(persistedAfterSave:find('"accountId":"stable-account"', 1, true) ~= nil,
     "stable AccountId must be the persistence key")
+assert(persistedAfterSave:find('"sessionKey":"runtime:', 1, true) ~= nil and
+       persistedAfterSave:find(':sandbox"', 1, true) ~= nil,
+    "pathless sessions must use a process-scoped game-mode key")
 assert(persistedAfterSave:find('"itemId"', 1, true) == nil and persistedAfterSave:find('"name"', 1, true) == nil,
     "server persistence must not contain runtime ids or display names")
 
@@ -764,6 +775,74 @@ local anonymousSave = sendCommand({
 assert(anonymousSave.accepted)
 assert(memoryFiles[serverJsonPath] == beforeAnonymousSave,
     "anonymous session state must not cause a persistence write")
+
+local restartAccount = { StringRepresentation = "runtime-restart-account" }
+local restartClient = {
+    Connection = {},
+    Character = { ID = 100, Name = "Runtime Restart" },
+    AccountId = {
+        IsSome = function() return true end,
+        TryUnwrap = function() return true, restartAccount end
+    }
+}
+connectedClients[#connectedClients + 1] = restartClient
+local restartHello = newBuffer()
+assert(Core.writeClientHello(restartHello, "runtime-before-restart"))
+Networking.handlers[Core.NET.V2_HELLO](restartHello, restartClient)
+local restartApply = sendCommand({
+    clientSessionId = "runtime-before-restart",
+    operationId = "runtime-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    look = assert(Core.newLook(true, false, { Head = "helmet" }))
+}, restartClient)
+assert(restartApply.accepted and
+       memoryFiles[serverJsonPath]:find('"sessionKey":"runtime:', 1, true) ~= nil)
+
+local beforeRuntimeReload = #Networking.sent
+loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+local afterRuntimeRestartHello = newBuffer()
+assert(Core.writeClientHello(afterRuntimeRestartHello, "runtime-after-restart"))
+Networking.handlers[Core.NET.V2_HELLO](afterRuntimeRestartHello, restartClient)
+for index = beforeRuntimeReload + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.connection == restartClient.Connection and sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        assert(state.characterId ~= restartClient.Character.ID or not state.active,
+            "a process-scoped pathless key reactivated an old wardrobe after server restart")
+    end
+end
+
+gameSessionDataPath.SavePath = "campaign-a.save"
+Hook.handlers.roundStart()
+local campaignAccount = { StringRepresentation = "campaign-path-account" }
+local campaignClient = {
+    Connection = {},
+    Character = { ID = 101, Name = "Campaign Path" },
+    AccountId = {
+        IsSome = function() return true end,
+        TryUnwrap = function() return true, campaignAccount end
+    }
+}
+connectedClients[#connectedClients + 1] = campaignClient
+local campaignHello = newBuffer()
+assert(Core.writeClientHello(campaignHello, "campaign-path-session"))
+Networking.handlers[Core.NET.V2_HELLO](campaignHello, campaignClient)
+local campaignApply = sendCommand({
+    clientSessionId = "campaign-path-session",
+    operationId = "campaign-path-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    look = assert(Core.newLook(true, false, { Head = "helmet" }))
+}, campaignClient)
+assert(campaignApply.accepted and
+       memoryFiles[serverJsonPath]:find(
+           '"accountId":"campaign-path-account","revision":1,"active":true,"sessionKey":"campaign:campaign-a.save"',
+           1,
+           true
+       ) ~= nil,
+    "GameSession.DataPath must take precedence over the runtime session key")
+gameSessionDataPath.SavePath = nil
 
 memoryFiles[storageRoot .. "/ServerLooks.txt.v1.bak"] =
     "key=account:stable-account|active=false|Head=helmet,Old Helmet\n"
@@ -938,5 +1017,56 @@ assert(not exhausted.accepted and exhausted.reason == "revision_exhausted" and
     "UInt32 revision exhaustion must reject mutation instead of reusing a revision")
 assert(#Networking.sent == beforeRevisionExhausted + 1 and memoryFiles[serverJsonPath] == persistedAtRevisionMax,
     "revision exhaustion must not persist or broadcast a mutation")
+
+local noKeyAccount = { StringRepresentation = "no-session-key-account" }
+local noKeyClient = {
+    Connection = {},
+    Character = { ID = 121, Name = "No Session Key" },
+    AccountId = {
+        IsSome = function() return true end,
+        TryUnwrap = function() return true, noKeyAccount end
+    }
+}
+connectedClients[#connectedClients + 1] = noKeyClient
+local noKeyHello = newBuffer()
+assert(Core.writeClientHello(noKeyHello, "no-session-key"))
+Networking.handlers[Core.NET.V2_HELLO](noKeyHello, noKeyClient)
+local noKeyApply = sendCommand({
+    clientSessionId = "no-session-key",
+    operationId = "no-session-key-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    look = assert(Core.newLook(true, false, { Head = "helmet" }))
+}, noKeyClient)
+assert(noKeyApply.accepted)
+
+Hook.handlers.roundEnd()
+gameSession.GameMode.Preset = nil
+local sentBeforeMissingKeyRound = #Networking.sent
+Hook.handlers.roundStart()
+for index = sentBeforeMissingKeyRound + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        assert(state.characterId ~= 121 or not state.active,
+            "round start restored an active look before the session key was available")
+    end
+end
+
+noKeyClient.Character = { ID = 122, Name = "No Session Key Rebound" }
+local sentBeforeMissingKeyRebind = #Networking.sent
+Hook.handlers["character.created"](noKeyClient.Character)
+local reboundHello = newBuffer()
+assert(Core.writeClientHello(reboundHello, "no-session-key-rebound"))
+Networking.handlers[Core.NET.V2_HELLO](reboundHello, noKeyClient)
+for index = sentBeforeMissingKeyRebind + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        assert(state.characterId ~= 122 or not state.active,
+            "character/hello rebind restored an active look without a session key")
+    end
+end
+gameSession.GameMode.Preset = { Identifier = "sandbox" }
 
 print("Wardrobe server authority tests passed")

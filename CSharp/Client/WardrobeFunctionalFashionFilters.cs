@@ -21,6 +21,15 @@ namespace BaroWardrobeSwitcher
             typeof(StatusEffect).GetField("requiredItems", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo PlaySoundOnRequiredItemFailureField =
             typeof(StatusEffect).GetField("playSoundOnRequiredItemFailure", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo OnlyInsideField =
+            typeof(StatusEffect).GetField("OnlyInside", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo OnlyOutsideField =
+            typeof(StatusEffect).GetField("OnlyOutside", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo TargetIdentifiersField =
+            typeof(StatusEffect).GetField("TargetIdentifiers", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo TargetItemComponentField =
+            typeof(StatusEffect).GetField("TargetItemComponent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
         public static bool ShouldCaptureAnimation(Item item, object animationInfo)
         {
             bool sealedSuit = IsSealedSuit(item);
@@ -31,9 +40,24 @@ namespace BaroWardrobeSwitcher
 
         public static bool ShouldCaptureItemSounds(Item item) => !ShouldSuppressCosmeticSounds(item);
 
+        public static bool ShouldCaptureStatusEffect(StatusEffect statusEffect)
+        {
+            return !IsStateDependentStatusEffect(statusEffect);
+        }
+
         public static bool ShouldCaptureStatusSound(StatusEffect statusEffect)
         {
-            return !IsFunctionalEquipmentAlarm(statusEffect);
+            return ShouldCaptureStatusEffect(statusEffect);
+        }
+
+        public static bool ShouldSuppressEquipmentAnimation(Item item, object animationInfo)
+        {
+            return IsSealedSuit(item) && IsMovementAnimation(animationInfo);
+        }
+
+        public static bool ShouldKeepComponentLoopAlive(ActionType actionType)
+        {
+            return actionType == ActionType.Always || actionType == ActionType.OnWearing;
         }
 
         public static bool ShouldPreserveSealedSuitMasks(Item item)
@@ -43,6 +67,11 @@ namespace BaroWardrobeSwitcher
 
         internal static bool IsFunctionalEquipmentAlarm(StatusEffect statusEffect)
         {
+            return IsStateDependentStatusEffect(statusEffect);
+        }
+
+        internal static bool IsStateDependentStatusEffect(StatusEffect statusEffect)
+        {
             if (statusEffect == null) { return false; }
             try
             {
@@ -51,13 +80,21 @@ namespace BaroWardrobeSwitcher
                 // lifecycle instead of risking a swallowed safety warning.
                 if (PropertyConditionalsField == null ||
                     RequiredItemsField == null ||
-                    PlaySoundOnRequiredItemFailureField == null)
+                    PlaySoundOnRequiredItemFailureField == null ||
+                    OnlyInsideField == null ||
+                    OnlyOutsideField == null ||
+                    TargetIdentifiersField == null ||
+                    TargetItemComponentField == null)
                 {
                     return true;
                 }
 
                 if (HasEntriesOrCannotInspect(PropertyConditionalsField, statusEffect) ||
-                    HasEntriesOrCannotInspect(RequiredItemsField, statusEffect))
+                    HasEntriesOrCannotInspect(RequiredItemsField, statusEffect) ||
+                    IsEnabledOrCannotInspect(OnlyInsideField, statusEffect) ||
+                    IsEnabledOrCannotInspect(OnlyOutsideField, statusEffect) ||
+                    HasEntriesOrCannotInspect(TargetIdentifiersField, statusEffect) ||
+                    HasTextOrCannotInspect(TargetItemComponentField, statusEffect))
                 {
                     return true;
                 }
@@ -123,6 +160,21 @@ namespace BaroWardrobeSwitcher
             return HasEntries(values);
         }
 
+        private static bool IsEnabledOrCannotInspect(FieldInfo field, StatusEffect statusEffect)
+        {
+            object value = field.GetValue(statusEffect);
+            if (value is bool enabled) { return enabled; }
+            return value != null;
+        }
+
+        private static bool HasTextOrCannotInspect(FieldInfo field, StatusEffect statusEffect)
+        {
+            object value = field.GetValue(statusEffect);
+            if (value == null) { return false; }
+            if (value is string text) { return !string.IsNullOrWhiteSpace(text); }
+            return true;
+        }
+
         private static bool IsSealedSuitText(string text)
         {
             if (string.IsNullOrEmpty(text)) { return false; }
@@ -169,7 +221,7 @@ namespace BaroWardrobeSwitcher
             return new string(value.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
         }
 
-        private static bool IsMovementAnimation(object animationInfo)
+        internal static bool IsMovementAnimation(object animationInfo)
         {
             if (animationInfo == null) { return false; }
             try

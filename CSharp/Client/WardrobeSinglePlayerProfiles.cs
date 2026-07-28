@@ -119,6 +119,8 @@ namespace BaroWardrobeSwitcher
                 existing.DisplayName = safeDisplayName;
                 existing.AutoApply = GetBoolean(parts, "auto") || GetBoolean(parts, "active");
                 existing.Captured = look.Captured;
+                existing.UseFashionMovementAnimations =
+                    look.UseFashionMovementAnimations;
                 existing.AttachmentVisibility =
                     CopyAttachmentVisibility(look.AttachmentVisibility);
                 existing.Slots = CopySlots(look.Slots);
@@ -198,6 +200,8 @@ namespace BaroWardrobeSwitcher
                             // A captured legacy look is not consent to replace new-campaign equipment.
                             AutoApply = false,
                             Captured = legacyLook.Captured,
+                            UseFashionMovementAnimations =
+                                legacyLook.UseFashionMovementAnimations,
                             AttachmentVisibility =
                                 CopyAttachmentVisibility(legacyLook.AttachmentVisibility),
                             Slots = CopySlots(legacyLook.Slots),
@@ -442,6 +446,8 @@ namespace BaroWardrobeSwitcher
                 {
                     Version = PersistenceVersion,
                     Captured = profile.Captured,
+                    UseFashionMovementAnimations =
+                        profile.UseFashionMovementAnimations,
                     AttachmentVisibility =
                         CopyAttachmentVisibility(profile.AttachmentVisibility),
                     Slots = profile.Slots,
@@ -469,6 +475,8 @@ namespace BaroWardrobeSwitcher
                 "auto=" + profile.AutoApply.ToString().ToLowerInvariant(),
                 "hidehair=" +
                     LegacyHideHair(profile.AttachmentVisibility).ToString().ToLowerInvariant(),
+                "fashionMovement=" +
+                    profile.UseFashionMovementAnimations.ToString().ToLowerInvariant(),
                 "visibilityHair=" + profile.AttachmentVisibility.Hair,
                 "visibilityBeard=" + profile.AttachmentVisibility.Beard,
                 "visibilityMoustache=" + profile.AttachmentVisibility.Moustache,
@@ -582,6 +590,9 @@ namespace BaroWardrobeSwitcher
             [JsonRequired]
             [JsonPropertyName("captured")]
             public bool Captured { get; set; }
+
+            [JsonPropertyName("useFashionMovementAnimations")]
+            public bool UseFashionMovementAnimations { get; set; } = true;
 
             [JsonRequired]
             [JsonPropertyName("attachmentVisibility")]

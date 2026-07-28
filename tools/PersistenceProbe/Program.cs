@@ -110,6 +110,7 @@ try
     Run("single-player-profile-isolation-and-delete", TestSinglePlayerProfileIsolation, failures);
     Run("single-player-v1-migration-and-backup", TestSinglePlayerV1Migration, failures);
     Run("single-player-v2-migration-and-backup", TestSinglePlayerV2Migration, failures);
+    Run("single-player-v3-movement-default", TestSinglePlayerV3MovementDefault, failures);
     Run("single-player-legacy-import-once", TestSinglePlayerLegacyImport, failures);
     Run("single-player-corrupt-quarantine", TestSinglePlayerCorruptQuarantine, failures);
     Run("single-player-atomic-failure-preserves-old", TestSinglePlayerAtomicFailure, failures);
@@ -484,6 +485,7 @@ void TestSinglePlayerProfileIsolation()
             characterA,
             "Alice",
             "schema=4|captured=true|active=true|auto=true|hidehair=false|" +
+            "fashionMovement=false|" +
             "visibilityHair=show|visibilityBeard=hide|visibilityMoustache=auto|" +
             "visibilityFaceAttachment=show|Head=alphahelmet,|HeadColor=2131821311"),
         "Could not save the first campaign profile.");
@@ -502,10 +504,12 @@ void TestSinglePlayerProfileIsolation()
 
     Assert(LoadProfile(campaignA, characterA).Contains("Head=alphahelmet,", StringComparison.Ordinal) &&
            LoadProfile(campaignA, characterA).Contains("HeadColor=2131821311", StringComparison.Ordinal) &&
-           LoadProfile(campaignA, characterA).Contains("visibilityHair=show", StringComparison.Ordinal),
+           LoadProfile(campaignA, characterA).Contains("visibilityHair=show", StringComparison.Ordinal) &&
+           LoadProfile(campaignA, characterA).Contains("fashionMovement=false", StringComparison.Ordinal),
         "The first character profile did not round-trip.");
-    Assert(LoadProfile(campaignA, characterB).Contains("Head=bobhelmet,", StringComparison.Ordinal),
-        "The second character profile did not round-trip.");
+    Assert(LoadProfile(campaignA, characterB).Contains("Head=bobhelmet,", StringComparison.Ordinal) &&
+           LoadProfile(campaignA, characterB).Contains("fashionMovement=true", StringComparison.Ordinal),
+        "The second character profile did not retain the default movement source.");
     Assert(LoadProfile(campaignB, characterA).Contains("Head=betahelmet,", StringComparison.Ordinal),
         "The same character key was not isolated across campaigns.");
     Assert(LoadProfile(campaignA, characterB).Contains("auto=false", StringComparison.Ordinal),
@@ -542,6 +546,8 @@ void TestSinglePlayerProfileIsolation()
             expectedFaceAttachment: "show");
         Assert(alice.GetProperty("colors").GetProperty("Head").GetUInt32() == 2131821311,
             "Single-player profile did not persist the custom clothing color.");
+        Assert(!alice.GetProperty("useFashionMovementAnimations").GetBoolean(),
+            "Single-player profile did not persist the equipped-gear movement source.");
     }
 
     Assert(DeleteProfile(campaignA, characterA),
@@ -596,7 +602,8 @@ void TestSinglePlayerV1Migration()
     string loaded = LoadProfile(campaign, character);
     Assert(loaded.Contains("Head=profilev1helmet,", StringComparison.Ordinal) &&
            loaded.Contains("visibilityHair=hide", StringComparison.Ordinal) &&
-           loaded.Contains("visibilityFaceAttachment=auto", StringComparison.Ordinal),
+           loaded.Contains("visibilityFaceAttachment=auto", StringComparison.Ordinal) &&
+           loaded.Contains("fashionMovement=true", StringComparison.Ordinal),
         "Single-player v1 migration did not preserve the legacy visibility preset.");
     using JsonDocument migrated = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
     ValidateSinglePlayerRoot(migrated.RootElement);
@@ -643,6 +650,7 @@ void TestSinglePlayerV2Migration()
     string loaded = LoadProfile(campaign, character);
     Assert(loaded.Contains("Head=profilev2helmet,", StringComparison.Ordinal) &&
            loaded.Contains("visibilityHair=show", StringComparison.Ordinal) &&
+           loaded.Contains("fashionMovement=true", StringComparison.Ordinal) &&
            !loaded.Contains("HeadColor=", StringComparison.Ordinal),
         "Single-player v2 migration did not preserve missing-color semantics.");
     Assert(File.Exists(path + ".v2.bak"),
@@ -651,6 +659,65 @@ void TestSinglePlayerV2Migration()
         "Single-player v2 backup does not match the original document.");
     using JsonDocument migrated = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
     ValidateSinglePlayerRoot(migrated.RootElement);
+}
+
+void TestSinglePlayerV3MovementDefault()
+{
+    _ = NewCaseDirectory("single-player-v3-movement-default");
+    const string campaign = "campaign:profile-v3.save";
+    const string character = "profile-v3-character";
+    string path = CurrentSinglePlayerProfilesPath();
+    string legacyJson = $$"""
+        {
+          "schemaVersion": 3,
+          "transferToUnconfiguredCharacter": false,
+          "importedLegacyCampaigns": [],
+          "profiles": [
+            {
+              "campaignHash": "{{HashKey(campaign)}}",
+              "characterHash": "{{HashKey(character)}}",
+              "displayName": "Existing V3 Crew",
+              "autoApply": true,
+              "captured": true,
+              "attachmentVisibility": {
+                "Hair": "auto",
+                "Beard": "auto",
+                "Moustache": "auto",
+                "FaceAttachment": "auto"
+              },
+              "slots": {
+                "Head": "profilev3helmet",
+                "Headset": null,
+                "InnerClothes": null,
+                "OuterClothes": null,
+                "Bag": null,
+                "HealthInterface": null
+              },
+              "colors": {
+                "Head": null,
+                "Headset": null,
+                "InnerClothes": null,
+                "OuterClothes": null,
+                "Bag": null,
+                "HealthInterface": null
+              }
+            }
+          ]
+        }
+        """;
+    File.WriteAllText(path, legacyJson, new UTF8Encoding(false));
+
+    Assert(LoadProfile(campaign, character).Contains(
+            "fashionMovement=true",
+            StringComparison.Ordinal),
+        "An existing schema-v3 profile did not default to fashion-priority movement.");
+    Assert(SetSinglePlayerTransfer(true),
+        "Could not rewrite the existing schema-v3 profile.");
+    using JsonDocument rewritten = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+    ValidateSinglePlayerRoot(rewritten.RootElement);
+    Assert(rewritten.RootElement.GetProperty("profiles")[0]
+            .GetProperty("useFashionMovementAnimations").GetBoolean(),
+        "Rewritten schema-v3 profile did not canonicalize the default movement source.");
 }
 
 void TestSinglePlayerLegacyImport()
@@ -687,7 +754,7 @@ void TestSinglePlayerLegacyImport()
         "Legacy import did not retain the original schema-v1 backup.");
     ValidateCanonicalFile(clientPath, "legacyimporthelmet", expectedCaptured: true, expectedHideHair: true);
 
-    Assert(Save("captured=true|hidehair=false|Head=laterhelmet,"),
+    Assert(Save("captured=true|hidehair=false|fashionMovement=false|Head=laterhelmet,"),
         "Could not replace the multiplayer ClientLook.json fixture.");
     Assert(!ImportLegacy(campaignA, "legacy-character-b", "Other Crew"),
         "The same campaign imported legacy ClientLook.json more than once.");
@@ -697,6 +764,15 @@ void TestSinglePlayerLegacyImport()
             "Head=legacyimporthelmet,",
             StringComparison.Ordinal),
         "A repeated legacy import changed the original imported profile.");
+
+    const string movementCampaign = "campaign:legacy-movement.save";
+    const string movementCharacter = "legacy-movement-character";
+    Assert(ImportLegacy(movementCampaign, movementCharacter, "Movement Crew"),
+        "Legacy ClientLook.json with equipped-gear movement was not imported.");
+    Assert(LoadProfile(movementCampaign, movementCharacter).Contains(
+            "fashionMovement=false",
+            StringComparison.Ordinal),
+        "Legacy import dropped the saved movement-animation source.");
 
     const string campaignB = "campaign:legacy-b.save";
     const string characterB = "legacy-character-existing";
@@ -874,7 +950,8 @@ void ValidateSinglePlayerRoot(JsonElement root)
             "colors",
             "displayName",
             "attachmentVisibility",
-            "slots"
+            "slots",
+            "useFashionMovementAnimations"
         ];
         Array.Sort(expectedProfileProperties, StringComparer.Ordinal);
         Assert(actualProfileProperties.SequenceEqual(expectedProfileProperties, StringComparer.Ordinal),

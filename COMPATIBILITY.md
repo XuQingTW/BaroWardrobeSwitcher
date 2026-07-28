@@ -45,7 +45,7 @@ Optional capabilities:
 - `AnimController.UpdateAnimations(float)`
 - `AnimController.TryLoadTemporaryAnimation(StatusEffect.AnimLoadInfo, bool)`
 - `StatusEffect.PlaySound(Entity, Hull, Vector2)`
-- `StatusEffect.propertyConditionals`, `requiredItems`, and `playSoundOnRequiredItemFailure` for fail-open functional alarm classification
+- `StatusEffect.propertyConditionals`, `requiredItems`, `playSoundOnRequiredItemFailure`, `OnlyInside`, `OnlyOutside`, `TargetIdentifiers`, and `TargetItemComponent` for fail-open state-dependent effect classification
 - `ItemComponent.PlaySound(ActionType, Character)`
 
 Missing required targets disable the visual override without mutating character render state. Missing optional targets disable only their advertised capability and are visible through the readiness report.

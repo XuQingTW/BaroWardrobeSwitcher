@@ -188,6 +188,8 @@ local lastAppliedNetworkLookSignatureByCharacterKey = {}
 local suppressedNetworkAppliesByCharacterKey = {}
 local clientPersistPathCache = nil
 local lastSessionKey = nil
+local lastSessionObject = nil
+local sessionObjectObserved = false
 local persistentClientLookLoaded = false
 local persistClientLook
 local clearPersistentClientLook
@@ -269,6 +271,7 @@ end
 local InitialEquipStableTicks = 12
 local InitialEquipFallbackTicks = 120
 local ServerApplyRetryTicks = 30
+local NetworkRenderMaxAttempts = 3
 local PendingLegacyNetworkMessageMaxTicks = 300
 local NetworkApplySuppressTicks = PendingLegacyNetworkMessageMaxTicks
 
@@ -600,9 +603,13 @@ function Helpers.firstSessionValue(object, names)
     return nil
 end
 
-function Helpers.currentSessionKey()
+function Helpers.currentSessionObject()
     if GameMain == nil then return nil end
-    local session = Helpers.userDataMember(GameMain, "GameSession")
+    return Helpers.userDataMember(GameMain, "GameSession")
+end
+
+function Helpers.currentSessionKey()
+    local session = Helpers.currentSessionObject()
     if session == nil then return nil end
 
     local dataPath = Helpers.userDataMember(session, "DataPath")
@@ -648,7 +655,14 @@ function Helpers.currentSinglePlayerCampaignKey()
     return savePath ~= nil and "campaign:" .. savePath or nil
 end
 
-function Helpers.encodePersistentClientLook(lookData, captured, active, auto, visibilityValue)
+function Helpers.encodePersistentClientLook(
+    lookData,
+    captured,
+    active,
+    auto,
+    visibilityValue,
+    movementAnimationSource
+)
     local state = reducerState
     lookData = lookData or currentLegacyLook()
     if captured == nil then captured = state.look ~= nil and state.look.captured == true end
@@ -663,6 +677,9 @@ function Helpers.encodePersistentClientLook(lookData, captured, active, auto, vi
     else
         visibility = currentAttachmentVisibility()
     end
+    if type(movementAnimationSource) ~= "boolean" then
+        movementAnimationSource = currentMovementAnimationSource()
+    end
     local hairHidden = legacyHideHairForVisibility(visibility)
     local parts = {
         "schema=4",
@@ -670,7 +687,7 @@ function Helpers.encodePersistentClientLook(lookData, captured, active, auto, vi
         "active=" .. tostring(active == true),
         "auto=" .. tostring(auto == true),
         "hidehair=" .. tostring(hairHidden == true),
-        "fashionMovement=" .. tostring(currentMovementAnimationSource()),
+        "fashionMovement=" .. tostring(movementAnimationSource),
         "visibilityHair=" .. visibility.Hair,
         "visibilityBeard=" .. visibility.Beard,
         "visibilityMoustache=" .. visibility.Moustache,
@@ -847,7 +864,8 @@ function Helpers.saveSinglePlayerProfile(
     captured,
     active,
     auto,
-    visibilityValue
+    visibilityValue,
+    movementAnimationSource
 )
     if not Helpers.singlePlayerCharacterEligible(character) then return true end
     local campaignKey = Helpers.currentSinglePlayerCampaignKey()
@@ -864,7 +882,8 @@ function Helpers.saveSinglePlayerProfile(
         captured,
         active,
         auto,
-        visibilityValue
+        visibilityValue,
+        movementAnimationSource
     )
     local ok, saved = pcall(function()
         return persistence.SaveSinglePlayerProfile(
@@ -1090,6 +1109,7 @@ persistClientLook = function(domainLook, viewModel)
     local active = reducerState.active == true
     local auto = reducerState.autoApply == true
     local visibility = currentAttachmentVisibility()
+    local movementAnimationSource = currentMovementAnimationSource()
     if domainLook ~= nil then
         lookData = Core.toLegacyLook(domainLook) or {}
         for _, entry in ipairs(slots) do
@@ -1105,6 +1125,8 @@ persistClientLook = function(domainLook, viewModel)
             domainLook.attachmentVisibility,
             domainLook.hideHair == true
         ) or Core.attachmentVisibilityFromLegacy(domainLook.hideHair == true)
+        movementAnimationSource =
+            domainLook.useFashionMovementAnimations ~= false
         if viewModel ~= nil then
             active = viewModel.active == true
             auto = viewModel.autoApply == true
@@ -1115,17 +1137,29 @@ persistClientLook = function(domainLook, viewModel)
     end
 
     if isSinglePlayerClient() then
+        local profileCharacter = controlled()
+        if viewModel ~= nil and viewModel.characterKey == nil and lastCharacter ~= nil then
+            profileCharacter = lastCharacter
+        end
         return Helpers.saveSinglePlayerProfile(
-            controlled(),
+            profileCharacter,
             lookData,
             captured,
             active,
             auto,
-            visibility
+            visibility,
+            movementAnimationSource
         )
     end
 
-    local encoded = Helpers.encodePersistentClientLook(lookData, captured, active, auto, visibility)
+    local encoded = Helpers.encodePersistentClientLook(
+        lookData,
+        captured,
+        active,
+        auto,
+        visibility,
+        movementAnimationSource
+    )
     local persistence = ensureWardrobePersistence()
     if persistence == nil then
         local reason = persistenceFailureReason("C# wardrobe persistence is unavailable")
@@ -2052,13 +2086,17 @@ function Helpers.setAttachmentVisibilityVisual(character, value)
 end
 
 currentMovementAnimationSource = function()
-    if not (Game ~= nil and Game.IsMultiplayer == true) or
-        movementAnimationSyncPendingNegotiation or
+    local multiplayer = Game ~= nil and Game.IsMultiplayer == true
+    local look = reducerState.look
+    if not multiplayer then
+        if look ~= nil then return look.useFashionMovementAnimations ~= false end
+        return useFashionMovementAnimations == true
+    end
+    if movementAnimationSyncPendingNegotiation or
         protocolMode == "v1" or
         (protocolMode == "v3" and not serverSupportsMovementAnimationSource()) then
         return useFashionMovementAnimations == true
     end
-    local look = reducerState.look
     if look ~= nil then return look.useFashionMovementAnimations ~= false end
     return useFashionMovementAnimations == true
 end
@@ -2747,7 +2785,7 @@ function Helpers.applyCapturedFashionToCharacterEquipment(
     -- Apply the authoritative per-look choice after committing the new renderer
     -- session. Legacy/v1 looks keep the observer's previous local preference.
     local animationSource = useFashionMovementAnimations
-    if Helpers.isMultiplayerClient() and type(movementAnimationSource) == "boolean" then
+    if type(movementAnimationSource) == "boolean" then
         animationSource = movementAnimationSource
     end
     Helpers.setFashionMovementAnimationsVisual(character, animationSource)
@@ -3109,7 +3147,8 @@ clientEffectAdapters.RenderCompensation = function(currentEffect)
 end
 
 clientEffectAdapters.ClearRender = function(currentEffect)
-    local character = currentEffect.characterId ~= nil and Helpers.findEntityById(currentEffect.characterId) or controlled()
+    local character = currentEffect.dispose == true and lastCharacter or
+        (currentEffect.characterId ~= nil and Helpers.findEntityById(currentEffect.characterId) or controlled())
     if character == nil then character = lastCharacter end
     local ok, reason
     if currentEffect.dispose == true or currentEffect.forget == true or currentEffect.remote == true then
@@ -3314,6 +3353,10 @@ function Helpers.autoApplySavedLookIfNeeded(character)
 end
 
 function Helpers.handleNoControlledCharacter()
+    if reducerCharacterKey ~= nil then
+        dispatchReducer({ type = "CharacterLost" })
+        reducerCharacterKey = nil
+    end
     if lastCharacter ~= nil then
         saveCharacterState(lastCharacter)
         if isSinglePlayerClient() then
@@ -3321,10 +3364,6 @@ function Helpers.handleNoControlledCharacter()
         end
     end
 
-    if reducerCharacterKey ~= nil then
-        dispatchReducer({ type = "CharacterLost" })
-        reducerCharacterKey = nil
-    end
     reducerHasUnboundLook = false
 
     local shouldReapplySavedLook = Helpers.hasSavedLook() and
@@ -3368,6 +3407,10 @@ function Helpers.handleControlledCharacterChange(character)
     end
     local sourceState = nil
     if lastCharacter ~= nil then
+        if reducerCharacterKey ~= nil then
+            dispatchReducer({ type = "CharacterLost" })
+            reducerCharacterKey = nil
+        end
         saveCharacterState(lastCharacter)
         local sourceKey = characterStateKey(lastCharacter)
         sourceState = sourceKey ~= nil and characterStates[sourceKey] or nil
@@ -3688,9 +3731,20 @@ function Helpers.deferRoundStartNetworkLook(
     hairHidden,
     protocolLook
 )
+    local characterKey = characterStateKey(character)
+    if pendingRoundStartNetworkLook ~= nil and
+        pendingRoundStartNetworkCharacterKey == characterKey then
+        local deferredRevision = tonumber(pendingRoundStartNetworkRevision)
+        local incomingRevision = tonumber(protocolRevision)
+        if deferredRevision ~= nil and
+            (incomingRevision == nil or deferredRevision > incomingRevision) then
+            return false
+        end
+    end
+
     lastCharacter = character
     pendingRoundStartNetworkLook = copyLookData(networkLook)
-    pendingRoundStartNetworkCharacterKey = characterStateKey(character)
+    pendingRoundStartNetworkCharacterKey = characterKey
     pendingRoundStartNetworkRevision = protocolRevision
     pendingRoundStartHideHair = hairHidden == true
     pendingRoundStartProtocolLook = Core.copyLook(protocolLook)
@@ -3700,6 +3754,7 @@ function Helpers.deferRoundStartNetworkLook(
         slotResults[entry.key] = networkLook[entry.key] ~= nil and "Waiting for initial equipment" or "Empty"
     end
     lastOperation = "Multiplayer wardrobe sync is waiting for initial equipment."
+    return true
 end
 
 function Helpers.applyPendingRoundStartNetworkLook(character)
@@ -3749,29 +3804,85 @@ function Helpers.networkLookAlreadyApplied(character, networkLook, protocolLook)
     return key ~= nil and signature ~= nil and lastAppliedNetworkLookSignatureByCharacterKey[key] == signature
 end
 
-function Helpers.storePendingNetworkApply(characterId, networkLook, protocolRevision, hairHidden, protocolLook)
+local function pendingMessageHasNewerRevision(pending, protocolRevision)
+    if pending == nil then return false end
+    local pendingRevision = tonumber(pending.protocolRevision)
+    local incomingRevision = tonumber(protocolRevision)
+    if pendingRevision == nil then return false end
+    if incomingRevision == nil then return true end
+    return pendingRevision > incomingRevision
+end
+
+function Helpers.storePendingNetworkApply(
+    characterId,
+    networkLook,
+    protocolRevision,
+    hairHidden,
+    protocolLook,
+    retryState
+)
+    if pendingMessageHasNewerRevision(
+        pendingNetworkAppliesByCharacterId[characterId],
+        protocolRevision
+    ) or pendingMessageHasNewerRevision(
+        pendingNetworkClearsByCharacterId[characterId],
+        protocolRevision
+    ) then
+        return false
+    end
+    pendingNetworkClearsByCharacterId[characterId] = nil
     pendingNetworkAppliesByCharacterId[characterId] = {
         look = copyLookData(networkLook),
-        receivedTick = globalTick,
+        receivedTick = retryState ~= nil and retryState.receivedTick or globalTick,
+        attempts = retryState ~= nil and (tonumber(retryState.attempts) or 0) or 0,
+        nextAttemptTick = globalTick + ServerApplyRetryTicks,
         protocolRevision = protocolRevision,
         hideHair = hairHidden == true,
-        attachmentVisibility = protocolLook ~= nil and
-            (Core.validateAttachmentVisibility(protocolLook.attachmentVisibility, protocolLook.hideHair == true) or
-                Core.attachmentVisibilityFromLegacy(protocolLook.hideHair == true)) or nil,
         protocolLook = Core.copyLook(protocolLook)
     }
+    return true
 end
 
-function Helpers.storePendingNetworkClear(characterId, protocolRevision, protocolLook)
+function Helpers.storePendingNetworkClear(characterId, protocolRevision, protocolLook, retryState)
+    if pendingMessageHasNewerRevision(
+        pendingNetworkClearsByCharacterId[characterId],
+        protocolRevision
+    ) or pendingMessageHasNewerRevision(
+        pendingNetworkAppliesByCharacterId[characterId],
+        protocolRevision
+    ) then
+        return false
+    end
     pendingNetworkAppliesByCharacterId[characterId] = nil
     pendingNetworkClearsByCharacterId[characterId] = {
-        receivedTick = globalTick,
+        receivedTick = retryState ~= nil and retryState.receivedTick or globalTick,
+        attempts = retryState ~= nil and (tonumber(retryState.attempts) or 0) or 0,
+        nextAttemptTick = globalTick + ServerApplyRetryTicks,
         protocolRevision = protocolRevision,
         protocolLook = Core.copyLook(protocolLook)
     }
+    return true
 end
 
-function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevision, hairHidden, protocolLook)
+function Helpers.handleNetworkLookApply(
+    characterId,
+    networkLook,
+    protocolRevision,
+    hairHidden,
+    protocolLook,
+    retryState
+)
+    if pendingMessageHasNewerRevision(
+        pendingNetworkAppliesByCharacterId[characterId],
+        protocolRevision
+    ) or pendingMessageHasNewerRevision(
+        pendingNetworkClearsByCharacterId[characterId],
+        protocolRevision
+    ) then
+        return false
+    end
+    pendingNetworkClearsByCharacterId[characterId] = nil
+
     if protocolRevision == nil and Helpers.networkApplySuppressedForCharacter(characterId, nil) then
         pendingNetworkAppliesByCharacterId[characterId] = nil
         Helpers.debugLog("Ignored suppressed multiplayer wardrobe apply for characterId=" .. tostring(characterId) .. ".")
@@ -3779,22 +3890,78 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
     end
 
     local character = Helpers.findEntityById(characterId)
-    if character == nil then
-        Helpers.storePendingNetworkApply(characterId, networkLook, protocolRevision, hairHidden, protocolLook)
+    if character == nil or Helpers.visualOverrideStatus() ~= nil then
+        Helpers.storePendingNetworkApply(
+            characterId,
+            networkLook,
+            protocolRevision,
+            hairHidden,
+            protocolLook,
+            retryState
+        )
         return false
     end
 
     pendingNetworkAppliesByCharacterId[characterId] = nil
 
+    local function retryAfterFailure()
+        local attempts = (retryState ~= nil and (tonumber(retryState.attempts) or 0) or 0) + 1
+        if attempts < NetworkRenderMaxAttempts then
+            Helpers.storePendingNetworkApply(
+                characterId,
+                networkLook,
+                protocolRevision,
+                hairHidden,
+                protocolLook,
+                {
+                    attempts = attempts,
+                    receivedTick = retryState ~= nil and retryState.receivedTick or globalTick
+                }
+            )
+        else
+            Helpers.debugLog(
+                "Stopped retrying multiplayer wardrobe apply for characterId=" ..
+                tostring(characterId) ..
+                " after " ..
+                tostring(attempts) ..
+                " attempts."
+            )
+        end
+        return false
+    end
+
     if character == controlled() and initialEquipGateActive and not Helpers.initialEquipGateReady(character) then
-        Helpers.deferRoundStartNetworkLook(
+        return Helpers.deferRoundStartNetworkLook(
             character,
             networkLook,
             protocolRevision,
             hairHidden,
             protocolLook
         )
-        return true
+    end
+
+    local networkVisibility = nil
+    if protocolRevision ~= nil then
+        networkVisibility = protocolLook ~= nil and
+            protocolLook.attachmentVisibility or
+            Core.attachmentVisibilityFromLegacy(hairHidden == true)
+    end
+    local networkAnimationSource = nil
+    if protocolRevision ~= nil and protocolLook ~= nil then
+        networkAnimationSource = protocolLook.useFashionMovementAnimations ~= false
+    end
+    local function applyDirectly()
+        local applied, diagnostics = Helpers.applyNetworkLook(
+            character,
+            networkLook,
+            networkVisibility,
+            networkAnimationSource
+        )
+        lastNetworkApplyDiagnostics = diagnostics or {}
+        if applied then
+            Helpers.rememberNetworkLookApplied(character, networkLook, protocolLook)
+        end
+        return applied
     end
 
     if protocolRevision ~= nil and character == controlled() then
@@ -3818,6 +3985,10 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             return false
         end
         if effectsContain(effects, "IgnoredDuplicateState") then
+            if not Helpers.networkLookAlreadyApplied(character, networkLook, protocolLook) and
+                not applyDirectly() then
+                return retryAfterFailure()
+            end
             Helpers.completeAcknowledgedApplyState(protocolRevision)
             return true
         end
@@ -3827,7 +3998,7 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             Helpers.completeAcknowledgedApplyState(protocolRevision)
             return true
         end
-        return false
+        return retryAfterFailure()
     end
 
     if protocolRevision == nil and character == controlled() then
@@ -3850,7 +4021,7 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
             Helpers.rememberNetworkLookApplied(character, networkLook)
             return true
         end
-        return false
+        return retryAfterFailure()
     end
 
     if protocolRevision == nil and Helpers.networkApplySuppressedForCharacter(characterId, character) then
@@ -3862,37 +4033,73 @@ function Helpers.handleNetworkLookApply(characterId, networkLook, protocolRevisi
         return true
     end
 
-    local networkVisibility = nil
-    if protocolRevision ~= nil then
-        networkVisibility = protocolLook ~= nil and
-            protocolLook.attachmentVisibility or
-            Core.attachmentVisibilityFromLegacy(hairHidden == true)
-    end
-    local networkAnimationSource = nil
-    if protocolRevision ~= nil and protocolLook ~= nil then
-        networkAnimationSource = protocolLook.useFashionMovementAnimations ~= false
-    end
-    local applied, diagnostics = Helpers.applyNetworkLook(
-        character,
-        networkLook,
-        networkVisibility,
-        networkAnimationSource
-    )
-    if applied then
-        Helpers.rememberNetworkLookApplied(character, networkLook, protocolLook)
-    end
-    return true
+    if applyDirectly() then return true end
+    return retryAfterFailure()
 end
 
-function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolLook)
+function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolLook, retryState)
+    if pendingMessageHasNewerRevision(
+        pendingNetworkClearsByCharacterId[characterId],
+        protocolRevision
+    ) or pendingMessageHasNewerRevision(
+        pendingNetworkAppliesByCharacterId[characterId],
+        protocolRevision
+    ) then
+        return false
+    end
     pendingNetworkAppliesByCharacterId[characterId] = nil
     local character = Helpers.findEntityById(characterId)
     if character == nil then
-        Helpers.storePendingNetworkClear(characterId, protocolRevision, protocolLook)
+        Helpers.storePendingNetworkClear(characterId, protocolRevision, protocolLook, retryState)
         return false
     end
 
+    if pendingRoundStartNetworkLook ~= nil and
+        pendingRoundStartNetworkCharacterKey == characterStateKey(character) then
+        local deferredRevision = tonumber(pendingRoundStartNetworkRevision)
+        local incomingRevision = tonumber(protocolRevision)
+        if deferredRevision ~= nil and
+            (incomingRevision == nil or deferredRevision > incomingRevision) then
+            return false
+        end
+        pendingRoundStartNetworkLook = nil
+        pendingRoundStartNetworkCharacterKey = nil
+        pendingRoundStartNetworkRevision = nil
+        pendingRoundStartHideHair = false
+        pendingRoundStartProtocolLook = nil
+    end
+
     pendingNetworkClearsByCharacterId[characterId] = nil
+    local function retryAfterFailure()
+        local attempts = (retryState ~= nil and (tonumber(retryState.attempts) or 0) or 0) + 1
+        if attempts < NetworkRenderMaxAttempts then
+            Helpers.storePendingNetworkClear(
+                characterId,
+                protocolRevision,
+                protocolLook,
+                {
+                    attempts = attempts,
+                    receivedTick = retryState ~= nil and retryState.receivedTick or globalTick
+                }
+            )
+        else
+            Helpers.debugLog(
+                "Stopped retrying multiplayer wardrobe clear for characterId=" ..
+                tostring(characterId) ..
+                " after " ..
+                tostring(attempts) ..
+                " attempts."
+            )
+        end
+        return false
+    end
+    local function finishClear()
+        local key = characterStateKey(character)
+        if key ~= nil then lastAppliedNetworkLookSignatureByCharacterKey[key] = nil end
+        lastOperation = "Look cleared from multiplayer sync."
+        return true
+    end
+
     if protocolRevision ~= nil and character == controlled() then
         if protocolLook ~= nil then
             local canonicalLegacy = Core.toLegacyLook(protocolLook)
@@ -3906,29 +4113,33 @@ function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolL
             look = protocolLook
         })
         if effectsContain(effects, "IgnoredStaleState") then return false end
+        if effectsContain(effects, "IgnoredDuplicateState") then
+            local cleared = Helpers.tryClearVisualOverride(character)
+            if not cleared then return retryAfterFailure() end
+            return finishClear()
+        end
         local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Faulted then
-            return false
+            return retryAfterFailure()
         end
-        lastOperation = "Look cleared from multiplayer sync."
-        return true
+        return finishClear()
     end
     if protocolRevision == nil and character == controlled() then
         local currentState = reducerState
-        if currentState ~= nil and Core.hasLook(currentState.look) and currentState.active then
+        if currentState ~= nil and Core.hasLook(currentState.look) then
             dispatchReducer({ type = "LocalClearRequested" })
+            if reducerState ~= nil and reducerState.phase == Core.PHASE.Faulted then
+                return retryAfterFailure()
+            end
         else
-            Helpers.tryClearVisualOverride(character)
+            local cleared = Helpers.tryClearVisualOverride(character)
+            if not cleared then return retryAfterFailure() end
         end
-        lastOperation = "Look cleared from multiplayer sync."
-        return true
+        return finishClear()
     end
-    Helpers.clearVisualOverride(character)
-    local key = characterStateKey(character)
-    if key ~= nil then
-        lastAppliedNetworkLookSignatureByCharacterKey[key] = nil
-    end
-    return true
+    local cleared = Helpers.tryClearVisualOverride(character)
+    if not cleared then return retryAfterFailure() end
+    return finishClear()
 end
 
 function Helpers.processPendingNetworkMessages()
@@ -3938,8 +4149,13 @@ function Helpers.processPendingNetworkMessages()
         if pending.protocolRevision == nil and
             globalTick - pending.receivedTick > PendingLegacyNetworkMessageMaxTicks then
             pendingNetworkClearsByCharacterId[characterId] = nil
-        elseif Helpers.findEntityById(characterId) ~= nil then
-            Helpers.handleNetworkLookClear(characterId, pending.protocolRevision, pending.protocolLook)
+        elseif globalTick >= (pending.nextAttemptTick or pending.receivedTick) then
+            Helpers.handleNetworkLookClear(
+                characterId,
+                pending.protocolRevision,
+                pending.protocolLook,
+                pending
+            )
         end
     end
 
@@ -3947,13 +4163,14 @@ function Helpers.processPendingNetworkMessages()
         if pending.protocolRevision == nil and
             globalTick - pending.receivedTick > PendingLegacyNetworkMessageMaxTicks then
             pendingNetworkAppliesByCharacterId[characterId] = nil
-        elseif Helpers.findEntityById(characterId) ~= nil then
+        elseif globalTick >= (pending.nextAttemptTick or pending.receivedTick) then
             Helpers.handleNetworkLookApply(
                 characterId,
                 pending.look,
                 pending.protocolRevision,
                 pending.hideHair,
-                pending.protocolLook
+                pending.protocolLook,
+                pending
             )
         end
     end
@@ -4327,21 +4544,23 @@ end
 function Helpers.updateMovementAnimationSource(enabled)
     local character = controlled()
     useFashionMovementAnimations = enabled == true
-    if not Helpers.hasSavedLook() or not Helpers.isMultiplayerClient() then
+    local multiplayer = Helpers.isMultiplayerClient()
+    if not Helpers.hasSavedLook() then
         return Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
     end
-    if protocolMode == "probing" then
+    if multiplayer and protocolMode == "probing" then
         movementAnimationSyncPendingNegotiation = true
         return Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
     end
-    if not serverSupportsMovementAnimationSource() then
+    if multiplayer and not serverSupportsMovementAnimationSource() then
         return Helpers.setFashionMovementAnimationsVisual(character, useFashionMovementAnimations)
     end
+    local remote = multiplayer
     dispatchReducer({
         type = "SetMovementAnimationSource",
         enabled = useFashionMovementAnimations,
-        remote = true,
-        operationId = nextOperationId()
+        remote = remote,
+        operationId = remote and nextOperationId() or nil
     })
     local state = reducerState
     if state ~= nil and state.phase == Core.PHASE.Faulted then
@@ -4566,16 +4785,7 @@ tryCaptureEmptyVisualOverride = function(character)
     return true
 end
 
-function Helpers.resetSavedLookForNewSession()
-    Helpers.clearAllVisualOverrides()
-    lastCharacter = nil
-    windowNeedsRefresh = true
-    legacyLookMetadata = {}
-    characterStates = {}
-    slotResults = {}
-    lastNetworkApplyDiagnostics = {}
-    lastEquipmentSignature = nil
-    lastServerAutoApplySignature = nil
+function Helpers.resetSessionTransportState()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil
     pendingRoundStartNetworkRevision = nil
@@ -4601,9 +4811,24 @@ function Helpers.resetSavedLookForNewSession()
     protocolCommandQueue = {}
     inFlightV2Command = nil
     pendingLegacyApply = nil
+    pendingSaveContext = nil
     protocolOperationCounter = 0
     clientSessionId = createClientSessionId()
     reducerCharacterKey = nil
+    roundStartNoticeSent = false
+end
+
+function Helpers.resetSavedLookForNewSession()
+    Helpers.clearAllVisualOverrides()
+    lastCharacter = nil
+    windowNeedsRefresh = true
+    legacyLookMetadata = {}
+    characterStates = {}
+    slotResults = {}
+    lastNetworkApplyDiagnostics = {}
+    lastEquipmentSignature = nil
+    lastServerAutoApplySignature = nil
+    Helpers.resetSessionTransportState()
     reducerHasUnboundLook = false
     reducerState = Core.newClientState({
         clientSessionId = clientSessionId,
@@ -4614,18 +4839,86 @@ function Helpers.resetSavedLookForNewSession()
     lastOperation = "Ready."
 end
 
+function Helpers.rebindCurrentLookForReplacedSession()
+    Helpers.preserveSceneTransitionLookIntent()
+    if lastCharacter ~= nil then saveCharacterState(lastCharacter) end
+
+    local preservedLook = Core.copyLook(reducerState.look)
+    local preservedAutoApply = reducerState.autoApply == true and Core.hasLook(preservedLook)
+    Helpers.clearAllVisualOverrides()
+    lastCharacter = nil
+    lastEquipmentSignature = nil
+    lastServerAutoApplySignature = nil
+    lastNetworkApplyDiagnostics = {}
+    windowNeedsRefresh = true
+    Helpers.resetSessionTransportState()
+
+    reducerState = Core.newClientState({
+        clientSessionId = clientSessionId,
+        sessionKey = Helpers.currentSessionKey()
+    })
+    clientController = createClientController(reducerState)
+    reducerHasUnboundLook = Core.hasLook(preservedLook)
+    if reducerHasUnboundLook then
+        dispatchReducer({
+            type = "RestoreLook",
+            look = preservedLook,
+            active = false,
+            autoApply = preservedAutoApply
+        })
+        lastOperation = preservedAutoApply and
+            "Saved look will be reapplied in the replacement session." or
+            "Saved look needs to be applied again."
+    else
+        lastOperation = "Ready."
+    end
+end
+
 function Helpers.handleSessionChange()
+    local sessionObject = Helpers.currentSessionObject()
     local sessionKey = Helpers.currentSessionKey()
     if sessionKey == nil then return end
     if lastSessionKey == nil then
         lastSessionKey = sessionKey
+        lastSessionObject = sessionObject
+        if sessionObjectObserved then
+            Helpers.resetSavedLookForNewSession()
+            Helpers.debugLog("Detected a stable key for a previously pathless session; cleared in-memory saved wardrobe look.")
+        else
+            sessionObjectObserved = true
+        end
         return
     end
     if sessionKey == lastSessionKey then return end
 
     lastSessionKey = sessionKey
+    lastSessionObject = sessionObject
+    sessionObjectObserved = true
     Helpers.resetSavedLookForNewSession()
     Helpers.debugLog("Detected a new game session; cleared in-memory saved wardrobe look.")
+end
+
+function Helpers.handleRoundStartSessionChange()
+    local sessionObject = Helpers.currentSessionObject()
+    local sessionKey = Helpers.currentSessionKey()
+    if not sessionObjectObserved then
+        sessionObjectObserved = true
+        lastSessionObject = sessionObject
+        lastSessionKey = sessionKey
+        return
+    end
+
+    local sessionKeyChanged = sessionKey ~= lastSessionKey
+    local sessionObjectChanged = not rawequal(sessionObject, lastSessionObject)
+    lastSessionObject = sessionObject
+    lastSessionKey = sessionKey
+    if sessionKeyChanged then
+        Helpers.resetSavedLookForNewSession()
+        Helpers.debugLog("Detected a new game session at round start; cleared in-memory saved wardrobe look.")
+    elseif sessionObjectChanged then
+        Helpers.rebindCurrentLookForReplacedSession()
+        Helpers.debugLog("Rebound wardrobe state after the game replaced its session object.")
+    end
 end
 
 Hook.Add("think", "barowardrobeswitcher.panel", function()
@@ -4689,6 +4982,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
 end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
+    Helpers.handleRoundStartSessionChange()
     Helpers.startInitialEquipGate()
     if isSinglePlayerClient() then
         pendingSinglePlayerRestores = {}
@@ -4735,10 +5029,10 @@ Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", 
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
+    local preservedForNextScene = Helpers.preserveSceneTransitionLookIntent()
     if lastCharacter ~= nil then
         saveCharacterState(lastCharacter)
     end
-    local preservedForNextScene = Helpers.preserveSceneTransitionLookIntent()
     Helpers.resetInitialEquipGate()
     pendingRoundStartNetworkLook = nil
     pendingRoundStartNetworkCharacterKey = nil

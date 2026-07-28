@@ -418,6 +418,234 @@ local rejectedAckState = Core.reduce(awaitingAck, {
 assertEqual(rejectedAckState.phase, Core.PHASE.Faulted)
 assertEqual(rejectedAckState.error, "stale base revision")
 
+-- Apply is also used to refresh an already-active look after equipment changes.
+-- A failed or cancelled request must restore that accepted active state, while
+-- an Apply requested from an inactive state must remain inactive.
+local activeApplyRollbackBase = Core.reduce(
+    Core.newClientState({ characterKey = "42", look = look, revision = 12 }),
+    {
+        type = "RestoreLook",
+        look = look,
+        active = true,
+        autoApply = true
+    }
+)
+
+local function pendingActiveApply(operationId)
+    local result = Core.reduce(activeApplyRollbackBase, {
+        type = "CommandRequested",
+        operationId = operationId,
+        kind = Core.COMMAND.Apply,
+        look = look
+    })
+    assertEqual(result.active, false, "pending Apply must await authoritative state")
+    assertEqual(result.rollbackActive, true, "pending Apply did not capture its active state")
+    return result
+end
+
+local applyFailureCases = {
+    {
+        name = "send failure",
+        event = function(operationId)
+            return {
+                type = "CommandSendFailed",
+                operationId = operationId,
+                reason = "synthetic send failure"
+            }
+        end
+    },
+    {
+        name = "rejected acknowledgement",
+        event = function(operationId)
+            return {
+                type = "AckReceived",
+                operationId = operationId,
+                accepted = false,
+                revision = 12,
+                reason = "synthetic rejection"
+            }
+        end
+    },
+    {
+        name = "timeout",
+        event = function(operationId)
+            return {
+                type = "CommandTimedOut",
+                operationId = operationId,
+                reason = "synthetic timeout"
+            }
+        end
+    }
+}
+
+for index, failureCase in ipairs(applyFailureCases) do
+    local operationId = "session-apply-rollback:" .. tostring(index)
+    local failed = Core.reduce(
+        pendingActiveApply(operationId),
+        failureCase.event(operationId)
+    )
+    assertEqual(failed.phase, Core.PHASE.Faulted, failureCase.name .. " did not fault")
+    assertEqual(failed.active, true, failureCase.name .. " lost the accepted active state")
+    assertEqual(failed.autoApply, true, failureCase.name .. " lost auto-apply intent")
+    assertEqual(failed.pendingOperationId, nil, failureCase.name .. " left an operation pending")
+    assert(Core.lookEquals(failed.look, look), failureCase.name .. " changed the accepted look")
+end
+
+local inactiveApplyPending = Core.reduce(
+    Core.newClientState({ characterKey = "42", look = look, revision = 12 }),
+    {
+        type = "CommandRequested",
+        operationId = "session-apply-inactive",
+        kind = Core.COMMAND.Apply,
+        look = look
+    }
+)
+local inactiveApplyRejected = Core.reduce(inactiveApplyPending, {
+    type = "AckReceived",
+    operationId = "session-apply-inactive",
+    accepted = false,
+    revision = 12,
+    reason = "synthetic rejection"
+})
+assertEqual(inactiveApplyRejected.active, false,
+    "rejected inactive Apply was incorrectly marked active")
+assertEqual(inactiveApplyRejected.autoApply, false,
+    "rejected inactive Apply gained auto-apply intent")
+
+local lifecycleCapturedLook = assert(Core.newLook(true, false, { Head = "replacementhelmet" }))
+local lifecycleVisibility = Core.attachmentVisibilityFromLegacy(false)
+local lifecyclePendingCases = {
+    {
+        name = Core.COMMAND.Save,
+        state = function(operationId)
+            local saving = Core.reduce(activeApplyRollbackBase, {
+                type = "SaveRequested",
+                remote = true,
+                operationId = operationId
+            })
+            return Core.reduce(saving, {
+                type = "CaptureSucceeded",
+                look = lifecycleCapturedLook
+            })
+        end
+    },
+    {
+        name = Core.COMMAND.Apply,
+        state = function(operationId)
+            return pendingActiveApply(operationId)
+        end
+    },
+    {
+        name = Core.COMMAND.Clear,
+        state = function(operationId)
+            return Core.reduce(activeApplyRollbackBase, {
+                type = "CommandRequested",
+                operationId = operationId,
+                kind = Core.COMMAND.Clear
+            })
+        end
+    },
+    {
+        name = Core.COMMAND.Forget,
+        state = function(operationId)
+            return Core.reduce(activeApplyRollbackBase, {
+                type = "CommandRequested",
+                operationId = operationId,
+                kind = Core.COMMAND.Forget
+            })
+        end
+    },
+    {
+        name = Core.COMMAND.Visibility,
+        state = function(operationId)
+            return Core.reduce(activeApplyRollbackBase, {
+                type = "SetAttachmentVisibility",
+                attachmentVisibility = lifecycleVisibility,
+                remote = true,
+                operationId = operationId
+            })
+        end
+    },
+    {
+        name = Core.COMMAND.Animation,
+        state = function(operationId)
+            return Core.reduce(activeApplyRollbackBase, {
+                type = "SetMovementAnimationSource",
+                enabled = false,
+                remote = true,
+                operationId = operationId
+            })
+        end
+    }
+}
+
+for index, pendingCase in ipairs(lifecyclePendingCases) do
+    local operationId = "session-lifecycle-" .. pendingCase.name .. ":" .. tostring(index)
+    local transitioned, transitionEffects = Core.reduce(
+        pendingCase.state(operationId),
+        { type = "PrepareSceneTransition", reapply = false }
+    )
+    assertEqual(transitioned.phase, Core.PHASE.SavedInactive,
+        pendingCase.name .. " lifecycle cancellation chose the wrong phase")
+    assertEqual(transitioned.active, false,
+        pendingCase.name .. " stayed active across the scene boundary")
+    assertEqual(transitioned.autoApply, true,
+        pendingCase.name .. " lost the accepted scene-reapply intent")
+    assertEqual(transitioned.pendingOperationId, nil,
+        pendingCase.name .. " remained pending across the scene boundary")
+    assertEqual(transitioned.rollbackLook, nil,
+        pendingCase.name .. " left rollback state behind")
+    assert(Core.lookEquals(transitioned.look, look),
+        pendingCase.name .. " persisted an unaccepted optimistic look")
+    assertEqual(#transitionEffects, 1,
+        pendingCase.name .. " scene cancellation emitted unexpected effects")
+    assertEqual(transitionEffects[1].type, "Persist",
+        pendingCase.name .. " scene cancellation did not persist the accepted look")
+    assert(Core.lookEquals(transitionEffects[1].look, look),
+        pendingCase.name .. " scene cancellation persisted the wrong look")
+end
+
+local lostDuringApply, lostDuringApplyEffects = Core.reduce(
+    pendingActiveApply("session-lifecycle-character-lost"),
+    { type = "CharacterLost" }
+)
+assertEqual(lostDuringApply.phase, Core.PHASE.NoCharacter)
+assertEqual(lostDuringApply.active, false)
+assertEqual(lostDuringApply.autoApply, true,
+    "CharacterLost discarded the accepted active Apply state")
+assertEqual(lostDuringApply.pendingOperationId, nil)
+assertEqual(lostDuringApplyEffects[1].type, "ClearRender")
+assertEqual(lostDuringApplyEffects[1].preserveAutoApply, true)
+
+-- Once the server accepts a command, lifecycle cleanup keeps the accepted
+-- result instead of restoring the pre-command rollback snapshot.
+local acceptedLifecycleSave = Core.reduce(activeApplyRollbackBase, {
+    type = "SaveRequested",
+    remote = true,
+    operationId = "session-lifecycle-accepted-save"
+})
+acceptedLifecycleSave = Core.reduce(acceptedLifecycleSave, {
+    type = "CaptureSucceeded",
+    look = lifecycleCapturedLook
+})
+acceptedLifecycleSave = Core.reduce(acceptedLifecycleSave, {
+    type = "AckReceived",
+    operationId = "session-lifecycle-accepted-save",
+    accepted = true,
+    revision = 13
+})
+local acceptedLifecycleTransition, acceptedLifecycleEffects = Core.reduce(
+    acceptedLifecycleSave,
+    { type = "PrepareSceneTransition", reapply = false }
+)
+assert(Core.lookEquals(acceptedLifecycleTransition.look, lifecycleCapturedLook),
+    "scene cleanup rolled back a server-accepted look")
+assertEqual(acceptedLifecycleTransition.autoApply, false,
+    "server-accepted inactive Save gained reapply intent")
+assertEqual(acceptedLifecycleEffects[1].type, "Persist")
+assert(Core.lookEquals(acceptedLifecycleEffects[1].look, lifecycleCapturedLook),
+    "scene cleanup persisted the pre-command look after server acceptance")
+
 -- The client controller is the only place that executes effects. Every adapter
 -- reports a success/failure event back through the same reducer before the next
 -- effect is allowed to run.

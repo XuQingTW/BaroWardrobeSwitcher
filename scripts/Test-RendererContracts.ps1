@@ -2,7 +2,9 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $renderer = Get-Content -LiteralPath (Join-Path $root "CSharp/Client/WardrobeVisualOverridePlugin.cs") -Raw
 $session = Get-Content -LiteralPath (Join-Path $root "CSharp/Client/WardrobeRendering.cs") -Raw
-$all = $renderer + "`n" + $session
+$policy = Get-Content -LiteralPath (Join-Path $root "CSharp/Client/WardrobeFunctionalFashionFilters.cs") -Raw
+$compatibilityProbe = Get-Content -LiteralPath (Join-Path $root "tools/CompatibilityProbe/Program.cs") -Raw
+$all = $renderer + "`n" + $session + "`n" + $policy
 
 function Assert-Contract([string] $name, [string] $source, [string[]] $required) {
     foreach ($pattern in $required) {
@@ -108,7 +110,32 @@ $contracts = @(
         Required = @(
             "FashionEffectPolicy.IsFunctionalEquipmentAlarm(statusEffect)",
             "session.SuppressedEquipmentSounds.Remove(statusEffect);",
-            "if (!FashionEffectPolicy.ShouldCaptureStatusSound(statusEffect)) { continue; }"
+            "if (!FashionEffectPolicy.ShouldCaptureStatusSound(statusEffect)) { continue; }",
+            "if (!FashionEffectPolicy.ShouldCaptureStatusEffect(statusEffect)) { continue; }",
+            "internal static bool IsStateDependentStatusEffect(StatusEffect statusEffect)",
+            "OnlyInsideField",
+            "OnlyOutsideField",
+            "TargetIdentifiersField",
+            "TargetItemComponentField"
+        )
+    },
+    @{
+        Name = "functional-alarm-compatibility-probe"
+        Source = $compatibilityProbe
+        Required = @(
+            'RequireField("StatusEffect.OnlyInside", statusEffect, "OnlyInside", optional: true);',
+            'RequireField("StatusEffect.OnlyOutside", statusEffect, "OnlyOutside", optional: true);',
+            'RequireField("StatusEffect.TargetIdentifiers", statusEffect, "TargetIdentifiers", optional: true);',
+            'RequireField("StatusEffect.TargetItemComponent", statusEffect, "TargetItemComponent", optional: true);'
+        )
+    },
+    @{
+        Name = "component-sound-action-lifecycle"
+        Source = $all
+        Required = @(
+            "return actionType == ActionType.Always || actionType == ActionType.OnWearing;",
+            "FashionEffectPolicy.ShouldKeepComponentLoopAlive(fashionSound.ActionType)",
+            "fashionSound.Component == null || fashionSound.ActionType != actionType"
         )
     },
     @{
@@ -138,8 +165,12 @@ $contracts = @(
             "public static bool SetUseFashionMovementAnimations(Character character, bool enabled)",
             "session.UseFashionMovementAnimations = enabled;",
             "if (!session.UseFashionMovementAnimations) { return true; }",
-            "!session.UseFashionMovementAnimations ||",
-            "session.FashionAnimations.Count == 0"
+            "if (!session.UseFashionMovementAnimations &&",
+            "FashionEffectPolicy.IsMovementAnimation(animationInfo)",
+            "public HashSet<object> SuppressedEquipmentAnimations { get; }",
+            "RegisterSuppressedEquipmentAnimations(character, item);",
+            "session.SuppressedEquipmentAnimations.Contains(animationInfo)",
+            "FashionEffectPolicy.ShouldSuppressEquipmentAnimation(item, animationInfo)"
         )
     }
 )
@@ -151,6 +182,9 @@ foreach ($contract in $contracts) {
 if ($all.Contains(".MemberwiseClone(")) { throw "Renderer resources must not be shallow-cloned." }
 if ($renderer.Contains("CharacterHealth.ApplyAffliction")) {
     throw "Experimental XDS rendering must not apply gameplay afflictions."
+}
+if ($renderer.Contains("for (int pass = 0; pass < 2; pass++)")) {
+    throw "Fashion component sound replacement must not fall back across ActionType values."
 }
 
 $visibility = Get-Section $renderer `
@@ -169,6 +203,45 @@ Assert-Order "temporary-item-id-and-color" $fallback @(
     "tempItem.FreeID();",
     "tempItem.SpriteColor = new Color(packedColor.Value);",
     "CaptureFashionItemCore(character, tempItem"
+)
+
+$temporaryAnimation = Get-Section $renderer `
+    "internal static bool ShouldLoadTemporaryAnimation(" `
+    "private static void KeepFashionAnimationsAlive("
+Assert-Order "exact-equipment-animation-suppression" $temporaryAnimation @(
+    "if (!session.UseFashionMovementAnimations) { return true; }",
+    "session.SuppressedEquipmentAnimations.Contains(animationInfo)",
+    "session.FashionAnimations.Count > 0",
+    "FashionEffectPolicy.IsLargeEquipmentMovementAnimation(animationInfo)"
+)
+
+$fashionAnimations = Get-Section $renderer `
+    "private static void KeepFashionAnimationsAlive(" `
+    "private static void KeepFashionSoundsAlive("
+Assert-Order "movement-toggle-scope" $fashionAnimations @(
+    "foreach (object animationInfo in session.FashionAnimations)",
+    "if (!session.UseFashionMovementAnimations &&",
+    "FashionEffectPolicy.IsMovementAnimation(animationInfo)",
+    "TryLoadTemporaryAnimationMethod.Invoke"
+)
+
+$restoreLifecycle = Get-Section $renderer `
+    "public static void RestoreItemVisuals()" `
+    "public static void ClearCharacter("
+Assert-Order "equipment-animation-restore-lifecycle" $restoreLifecycle @(
+    "public static void RestoreItemVisuals()",
+    "session.SuppressedEquipmentAnimations.Clear();",
+    "public static void RestoreCharacterItemVisuals(",
+    "session.SuppressedEquipmentAnimations.Clear();"
+)
+
+$slotRefresh = Get-Section $renderer `
+    "public static bool SetFashionSlots(" `
+    "public static bool SetAttachmentVisibility("
+Assert-Order "equipment-animation-rescan-lifecycle" $slotRefresh @(
+    "RenderSession session = GetCaptureSession(character);",
+    "session.SuppressedEquipmentAnimations.Clear();",
+    "session.SavedSlots = ParseSlotCsv(savedSlotsCsv);"
 )
 
 $xdsAppendage = Get-Section $renderer `

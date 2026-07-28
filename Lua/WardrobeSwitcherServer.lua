@@ -175,6 +175,9 @@ local function currentGameSessionKey()
     if GameMain == nil then return nil end
     local session = userDataMember(GameMain, "GameSession")
     if session == nil then return nil end
+    local dataPath = userDataMember(session, "DataPath")
+    local fromDataPath = firstSessionValue(dataPath, { "SavePath", "LoadPath" })
+    if fromDataPath ~= nil then return "campaign:" .. fromDataPath end
     local direct = firstSessionValue(session, { "SavePath", "SaveFilePath", "SaveFile", "FilePath" })
     if direct ~= nil then return "session:" .. direct end
     local gameMode = userDataMember(session, "GameMode")
@@ -182,9 +185,14 @@ local function currentGameSessionKey()
     if fromMode ~= nil then return "gamemode:" .. fromMode end
     local campaign = userDataMember(session, "Campaign") or userDataMember(gameMode, "Campaign")
     local fromCampaign = firstSessionValue(campaign, {
-        "SavePath", "SaveFilePath", "SaveFile", "FilePath", "CampaignID", "Identifier"
+        "SavePath", "SaveFilePath", "SaveFile", "FilePath"
     })
     if fromCampaign ~= nil then return "campaign:" .. fromCampaign end
+    local preset = userDataMember(gameMode, "Preset")
+    local presetIdentifier = firstSessionValue(preset, { "Identifier" })
+    if presetIdentifier ~= nil then
+        return "runtime:" .. serverSessionId .. ":" .. presetIdentifier
+    end
     return nil
 end
 
@@ -1323,7 +1331,7 @@ local function sendActiveSnapshot(client)
             if ownerSession == requestingSession or
                 tonumber(ownerSession.activeCharacterId) ~= characterId or runtime == nil or
                 runtime.session ~= ownerSession or runtime.revision ~= ownerSession.revision then
-                if activateRuntime(ownerSession, character, ownerSession.savedLook) then
+                if activateRuntime(ownerSession, character, ownerSession.savedLook, true) then
                     reboundCharacterIds[characterId] = true
                 end
             end
@@ -1356,9 +1364,12 @@ local function clearActiveRuntime(session, shouldBroadcast)
     return characterId
 end
 
-activateRuntime = function(session, character, look)
+activateRuntime = function(session, character, look, restoring)
     local characterId = characterEntityId(character)
-    if session == nil or characterId <= 0 or look == nil then return false end
+    if session == nil or characterId <= 0 or look == nil or
+        (restoring == true and currentGameSessionKey() == nil) then
+        return false
+    end
     if session.activeCharacterId ~= nil and tonumber(session.activeCharacterId) ~= characterId then
         clearActiveRuntime(session, true)
     end
@@ -1788,7 +1799,7 @@ local function reactivateSession(session)
     if session == nil or not session.active or session.savedLook == nil then return end
     local character = clientCharacter(session.client)
     if character == nil or characterEntityId(character) <= 0 then return end
-    activateRuntime(session, character, session.savedLook)
+    activateRuntime(session, character, session.savedLook, true)
 end
 
 local function rebindCreatedCharacter(character)
@@ -1798,7 +1809,7 @@ local function rebindCreatedCharacter(character)
             local session = sessionFor(client)
             if session ~= nil and session.active and session.savedLook ~= nil and
                 tonumber(session.activeCharacterId) ~= characterEntityId(character) then
-                activateRuntime(session, character, session.savedLook)
+                activateRuntime(session, character, session.savedLook, true)
             end
             return true
         end
