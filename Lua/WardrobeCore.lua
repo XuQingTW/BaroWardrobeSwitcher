@@ -1047,6 +1047,15 @@ local function restoreMovementAnimationRollback(state, effects, compensate)
     end
 end
 
+local function cancelPendingForLifecycle(state)
+    if validCommands[state.pendingKind] and state.pendingServerAccepted ~= true then
+        restoreRollback(state)
+        return
+    end
+    clearPending(state)
+    clearRollback(state)
+end
+
 local function commandPending(state, event, phase)
     state.phase = phase
     state.pendingOperationId = event.operationId
@@ -1075,14 +1084,13 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "CharacterLost" then
+        cancelPendingForLifecycle(state)
         local preserveAutoApply = Core.hasLook(state.look) and
             (state.active == true or state.autoApply == true)
         state.phase = Core.PHASE.NoCharacter
         state.characterKey = nil
         state.active = false
         state.autoApply = preserveAutoApply
-        clearPending(state)
-        clearRollback(state)
         effects[#effects + 1] = effect("ClearRender", {
             dispose = true,
             preserveAutoApply = preserveAutoApply
@@ -1218,13 +1226,12 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "PrepareSceneTransition" then
+        cancelPendingForLifecycle(state)
         state.autoApply = Core.hasLook(state.look) and
             (event.reapply == true or state.active == true or state.autoApply == true)
         state.active = false
         state.phase = state.characterKey == nil and Core.PHASE.NoCharacter or
             (Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
-        clearPending(state)
-        clearRollback(state)
         if Core.hasLook(state.look) then
             effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
         end
@@ -1314,9 +1321,7 @@ function Core.reduce(currentState, event)
             state.error = "cannot apply without a saved look"
             return state, effects
         end
-        if event.kind == Core.COMMAND.Clear or event.kind == Core.COMMAND.Forget then
-            beginRollback(state)
-        end
+        beginRollback(state)
         local phase
         if event.kind == Core.COMMAND.Clear or event.kind == Core.COMMAND.Forget then
             phase = Core.PHASE.ClearPending
@@ -1369,6 +1374,7 @@ function Core.reduce(currentState, event)
 
     if event.type == "CommandSendFailed" then
         if state.pendingKind == Core.COMMAND.Save or
+            state.pendingKind == Core.COMMAND.Apply or
             state.pendingKind == Core.COMMAND.Clear or
             state.pendingKind == Core.COMMAND.Forget then
             restoreRollback(state)
@@ -1428,6 +1434,7 @@ function Core.reduce(currentState, event)
         state.revision = revision
         if event.accepted ~= true then
             if state.pendingKind == Core.COMMAND.Save or
+                state.pendingKind == Core.COMMAND.Apply or
                 state.pendingKind == Core.COMMAND.Clear or
                 state.pendingKind == Core.COMMAND.Forget then
                 restoreRollback(state)
@@ -1772,6 +1779,7 @@ function Core.reduce(currentState, event)
     if event.type == "CommandTimedOut" then
         if event.operationId == nil or event.operationId == state.pendingOperationId then
             if state.pendingKind == Core.COMMAND.Save or
+                state.pendingKind == Core.COMMAND.Apply or
                 state.pendingKind == Core.COMMAND.Clear or
                 state.pendingKind == Core.COMMAND.Forget then
                 restoreRollback(state)

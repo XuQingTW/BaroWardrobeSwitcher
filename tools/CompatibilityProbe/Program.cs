@@ -387,6 +387,10 @@ RequireMethod("StatusEffect.PlaySound(Entity,Hull,Vector2)", statusEffect, "Play
 RequireField("StatusEffect.propertyConditionals", statusEffect, "propertyConditionals", optional: true);
 RequireField("StatusEffect.requiredItems", statusEffect, "requiredItems", optional: true);
 RequireField("StatusEffect.playSoundOnRequiredItemFailure", statusEffect, "playSoundOnRequiredItemFailure", optional: true);
+RequireField("StatusEffect.OnlyInside", statusEffect, "OnlyInside", optional: true);
+RequireField("StatusEffect.OnlyOutside", statusEffect, "OnlyOutside", optional: true);
+RequireField("StatusEffect.TargetIdentifiers", statusEffect, "TargetIdentifiers", optional: true);
+RequireField("StatusEffect.TargetItemComponent", statusEffect, "TargetItemComponent", optional: true);
 RequireMethod("ItemComponent.PlaySound(ActionType,Character)", itemComponent, "PlaySound",
     new[] { actionType, character }, typeof(void), optional: true);
 

@@ -175,6 +175,11 @@ local fileLogger = {
 }
 
 local activationCount = 0
+local activationAttempts = 0
+local activationFailuresRemaining = 0
+local clearAttempts = 0
+local clearFailuresRemaining = 0
+local visualOverrideReady = true
 local attachmentVisibilityCalls = 0
 local lastForceHideMask = nil
 local lastForceShowMask = nil
@@ -194,9 +199,11 @@ local function characterId(character)
 end
 local visualOverride = {
     GetVersion = function() return WardrobeCore.MOD_VERSION end,
-    IsReady = function() return true end,
+    IsReady = function() return visualOverrideReady end,
     GetReadinessStatus = function()
-        return "ready; capabilities(renderer=True,animation=True,statusSound=True,itemSound=True)"
+        return visualOverrideReady and
+            "ready; capabilities(renderer=True,animation=True,statusSound=True,itemSound=True)" or
+            "loading"
     end,
     GetCharacterDebugStatus = function() return "test" end,
     BeginFashionTransaction = function(character)
@@ -241,6 +248,11 @@ local visualOverride = {
         return true
     end,
     ActivateFashionVisual = function(character)
+        activationAttempts = activationAttempts + 1
+        if activationFailuresRemaining > 0 then
+            activationFailuresRemaining = activationFailuresRemaining - 1
+            return false
+        end
         activationCount = activationCount + 1
         local id = characterId(character)
         activationCharacterIds[#activationCharacterIds + 1] = id
@@ -248,6 +260,11 @@ local visualOverride = {
         return true
     end,
     ClearCharacter = function(character)
+        clearAttempts = clearAttempts + 1
+        if clearFailuresRemaining > 0 then
+            clearFailuresRemaining = clearFailuresRemaining - 1
+            error("synthetic clear failure")
+        end
         local id = characterId(character)
         if id ~= nil then
             reusableCharacters[id] = nil
@@ -273,6 +290,13 @@ local visualOverride = {
 }
 
 local gameSessionDataPath = { SavePath = "campaign-a.save" }
+local gameMain = {
+    GameSession = {
+        DataPath = gameSessionDataPath,
+        IsRunning = true,
+        RoundEnding = false
+    }
+}
 local function vector(x, y)
     return { X = x, Y = y }
 end
@@ -294,13 +318,7 @@ LuaUserData = {
             }
         end
         if name == "Barotrauma.GameMain" then
-            return {
-                GameSession = {
-                    DataPath = gameSessionDataPath,
-                    IsRunning = true,
-                    RoundEnding = false
-                }
-            }
+            return gameMain
         end
         if name == "Microsoft.Xna.Framework.Vector2" then return vector end
         if name == "Microsoft.Xna.Framework.Color" then
@@ -421,7 +439,7 @@ local function makeCharacter(entityId, infoId, name, isBot)
 end
 
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))] =
-    "captured=true|active=false|auto=false|hidehair=false|Head=existinghelmet,"
+    "captured=true|active=false|auto=false|hidehair=false|fashionMovement=false|Head=existinghelmet,"
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Twin NPC"))] =
     "captured=true|active=false|auto=true|hidehair=false|Head=twinhelmet,"
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("No Stable ID"))] =
@@ -501,14 +519,19 @@ local fashionMovementButton = buttons["Movement: Fashion Priority"]
 assert(fashionMovementButton ~= nil and type(fashionMovementButton.OnClicked) == "function",
     "More Options did not expose the default fashion-priority movement setting")
 local removesBeforeEquipmentMovement = removedWidgets
+local savesBeforeEquipmentMovement = saveCalls
+local movementCallsBeforeEquipmentMovement = movementAnimationCalls
 fashionMovementButton.OnClicked()
 assert(removedWidgets == removesBeforeEquipmentMovement,
     "changing the movement source rebuilt the overlay inside its click callback")
 hooks.think()
 assert(removedWidgets == removesBeforeEquipmentMovement + 1 and liveOverlayRoots == 1,
     "changing to equipped movement did not replace exactly one overlay on the next tick")
-assert(movementAnimationCalls == 1 and lastUseFashionMovementAnimations == false,
-    "the equipped-gear movement choice was not passed to the renderer")
+assert(movementAnimationCalls == movementCallsBeforeEquipmentMovement,
+    "an inactive saved look tried to update a renderer session")
+assert(saveCalls == savesBeforeEquipmentMovement + 1 and
+       lastSaved:find("fashionMovement=false", 1, true) ~= nil,
+    "the equipped-gear movement choice was not persisted through the reducer")
 local equipmentMovementButton = buttons["Movement: Equipped Gear"]
 assert(equipmentMovementButton ~= nil and type(equipmentMovementButton.OnClicked) == "function",
     "the equipped-gear movement choice did not update its button label")
@@ -519,8 +542,11 @@ assert(removedWidgets == removesBeforeFashionMovement,
 hooks.think()
 assert(removedWidgets == removesBeforeFashionMovement + 1 and liveOverlayRoots == 1,
     "restoring fashion movement did not replace exactly one overlay on the next tick")
-assert(movementAnimationCalls == 2 and lastUseFashionMovementAnimations == true,
-    "the fashion-priority movement choice was not passed to the renderer")
+assert(movementAnimationCalls == movementCallsBeforeEquipmentMovement,
+    "restoring an inactive saved look tried to update a renderer session")
+assert(saveCalls == savesBeforeEquipmentMovement + 2 and
+       lastSaved:find("fashionMovement=true", 1, true) ~= nil,
+    "the fashion-priority movement choice was not persisted through the reducer")
 local lessOptionsButton = buttons["Hide Additional Options"]
 assert(lessOptionsButton ~= nil and type(lessOptionsButton.OnClicked) == "function",
     "the expanded panel did not expose its collapse control")
@@ -556,7 +582,8 @@ assert(hideStandardHairButton ~= nil and
 hideStandardHairButton.OnClicked()
 hooks.think()
 
-assert(saveCalls == 1, "attachment visibility did not persist to the current character profile")
+assert(saveCalls == savesBeforeEquipmentMovement + 3,
+    "attachment visibility did not persist to the current character profile")
 assert(lastSaved ~= nil and
     lastSaved:find("schema=4", 1, true) ~= nil and
     lastSaved:find("hidehair=true", 1, true) ~= nil and
@@ -601,10 +628,8 @@ assert(lastSaved:find("hidehair=false", 1, true) ~= nil and
        lastSaved:find("visibilityBeard=hide", 1, true) ~= nil,
     "active layer update did not persist the complete policy")
 
--- Default-off transfer: switching through a no-controlled frame must not leak
--- the player's active look onto an unconfigured NPC.
-Character.Controlled = nil
-hooks.think()
+-- A direct controlled-character swap must retire the previous renderer without
+-- leaking its look onto an unconfigured NPC.
 Character.Controlled = npc
 hooks.think()
 assert(activationCount == 1,
@@ -614,6 +639,12 @@ assert(activationCount == 1,
     table.concat(activationCharacterIds, ",") ..
     ", log=" ..
     table.concat(messages, " || "))
+assert(activeCharacterIds[player.ID] ~= true and activeCharacterIds[npc.ID] ~= true,
+    "a direct controlled-character swap cleared the new renderer instead of the previous one")
+local npcProfileKey =
+    profileStorageKey(campaignStorageKey, stableCharacterProfileKey("NPC Tester"))
+assert(profiles[npcProfileKey] == nil,
+    "CharacterLost persisted the previous character's look into the new character profile")
 
 Character.Controlled = nil
 hooks.think()
@@ -649,10 +680,20 @@ assert(prefabCaptureCount == 3,
 -- explicitly applied.
 Character.Controlled = nil
 hooks.think()
+buttons = {}
 Character.Controlled = existingNpc
+hooks.think()
 hooks.think()
 assert(activationCount == 4,
     "appearance transfer overwrote or activated an existing NPC profile")
+local existingNpcBackButton = buttons["Back"]
+assert(existingNpcBackButton ~= nil and type(existingNpcBackButton.OnClicked) == "function",
+    "the attachment panel did not expose its Back action")
+existingNpcBackButton.OnClicked()
+buttons = {}
+hooks.think()
+assert(buttons["Movement: Equipped Gear"] ~= nil,
+    "the single-player panel did not prefer the saved look's movement source")
 local existingProfileKey =
     profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))
 assert(profiles[existingProfileKey] ~= nil and
@@ -663,6 +704,8 @@ assert(activationCount == 5,
     "manual apply did not activate the existing NPC profile")
 assert(capturedIdentifierByCharacterId[44] == "existinghelmet",
     "the existing NPC profile did not use its own saved appearance")
+assert(movementAnimationByCharacterId[44] == false,
+    "the existing NPC profile did not apply its equipped-gear movement source")
 assert(activeCharacterIds[43] ~= true and activeCharacterIds[44] == true,
     "CharacterLost did not retire the previous renderer while preserving the new character state")
 
@@ -711,8 +754,6 @@ clearButton.OnClicked()
 forgetButton.OnClicked()
 assert(activeCharacterIds[144] == true,
     "clearing or forgetting one NPC removed another NPC's active appearance")
-local npcProfileKey =
-    profileStorageKey(campaignStorageKey, stableCharacterProfileKey("NPC Tester"))
 assert(profiles[npcProfileKey] == nil,
     "Forget Saved Look did not delete only the current NPC profile")
 assert(profiles[existingProfileKey] ~= nil,
@@ -1040,7 +1081,7 @@ do
 
     Character.CharacterList[#Character.CharacterList + 1] =
         makeCharacter(remoteId, remoteId, "Early Player", false)
-    hooks.think()
+    for _ = 1, 30 do hooks.think() end
     assert(activationCount == beforeLateEntity + 1 and activeCharacterIds[remoteId] == true,
         "a retained snapshot was not applied when the late Character appeared")
     assert(capturedIdentifierByCharacterId[remoteId] == "helmet",
@@ -1070,6 +1111,66 @@ do
     deliverState({ revision = 11, characterId = remoteId, active = true, look = updatedMovementLook })
     assert(activationCount == afterApply and activeCharacterIds[remoteId] ~= true,
         "an out-of-order state resurrected a newer cleared look")
+
+    -- Authoritative render work waits for C# readiness without spending its
+    -- three actual attempts, then retries temporary apply/clear failures.
+    visualOverrideReady = false
+    local attemptsBeforeReadiness = activationAttempts
+    deliverState({ revision = 13, characterId = remoteId, active = true, look = updatedMovementLook })
+    for _ = 1, 90 do hooks.think() end
+    assert(activationAttempts == attemptsBeforeReadiness,
+        "renderer readiness polling consumed an apply attempt")
+    visualOverrideReady = true
+    for _ = 1, 30 do hooks.think() end
+    assert(activationAttempts == attemptsBeforeReadiness + 1 and activeCharacterIds[remoteId] == true,
+        "a ready renderer did not consume the retained authoritative apply")
+
+    local retryApplyLook = assert(WardrobeCore.copyLook(updatedMovementLook))
+    retryApplyLook.useFashionMovementAnimations = false
+    activationFailuresRemaining = 2
+    local attemptsBeforeApplyRetry = activationAttempts
+    deliverState({ revision = 14, characterId = remoteId, active = true, look = retryApplyLook })
+    for _ = 1, 60 do hooks.think() end
+    assert(activationAttempts == attemptsBeforeApplyRetry + 3 and
+           movementAnimationByCharacterId[remoteId] == false,
+        "a temporary authoritative apply failure did not succeed on the third attempt")
+
+    clearFailuresRemaining = 2
+    local attemptsBeforeClearRetry = clearAttempts
+    deliverState({ revision = 15, characterId = remoteId, active = false, look = retryApplyLook })
+    for _ = 1, 60 do hooks.think() end
+    assert(clearAttempts == attemptsBeforeClearRetry + 3 and activeCharacterIds[remoteId] ~= true,
+        "a temporary authoritative clear failure did not succeed on the third attempt")
+
+    local notReadyClearId = 904
+    Character.CharacterList[#Character.CharacterList + 1] =
+        makeCharacter(notReadyClearId, notReadyClearId, "Clear While Loading", false)
+    deliverState({ revision = 1, characterId = notReadyClearId, active = true, look = retryApplyLook })
+    visualOverrideReady = false
+    local attemptsBeforeNotReadyClear = clearAttempts
+    deliverState({ revision = 2, characterId = notReadyClearId, active = false, look = retryApplyLook })
+    assert(clearAttempts == attemptsBeforeNotReadyClear + 1 and
+           activeCharacterIds[notReadyClearId] ~= true,
+        "an authoritative clear waited for renderer readiness")
+
+    visualOverrideReady = false
+    local supersededLook = assert(WardrobeCore.newLook(true, false, { Head = "supersededhelmet" }))
+    local latestLook = assert(WardrobeCore.newLook(true, false, { Head = "latesthelmet" }))
+    deliverState({ revision = 16, characterId = remoteId, active = true, look = supersededLook })
+    deliverState({ revision = 17, characterId = remoteId, active = true, look = latestLook })
+    visualOverrideReady = true
+    for _ = 1, 30 do hooks.think() end
+    assert(capturedIdentifierByCharacterId[remoteId] == "latesthelmet",
+        "an older pending authoritative apply replaced the latest revision")
+
+    activationFailuresRemaining = 3
+    local attemptsBeforeBoundedFailure = activationAttempts
+    local exhaustedLook = assert(WardrobeCore.newLook(true, false, { Head = "exhaustedhelmet" }))
+    deliverState({ revision = 18, characterId = remoteId, active = true, look = exhaustedLook })
+    for _ = 1, 120 do hooks.think() end
+    assert(activationAttempts == attemptsBeforeBoundedFailure + 3,
+        "authoritative apply retries were not bounded to three actual attempts")
+    deliverState({ revision = 19, characterId = remoteId, active = false, look = exhaustedLook })
 
     local helloBeforeRound = nil
     local helloCountBeforeRound = 0
@@ -1119,25 +1220,79 @@ do
         nil,
         false
     ))
+    local staleRoundLook = assert(WardrobeCore.newLook(
+        true,
+        false,
+        { Head = "stalegatehelmet" },
+        nil,
+        nil,
+        true
+    ))
     deliverState({ revision = 20, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
+    deliverState({ revision = 19, characterId = nextRoundCharacter.ID, active = true, look = staleRoundLook })
     assert(activationCount == beforeDeferredV2,
         "a v2 round-start snapshot bypassed the initial equipment gate")
     for _ = 1, 15 do hooks.think() end
     assert(activationCount == beforeDeferredV2 + 1,
         "a deferred v2 round-start snapshot was not applied exactly once")
-    assert(movementAnimationByCharacterId[nextRoundCharacter.ID] == false,
-        "deferred round-start state lost its movement animation source")
+    assert(capturedIdentifierByCharacterId[nextRoundCharacter.ID] == "helmet" and
+           movementAnimationByCharacterId[nextRoundCharacter.ID] == false,
+        "a stale round-start state replaced the newest deferred state")
     deliverState({ revision = 20, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
     deliverState({ revision = 19, characterId = nextRoundCharacter.ID, active = true, look = nextRoundLook })
     assert(activationCount == beforeDeferredV2 + 1,
         "duplicate or stale deferred v2 state rendered again")
+
+    local controlledRetryLook = assert(WardrobeCore.newLook(
+        true,
+        false,
+        { Head = "controlledretryhelmet" },
+        nil,
+        nil,
+        false
+    ))
+    activationFailuresRemaining = 1
+    deliverState({
+        revision = 22,
+        characterId = nextRoundCharacter.ID,
+        active = true,
+        look = controlledRetryLook
+    })
+    deliverState({
+        revision = 21,
+        characterId = nextRoundCharacter.ID,
+        active = true,
+        look = nextRoundLook
+    })
+    for _ = 1, 30 do hooks.think() end
+    assert(capturedIdentifierByCharacterId[nextRoundCharacter.ID] == "controlledretryhelmet",
+        "a stale same-kind apply cancelled the newer controlled-character retry")
+
+    clearFailuresRemaining = 1
+    local controlledClearAttempts = clearAttempts
+    deliverState({
+        revision = 24,
+        characterId = nextRoundCharacter.ID,
+        active = false,
+        look = controlledRetryLook
+    })
+    deliverState({
+        revision = 23,
+        characterId = nextRoundCharacter.ID,
+        active = false,
+        look = controlledRetryLook
+    })
+    for _ = 1, 30 do hooks.think() end
+    assert(clearAttempts == controlledClearAttempts + 2 and
+           activeCharacterIds[nextRoundCharacter.ID] ~= true,
+        "a stale same-kind clear cancelled the newer controlled-character retry")
 
     -- Capabilities are independent. A relay may expose animation sync without
     -- attachment visibility; the animation command and false setting must survive.
     local movementOnlyHello = newNetworkBuffer(WardrobeCore.NET.V2_HELLO)
     assert(WardrobeCore.writeServerHello(
         movementOnlyHello,
-        20,
+        24,
         WardrobeCore.CAPABILITY.MovementAnimationSource
     ))
     movementOnlyHello.FinalizeForTransport()
@@ -1157,7 +1312,7 @@ do
     assert(WardrobeCore.writeAck(movementOnlyRejection, {
         operationId = movementOnlyCommand.operationId,
         accepted = false,
-        revision = 20,
+        revision = 24,
         reason = "synthetic rejection"
     }))
     movementOnlyRejection.FinalizeForTransport()
@@ -1181,6 +1336,7 @@ Character.CharacterList = { v1Character }
 gameSessionDataPath.SavePath = "p2p-session-a.save"
 assert(dofile(clientPath) == nil)
 hooks.roundStart()
+hooks.think()
 local function legacyApplyFrame(characterId)
     local message = newNetworkBuffer(WardrobeCore.NET.V1_LOOK_APPLY)
     message.WriteUInt16(characterId)
@@ -1204,12 +1360,25 @@ for _ = 1, 20 do hooks.think() end
 assert(activationCount == beforeDeferredV1 + 1,
     "a deferred v1 round-start frame was not applied exactly once")
 
+hooks.roundStart()
+local beforeCancelledV1 = activationCount
+networkHandlers[WardrobeCore.NET.V1_LOOK_APPLY](legacyApplyFrame(v1Character.ID))
+local cancelledV1 = newNetworkBuffer(WardrobeCore.NET.V1_LOOK_CLEAR)
+cancelledV1.WriteUInt16(v1Character.ID)
+cancelledV1.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V1_LOOK_CLEAR](cancelledV1)
+for _ = 1, 20 do hooks.think() end
+assert(activationCount == beforeCancelledV1 and activeCharacterIds[v1Character.ID] ~= true,
+    "a v1 clear did not cancel the deferred round-start apply")
+
 openPanel = true
 hooks.think()
-assert(buttons["Save Current Outfit"].Enabled ~= false and
-       buttons["Apply Saved Look"].Enabled ~= false and
-       buttons["Clear Look"].Enabled ~= false,
-    "deferred round-start look left F8 actions unbound")
+assert(buttons["Clear Look"].Enabled ~= false,
+    "cancelled deferred round-start look left Clear unbound")
+assert(buttons["Save Current Outfit"].Enabled ~= false,
+    "cancelled deferred round-start look left Save unbound")
+assert(buttons["Apply Saved Look"].Enabled ~= false,
+    "cancelled deferred round-start look left Apply unbound")
 
 -- V1 has no ACK, so a missing LOOK_APPLY response needs its own deadline.
 buttons["Apply Saved Look"].OnClicked()
@@ -1236,12 +1405,88 @@ assert(buttons["Save Current Outfit"].Enabled ~= false,
 openPanel = true
 hooks.think()
 
--- P2P can replace the game session while retaining the same controlled
--- Character object. The session reset must force CharacterReady to bind the
--- fresh reducer instead of leaving all character-gated F8 actions disabled.
+local function latestClientSessionId()
+    for index = #networkSent, 1, -1 do
+        if networkSent[index].name == WardrobeCore.NET.V2_HELLO then
+            return assert(WardrobeCore.readClientHello(networkSent[index])).clientSessionId
+        end
+    end
+    return nil
+end
+
+local function clientHelloCount()
+    local count = 0
+    for _, message in ipairs(networkSent) do
+        if message.name == WardrobeCore.NET.V2_HELLO then count = count + 1 end
+    end
+    return count
+end
+
+-- P2P scene changes can replace GameSession without changing its save path.
+-- The accepted look survives, but transport/reducer identity must be rebound.
+buttons["Apply Saved Look"].OnClicked()
+hooks.think()
+openPanel = true
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled == false,
+    "same-key session regression did not stage a pending F8 command")
+local pendingSameKeySessionId = assert(latestClientSessionId())
+local helloCountBeforeSameKeyRebind = clientHelloCount()
+gameMain.GameSession = {
+    DataPath = gameSessionDataPath,
+    IsRunning = true,
+    RoundEnding = false
+}
+hooks.roundStart()
+hooks.think()
+local reboundSameKeySessionId = assert(latestClientSessionId())
+assert(clientHelloCount() > helloCountBeforeSameKeyRebind,
+    "same-key GameSession replacement did not start a fresh client session")
+assert(reboundSameKeySessionId ~= pendingSameKeySessionId,
+    "same-key GameSession replacement reused the pending client session")
+assert(buttons["Save Current Outfit"].Enabled ~= false and
+       buttons["Apply Saved Look"].Enabled ~= false and
+       buttons["Clear Look"].Enabled ~= false,
+    "same-key GameSession replacement retained the stale F8 command")
+for _ = 1, 20 do hooks.think() end
+networkHandlers[WardrobeCore.NET.V1_LOOK_APPLY](legacyApplyFrame(v1Character.ID))
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false and
+       buttons["Apply Saved Look"].Enabled ~= false and
+       buttons["Clear Look"].Enabled ~= false,
+    "same-key GameSession replacement left its fresh F8 command disabled")
+
+-- The same transient rebind is required when both old and new sessions have
+-- no stable path. Entering the pathless session itself remains a full reset.
 persistence.LoadClientLook = function()
     return "captured=true|active=false|auto=false|hidehair=false|Head=helmet,"
 end
+gameSessionDataPath.SavePath = nil
+hooks.roundStart()
+hooks.think()
+local pathlessSessionId = assert(latestClientSessionId())
+assert(pathlessSessionId ~= reboundSameKeySessionId,
+    "entering a pathless session reused the previous client session id")
+gameMain.GameSession = {
+    DataPath = gameSessionDataPath,
+    IsRunning = true,
+    RoundEnding = false
+}
+hooks.roundStart()
+hooks.think()
+local reboundPathlessSessionId = assert(latestClientSessionId())
+assert(reboundPathlessSessionId ~= pathlessSessionId,
+    "pathless GameSession replacement reused the stale client session id")
+openPanel = true
+hooks.think()
+assert(buttons["Save Current Outfit"].Enabled ~= false and
+       buttons["Apply Saved Look"].Enabled ~= false and
+       buttons["Clear Look"].Enabled ~= false,
+    "pathless GameSession replacement left F8 actions disabled")
+
+-- P2P can replace the game session while retaining the same controlled
+-- Character object. A genuinely different stable key still performs the full
+-- reset and then binds the fresh reducer to that same Character.
 gameSessionDataPath.SavePath = "p2p-session-b.save"
 openPanel = true
 hooks.think()

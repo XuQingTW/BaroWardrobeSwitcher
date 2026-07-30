@@ -325,9 +325,9 @@ namespace BaroWardrobeSwitcher
 
         public List<object> FashionAnimations { get; } = new List<object>();
 
-        // This is a local rendering preference. It deliberately stays outside the
-        // saved-look/network schema so clients can choose their own animation source.
         public bool UseFashionMovementAnimations { get; set; } = true;
+
+        public HashSet<object> SuppressedEquipmentAnimations { get; } = new HashSet<object>();
 
         public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();
 
@@ -528,6 +528,7 @@ namespace BaroWardrobeSwitcher
             descriptorsBySprite.Clear();
             SpritesBySlot.Clear();
             FashionAnimations.Clear();
+            SuppressedEquipmentAnimations.Clear();
             FashionSounds.Clear();
             FashionComponentSounds.Clear();
             SuppressedEquipmentSounds.Clear();
