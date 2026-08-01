@@ -69,8 +69,18 @@ $contracts = @(
         Required = @(
             ".Where(sprite => IsEquipmentSprite(sprite) && !session.TryGetDescriptor(sprite, out _))",
             "originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);",
+            "if (equipmentSprite.HideWearablesOfType?.Count > 0)",
+            "wearableTypesCacheChanged = true;",
             "ClearMask(equipmentSprite);",
+            "limb.UpdateWearableTypesToHide();",
             "pair.Value.Restore(pair.Key);"
+        )
+    },
+    @{
+        Name = "live-equipment-hide-cache-compatibility"
+        Source = $compatibilityProbe
+        Required = @(
+            'RequireMethod("Limb.UpdateWearableTypesToHide()", limb, "UpdateWearableTypesToHide",'
         )
     },
     @{
@@ -186,6 +196,11 @@ if ($renderer.Contains("CharacterHealth.ApplyAffliction")) {
 if ($renderer.Contains("for (int pass = 0; pass < 2; pass++)")) {
     throw "Fashion component sound replacement must not fall back across ActionType values."
 }
+foreach ($identifier in @("cultistrobes", "zealotrobes")) {
+    if ($renderer.Contains($identifier)) {
+        throw "Renderer compatibility must not hard-code Workshop item identifier: $identifier"
+    }
+}
 
 $visibility = Get-Section $renderer `
     "private static bool ShouldHideAttachmentForFashion(" `
@@ -194,6 +209,26 @@ Assert-Order "visibility-precedence" $visibility @(
     "session.ForceShowAttachmentMask",
     "session.ForceHideAttachmentMask",
     "session.HiddenWearableTypes.Contains"
+)
+
+$maskBegin = Get-Section $renderer `
+    "public void Begin(RenderSession renderSession)" `
+    "public void Cleanup()"
+Assert-Order "live-equipment-hide-cache-begin" $maskBegin @(
+    "originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);",
+    "ClearMask(equipmentSprite);",
+    "limb.UpdateWearableTypesToHide();",
+    "List<FashionSpriteDescriptor> descriptors"
+)
+
+$maskCleanup = Get-Section $renderer `
+    "public void Cleanup()" `
+    "private sealed class PatchState"
+Assert-Order "live-equipment-hide-cache-cleanup" $maskCleanup @(
+    "wearingItems.AddRange(originalOrder);",
+    "pair.Value.Restore(pair.Key);",
+    "limb.UpdateWearableTypesToHide();",
+    "session?.ExitDraw(limb);"
 )
 
 $fallback = Get-Section $renderer `

@@ -27,6 +27,7 @@ Required renderer capabilities:
 - Public read/write `Item.SpriteColor`, public read/write `Color.PackedValue`, and `Color(uint)`
 - `Limb.Draw(SpriteBatch, Camera, Color?, bool)`
 - `Limb.DrawWearable(WearableSprite, float, SpriteBatch, Color, float, SpriteEffects)`
+- `Limb.UpdateWearableTypesToHide()` for transactional refresh of the native hide-type cache
 - `WearableSprite.Init(Character)` and readable initialization/resource properties
 
 Required single-player identity capabilities:

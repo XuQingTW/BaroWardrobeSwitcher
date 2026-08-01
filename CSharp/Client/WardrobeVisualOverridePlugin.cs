@@ -3302,6 +3302,7 @@ namespace BaroWardrobeSwitcher
             private List<WearableSprite> originalOrder;
             private RenderSession session;
             private bool cleaned;
+            private bool wearableTypesCacheChanged;
             private int storedFashionDrawDepth;
 
             public LimbRenderTransaction(Limb limb)
@@ -3344,7 +3345,18 @@ namespace BaroWardrobeSwitcher
                              .Where(sprite => IsEquipmentSprite(sprite) && !session.TryGetDescriptor(sprite, out _)))
                 {
                     originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);
+                    if (equipmentSprite.HideWearablesOfType?.Count > 0)
+                    {
+                        wearableTypesCacheChanged = true;
+                    }
                     ClearMask(equipmentSprite);
+                }
+                // Equip caches HideWearablesOfType before Limb.Draw starts. Rebuild
+                // that cache while real equipment masks are cleared so attachments
+                // reach DrawWearable and the wardrobe visibility policy can decide.
+                if (wearableTypesCacheChanged)
+                {
+                    limb.UpdateWearableTypesToHide();
                 }
 
                 List<FashionSpriteDescriptor> descriptors = EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type)
@@ -3398,6 +3410,18 @@ namespace BaroWardrobeSwitcher
                     catch (Exception ex)
                     {
                         cleanupErrors.Add(new InvalidOperationException("Failed to restore wearable mask snapshot.", ex));
+                    }
+                }
+
+                if (wearableTypesCacheChanged)
+                {
+                    try
+                    {
+                        limb.UpdateWearableTypesToHide();
+                    }
+                    catch (Exception ex)
+                    {
+                        cleanupErrors.Add(new InvalidOperationException("Failed to restore wearable type hide cache.", ex));
                     }
                 }
 

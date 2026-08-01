@@ -6,7 +6,7 @@ This checklist is the release gate for v0.5.3. Automated checks must pass before
 
 1. Run `scripts/Build.ps1` with explicit Barotrauma and LuaCs Publicized paths. Expected: zero warnings and errors; output only under `artifacts`.
 2. Run `scripts/Test-Compatibility.ps1 -RequireOptional`. Expected: every exact 1.13.4.0 target reports `PASS`.
-3. Run `scripts/Test-RendererContracts.ps1`. Expected: the crash characterizations, live-equipment mask transaction, `RenderSession` aggregate, attachment-visibility priority/no-wearable-refresh contract, and functional-equipment-alarm lifecycle report `PASS`.
+3. Run `scripts/Test-RendererContracts.ps1`. Expected: the crash characterizations, live-equipment mask/cache transaction, `RenderSession` aggregate, attachment-visibility priority/no-wearable-refresh contract, and functional-equipment-alarm lifecycle report `PASS`.
 4. Run `scripts/Test-Persistence.ps1` with the same explicit paths. Expected: canonical client v4 color round-trip, client v1/v2/v3 migration, single-player profile v3 and v1/v2 migration, transfer round-trip, profile/campaign isolation, one-time inactive legacy import, quarantine, and atomic-failure cases report `PASS`.
 5. Run `scripts/Test-Lua.ps1`. Expected: every Lua source parses in Barotrauma's MoonSharp and every pure/authority test reports `PASS`.
 6. Run `scripts/verify_package.py`. Expected: metadata agrees, every runtime source is listed, and no generated file is present in the source package.
@@ -72,6 +72,7 @@ Use a campaign with at least the player and two controllable human NPC crew memb
 - Load migrated client/server/profile documents from before color persistence. They must use prefab base colors, not opaque white.
 - Full inventory and partial unequip failure do not duplicate or destroy items.
 - Each appearance layer cycles `Auto -> Hide -> Show`, previews immediately, and survives scene changes, restart, single-player profile transfer, and multiplayer synchronization.
+- With [EuropaWaifu 2](https://steamcommunity.com/sharedfiles/filedetails/?id=2948283083), apply a look whose XML does not hide Hair, then equip `cultistrobes` (Cultist Robes) and `zealotrobes` (Zealot Robes). Hair remains visible in `Auto` and `Show`; `Hide` still hides it. Clear the look and confirm both robes return to their native hair-hiding behavior.
 - EA-HI/manual composite-head check: apply the appearance, set `Hair=Show`, then hide only the Beard/Moustache layers actually required. The modded head and decorations must remain present and must not revert to the Vanilla head.
 - Confirm appearance-layer buttons never trigger `Character.OnWearablesChanged()` and that local persistence failure restores the complete prior policy and active render state.
 - Real equipment keeps stats, protection, oxygen, buffs, inventory, and health-interface behavior.

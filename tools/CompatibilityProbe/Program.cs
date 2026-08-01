@@ -274,6 +274,8 @@ RequireMethod("Limb.Draw(SpriteBatch,Camera,Color?,bool)", limb, "Draw",
     new[] { spriteBatch, camera, typeof(Nullable<>).MakeGenericType(color), typeof(bool) }, typeof(void));
 RequireMethod("Limb.DrawWearable(WearableSprite,float,SpriteBatch,Color,float,SpriteEffects)", limb, "DrawWearable",
     new[] { wearableSprite, typeof(float), spriteBatch, color, typeof(float), spriteEffects }, typeof(void));
+RequireMethod("Limb.UpdateWearableTypesToHide()", limb, "UpdateWearableTypesToHide",
+    Array.Empty<Type>(), typeof(void));
 RequireMethod("AfflictionHusk.AttachHuskAppendage(...)", afflictionHusk, "AttachHuskAppendage",
     new[] { character, afflictionPrefabHusk, identifier, contentXElement, ragdoll },
     typeof(List<>).MakeGenericType(limb));
