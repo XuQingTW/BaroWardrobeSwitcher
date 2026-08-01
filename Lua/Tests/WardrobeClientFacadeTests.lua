@@ -628,8 +628,8 @@ assert(lastSaved:find("hidehair=false", 1, true) ~= nil and
        lastSaved:find("visibilityBeard=hide", 1, true) ~= nil,
     "active layer update did not persist the complete policy")
 
--- A direct controlled-character swap must retire the previous renderer without
--- leaking its look onto an unconfigured NPC.
+-- A direct controlled-character swap must keep the previous crew member's
+-- renderer without leaking its look onto an unconfigured NPC.
 Character.Controlled = npc
 hooks.think()
 assert(activationCount == 1,
@@ -639,8 +639,8 @@ assert(activationCount == 1,
     table.concat(activationCharacterIds, ",") ..
     ", log=" ..
     table.concat(messages, " || "))
-assert(activeCharacterIds[player.ID] ~= true and activeCharacterIds[npc.ID] ~= true,
-    "a direct controlled-character swap cleared the new renderer instead of the previous one")
+assert(activeCharacterIds[player.ID] == true and activeCharacterIds[npc.ID] ~= true,
+    "a direct controlled-character swap cleared the previous crew member or leaked onto the new one")
 local npcProfileKey =
     profileStorageKey(campaignStorageKey, stableCharacterProfileKey("NPC Tester"))
 assert(profiles[npcProfileKey] == nil,
@@ -657,6 +657,8 @@ assert(transferEnabled, "appearance-transfer setting was not persisted")
 
 Character.Controlled = nil
 hooks.think()
+assert(activeCharacterIds[player.ID] == true,
+    "a transient no-controlled-character frame cleared the previous crew member")
 Character.Controlled = npc
 hooks.think()
 assert(activationCount == 3,
@@ -664,7 +666,7 @@ assert(activationCount == 3,
     tostring(activationCount) ..
     ", transfer=" ..
     tostring(transferEnabled))
-assert(prefabCaptureCount == 3,
+assert(prefabCaptureCount == 2,
     "transferred NPC look did not build an NPC-owned renderer session")
 assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
     "successful transferred look was not persisted for the target NPC")
@@ -673,7 +675,7 @@ assert(lastSaved ~= nil and lastSaved:find("auto=true", 1, true) ~= nil,
 clearButton.OnClicked()
 applyButton.OnClicked()
 assert(activationCount == 4, "NPC clear/reapply did not reactivate the renderer")
-assert(prefabCaptureCount == 3,
+assert(prefabCaptureCount == 2,
     "clear/reapply discarded the reusable renderer session and rebuilt from the prefab")
 
 -- An existing inactive profile must win over transfer and remain inactive until
@@ -706,8 +708,8 @@ assert(capturedIdentifierByCharacterId[44] == "existinghelmet",
     "the existing NPC profile did not use its own saved appearance")
 assert(movementAnimationByCharacterId[44] == false,
     "the existing NPC profile did not apply its equipped-gear movement source")
-assert(activeCharacterIds[43] ~= true and activeCharacterIds[44] == true,
-    "CharacterLost did not retire the previous renderer while preserving the new character state")
+assert(activeCharacterIds[43] == true and activeCharacterIds[44] == true,
+    "switching crew did not preserve both independently active appearances")
 
 -- Clear only the player before the scene transition. Both NPC profiles remain
 -- active and should restore independently in the replacement scene.
@@ -734,7 +736,7 @@ for _ = 1, 15 do hooks.think() end
 assert(activationCount == 9,
     "active NPC looks were not independently restored in the next scene; activations=" ..
     tostring(activationCount))
-assert(prefabCaptureCount == 8,
+assert(prefabCaptureCount == 5,
     "replacement NPCs incorrectly reused renderer sessions from the previous scene; captures=" ..
     tostring(prefabCaptureCount))
 assert(capturedIdentifierByCharacterId[143] == "helmet",

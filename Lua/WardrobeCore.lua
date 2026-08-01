@@ -1091,10 +1091,12 @@ function Core.reduce(currentState, event)
         state.characterKey = nil
         state.active = false
         state.autoApply = preserveAutoApply
-        effects[#effects + 1] = effect("ClearRender", {
-            dispose = true,
-            preserveAutoApply = preserveAutoApply
-        })
+        if event.preserveRender ~= true then
+            effects[#effects + 1] = effect("ClearRender", {
+                dispose = true,
+                preserveAutoApply = preserveAutoApply
+            })
+        end
         return state, effects
     end
 

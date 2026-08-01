@@ -722,6 +722,11 @@ function Helpers.singlePlayerCharacterEligible(character)
         Helpers.userDataMember(character, "IsOnPlayerTeam") == true
 end
 
+function Helpers.shouldPreserveSinglePlayerCrewRender(character)
+    return Helpers.singlePlayerCharacterEligible(character) and
+        Helpers.userDataMember(character, "Removed") ~= true
+end
+
 function Helpers.profileIdentifierPart(value)
     local text = Helpers.normalizedSessionValue(value) or ""
     return tostring(#text) .. ":" .. text
@@ -3354,7 +3359,10 @@ end
 
 function Helpers.handleNoControlledCharacter()
     if reducerCharacterKey ~= nil then
-        dispatchReducer({ type = "CharacterLost" })
+        dispatchReducer({
+            type = "CharacterLost",
+            preserveRender = Helpers.shouldPreserveSinglePlayerCrewRender(lastCharacter)
+        })
         reducerCharacterKey = nil
     end
     if lastCharacter ~= nil then
@@ -3408,7 +3416,10 @@ function Helpers.handleControlledCharacterChange(character)
     local sourceState = nil
     if lastCharacter ~= nil then
         if reducerCharacterKey ~= nil then
-            dispatchReducer({ type = "CharacterLost" })
+            dispatchReducer({
+                type = "CharacterLost",
+                preserveRender = Helpers.shouldPreserveSinglePlayerCrewRender(lastCharacter)
+            })
             reducerCharacterKey = nil
         end
         saveCharacterState(lastCharacter)

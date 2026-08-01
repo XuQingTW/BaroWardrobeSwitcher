@@ -617,6 +617,16 @@ assertEqual(lostDuringApply.pendingOperationId, nil)
 assertEqual(lostDuringApplyEffects[1].type, "ClearRender")
 assertEqual(lostDuringApplyEffects[1].preserveAutoApply, true)
 
+local detachedCrew, detachedCrewEffects = Core.reduce(
+    pendingActiveApply("session-lifecycle-crew-handoff"),
+    { type = "CharacterLost", preserveRender = true }
+)
+assertEqual(detachedCrew.phase, Core.PHASE.NoCharacter)
+assertEqual(detachedCrew.active, false)
+assertEqual(detachedCrew.autoApply, true)
+assertEqual(#detachedCrewEffects, 0,
+    "a live single-player crew handoff disposed its retained renderer")
+
 -- Once the server accepts a command, lifecycle cleanup keeps the accepted
 -- result instead of restoring the pre-command rollback snapshot.
 local acceptedLifecycleSave = Core.reduce(activeApplyRollbackBase, {
