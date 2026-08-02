@@ -68,6 +68,75 @@ assert(captureSource:find('.. "@" .. tostring(color or "base")', 1, true) ~= nil
 assert(clientSource:find("color = Helpers.itemSpriteColor(item)", 1, true) ~= nil,
     "client visual snapshots must capture Item.SpriteColor.PackedValue")
 
+local equipmentRefreshStart = assert(clientSource:find(
+    "function Helpers.refreshActiveLookIfNeeded",
+    1,
+    true
+))
+local equipmentRefreshEnd = assert(clientSource:find(
+    "function Helpers.autoApplySavedLookIfNeeded",
+    equipmentRefreshStart,
+    true
+))
+local equipmentRefreshSource = clientSource:sub(equipmentRefreshStart, equipmentRefreshEnd - 1)
+assert(equipmentRefreshSource:find("Helpers.applyCapturedFashionToCharacterEquipment", 1, true) ~= nil and
+       equipmentRefreshSource:find("lastEquipmentSignature = signature", 1, true) ~= nil,
+    "equipment changes must refresh the existing renderer session locally")
+assert(equipmentRefreshSource:find("applyFashionToCurrentEquipment", 1, true) == nil and
+       equipmentRefreshSource:find("dispatchReducer", 1, true) == nil,
+    "equipment-only refresh must not persist or send a wardrobe Apply command")
+
+local equipmentApplyStart = assert(clientSource:find(
+    "function Helpers.applyCapturedFashionToCharacterEquipment",
+    1,
+    true
+))
+local equipmentApplyEnd = assert(clientSource:find(
+    "function Helpers.applyNetworkLook",
+    equipmentApplyStart,
+    true
+))
+local equipmentApplySource = clientSource:sub(equipmentApplyStart, equipmentApplyEnd - 1)
+assert(equipmentApplySource:find("local seenEquippedItems = {}", 1, true) ~= nil and
+       equipmentApplySource:find("local seenEquippedItemIds = {}", 1, true) ~= nil and
+       equipmentApplySource:find("seenEquippedItemIds[equippedId]", 1, true) ~= nil,
+    "a multi-slot item must be registered once even when LuaCs returns distinct proxies")
+assert(clientSource:find("Helpers.removeVisualOverrideFromItem(character, item)", 1, true) ~= nil and
+       clientSource:find("VisualOverride.RemoveFashionItemVisual(character, item)", 1, true) ~= nil,
+    "unequipped observer items must release their sound and animation suppression references")
+assert(clientSource:find("Helpers.isManagedEquippedItem(character, item)", 1, true) ~= nil,
+    "observer equipment registration must be limited to the six managed clothing slots")
+assert(clientSource:find("bridge.GetPanelKeyName()", 1, true) ~= nil and
+       clientSource:find("return PlayerInput.KeyHit(key)", 1, true) ~= nil and
+       clientSource:find('if key == nil then return "F8", Keys.F8 end', 1, true) ~= nil and
+       clientSource:find('panelKeyText("notice.open_panel")', 1, true) ~= nil,
+    "the configurable panel key must drive both input and the round-start notice")
+assert(clientSource:find("local CONFIG", 1, true) == nil,
+    "the obsolete source-edited panel key config must not shadow Mod Gameplay Settings")
+assert(clientSource:find("function Helpers.singlePlayerSelectableCharacters()", 1, true) ~= nil and
+       clientSource:find('Helpers.userDataMember(character, "IsBot") == true', 1, true) ~= nil and
+       clientSource:find("NET_V2_TARGET_COMMAND", 1, true) ~= nil and
+       clientSource:find("serverSupportsCrewTargeting()", 1, true) ~= nil and
+       clientSource:find('tr("button.next_page")', 1, true) ~= nil and
+       clientSource:find("GUI.ListBox(", 1, true) ~= nil and
+       clientSource:find("(tutorialExpanded and 0.58 or 0.46)", 1, true) ~= nil,
+    "the compact scrollable two-page panel and bot-only wardrobe target selector are missing")
+
+local settingsFile = nil
+for _, candidate in ipairs({
+    "Config/SettingsClient.xml",
+    testDirectory .. "../../Config/SettingsClient.xml",
+    "../../Config/SettingsClient.xml"
+}) do
+    settingsFile = io.open(candidate, "r")
+    if settingsFile ~= nil then break end
+end
+local settingsXml = assert(settingsFile, "could not load Config/SettingsClient.xml"):read("*a")
+settingsFile:close()
+assert(settingsXml:find("<Settings>", 1, true) ~= nil and
+       settingsXml:find('Name="PanelKey" Type="string" Value="F8"', 1, true) ~= nil,
+    "the Mod Gameplay Settings panel key must default to F8")
+
 local localizedText = {}
 local textFile = nil
 for _, candidate in ipairs({ "Texts.xml", testDirectory .. "../../Texts.xml", "../../Texts.xml" }) do
@@ -88,6 +157,8 @@ TextManager = {
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.save"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_fashion"))
 assert(TextManager.ContainsTag("barowardrobeswitcher.button.animation_equipment"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.button.next_page"))
+assert(TextManager.ContainsTag("barowardrobeswitcher.panel.target_character"))
 assert(not TextManager.ContainsTag("barowardrobeswitcher.button.hide_hair"))
 SERVER = false
 CLIENT = true
@@ -114,6 +185,7 @@ end
 local loadCalls = 0
 local saveCalls = 0
 local lastSaved = nil
+local lastSavedProfileKey = nil
 local transferEnabled = false
 local importedCampaigns = {}
 local profiles = {}
@@ -148,6 +220,7 @@ local persistence = {
     SaveSinglePlayerProfile = function(campaignKey, characterKey, _, encoded)
         saveCalls = saveCalls + 1
         lastSaved = tostring(encoded)
+        lastSavedProfileKey = tostring(characterKey)
         profiles[profileStorageKey(campaignKey, characterKey)] = tostring(encoded)
         return true
     end,
@@ -180,6 +253,7 @@ local activationFailuresRemaining = 0
 local clearAttempts = 0
 local clearFailuresRemaining = 0
 local visualOverrideReady = true
+local configuredPanelKey = "F7"
 local attachmentVisibilityCalls = 0
 local lastForceHideMask = nil
 local lastForceShowMask = nil
@@ -190,8 +264,12 @@ local activationCharacterIds = {}
 local activeCharacterIds = {}
 local capturedIdentifierByCharacterId = {}
 local capturedPrefabKeysByCharacterId = {}
+local lastEmptyCaptureCharacterId = nil
 local prefabCaptureCount = 0
 local reuseCheckCount = 0
+local fashionSlotCalls = 0
+local equipmentRegistrationCalls = 0
+local equipmentRemovalCalls = 0
 local reusableCharacters = {}
 local transactionCharacter = nil
 local function characterId(character)
@@ -199,6 +277,7 @@ local function characterId(character)
 end
 local visualOverride = {
     GetVersion = function() return WardrobeCore.MOD_VERSION end,
+    GetPanelKeyName = function() return configuredPanelKey end,
     IsReady = function() return visualOverrideReady end,
     GetReadinessStatus = function()
         return visualOverrideReady and
@@ -233,8 +312,14 @@ local visualOverride = {
             tostring(identifier) .. "@" .. tostring(packedColor or "base")
         return 1
     end,
-    CaptureEmptyFashion = function() return true end,
-    SetFashionSlots = function() return true end,
+    CaptureEmptyFashion = function(character)
+        lastEmptyCaptureCharacterId = characterId(character)
+        return true
+    end,
+    SetFashionSlots = function()
+        fashionSlotCalls = fashionSlotCalls + 1
+        return true
+    end,
     SetAttachmentVisibility = function(_, forceHideMask, forceShowMask)
         attachmentVisibilityCalls = attachmentVisibilityCalls + 1
         lastForceHideMask = forceHideMask
@@ -245,6 +330,14 @@ local visualOverride = {
         movementAnimationCalls = movementAnimationCalls + 1
         lastUseFashionMovementAnimations = enabled == true
         movementAnimationByCharacterId[characterId(character)] = enabled == true
+        return true
+    end,
+    ApplyFashionItemVisual = function()
+        equipmentRegistrationCalls = equipmentRegistrationCalls + 1
+        return true
+    end,
+    RemoveFashionItemVisual = function()
+        equipmentRemovalCalls = equipmentRemovalCalls + 1
         return true
     end,
     ActivateFashionVisual = function(character)
@@ -360,10 +453,12 @@ ChatMessageType = {
     ServerMessageBoxInGame = "ServerMessageBoxInGame",
     MessageBox = "MessageBox"
 }
-Keys = { F8 = "F8" }
+Keys = { F7 = "F7", F8 = "F8" }
 local openPanel = false
+local lastPanelKey = nil
 PlayerInput = {
-    KeyHit = function()
+    KeyHit = function(key)
+        lastPanelKey = key
         local result = openPanel
         openPanel = false
         return result
@@ -371,6 +466,7 @@ PlayerInput = {
 }
 
 local buttons = {}
+local visibleButtons = {}
 local removedWidgets = 0
 local liveOverlayRoots = 0
 local visibleTexts = {}
@@ -397,15 +493,20 @@ GUI = {
     Frame = function(_, style)
         if style == nil then
             visibleTexts = {}
+            visibleButtons = {}
             liveOverlayRoots = liveOverlayRoots + 1
             return widget(function()
                 liveOverlayRoots = liveOverlayRoots - 1
                 visibleTexts = {}
+                visibleButtons = {}
             end)
         end
         return widget()
     end,
     LayoutGroup = function() return widget() end,
+    ListBox = function()
+        return { Content = widget() }
+    end,
     TextBlock = function(_, text)
         visibleTexts[#visibleTexts + 1] = tostring(text)
         return widget()
@@ -414,6 +515,7 @@ GUI = {
         local button = widget()
         button.Enabled = true
         buttons[tostring(text)] = button
+        visibleButtons[tostring(text)] = true
         return button
     end
 }
@@ -440,6 +542,8 @@ end
 
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))] =
     "captured=true|active=false|auto=false|hidehair=false|fashionMovement=false|Head=existinghelmet,"
+profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("A Target NPC"))] =
+    "captured=true|active=false|auto=false|hidehair=false|fashionMovement=true|Head=targethelmet,"
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Twin NPC"))] =
     "captured=true|active=false|auto=true|hidehair=false|Head=twinhelmet,"
 profiles[profileStorageKey(campaignStorageKey, stableCharacterProfileKey("No Stable ID"))] =
@@ -455,14 +559,40 @@ local function hasVisibleText(expected)
     return false
 end
 
+local function hasVisibleButton(expected)
+    return visibleButtons[expected] == true
+end
+
+local function hasLoggedText(expected)
+    for _, text in ipairs(loggedMessages) do
+        if text:find(expected, 1, true) ~= nil then return true end
+    end
+    return false
+end
+
 local player = makeCharacter(42, 100, "Player Tester", false)
 local npc = makeCharacter(43, 200, "NPC Tester", true)
 local existingNpc = makeCharacter(44, 300, "Existing NPC", true)
-Character.CharacterList = { player, npc, existingNpc }
+local selectorNpc = makeCharacter(50, 900, "A Target NPC", true)
+local otherPlayer = makeCharacter(45, 400, "Other Player", false)
+local enemyBot = makeCharacter(46, 500, "Enemy Bot", true)
+enemyBot.IsOnPlayerTeam = false
+local nonHumanBot = makeCharacter(47, 600, "Nonhuman Bot", true)
+nonHumanBot.IsHuman = false
+local removedBot = makeCharacter(48, 700, "Removed Bot", true)
+removedBot.Removed = true
+local deadBot = makeCharacter(49, 800, "Dead Bot", true)
+deadBot.IsDead = true
+Character.CharacterList = {
+    player, npc, existingNpc, selectorNpc, otherPlayer, enemyBot, nonHumanBot, removedBot, deadBot
+}
 Character.Controlled = player
 openPanel = true
 assert(type(hooks.think) == "function", "client think hook was not registered")
 hooks.think()
+assert(lastPanelKey == Keys.F7, "the Mod Gameplay Settings panel key was not checked")
+assert(hasLoggedText("Wardrobe control panel can be opened by pressing F7."),
+    "the round-start notice did not display the configured panel key")
 assert(liveOverlayRoots == 1, "the initial wardrobe panel did not own exactly one overlay root")
 assert(loadCalls >= 2, "single-player crew profiles were not loaded during the one-shot crew scan")
 local importedPlayerProfileKey =
@@ -473,7 +603,7 @@ assert(profiles[importedPlayerProfileKey] ~= nil and
 assert(activationCount == 0 and prefabCaptureCount == 0,
     "an imported legacy look activated before the player manually applied it")
 
-local tutorialText = assert(localizedText["barowardrobeswitcher.panel.tutorial"])
+local tutorialText = assert(localizedText["barowardrobeswitcher.panel.tutorial"]):gsub("{key}", "F7")
 local _, tutorialLineBreaks = tutorialText:gsub("\n", "")
 assert(tutorialLineBreaks == 4, "the new-player guide must render as five short lines")
 assert(hasVisibleText(tutorialText), "the new-player guide was not expanded by default")
@@ -501,23 +631,42 @@ assert(removedWidgets == removesBeforeShowTutorial + 1 and liveOverlayRoots == 1
     "expanding the guide did not replace exactly one overlay on the next tick")
 assert(hasVisibleText(tutorialText), "the expanded guide text did not return")
 
-assert(buttons["Appearance Layers..."] == nil and buttons["Forget Saved Look"] == nil,
-    "additional wardrobe actions should be hidden in the default compact panel")
-local moreOptionsButton = buttons["More Options..."]
-assert(moreOptionsButton ~= nil and type(moreOptionsButton.OnClicked) == "function",
-    "the compact panel did not expose its More Options control")
-local removesBeforeMoreOptions = removedWidgets
-moreOptionsButton.OnClicked()
-assert(removedWidgets == removesBeforeMoreOptions,
-    "More Options removed the active overlay from inside its click callback")
+assert(hasVisibleButton("Appearance Layers...") and hasVisibleButton("Forget Saved Look") and
+       not hasVisibleButton("Movement: Fashion Priority") and not hasVisibleButton("Diagnostics"),
+    "the main page did not separate appearance actions from movement and diagnostics")
+local playerTargetButton = buttons["Wardrobe target: Player Tester"]
+assert(playerTargetButton ~= nil and type(playerTargetButton.OnClicked) == "function",
+    "the main page did not expose its single-player crew selector")
+local removesBeforeTargetChange = removedWidgets
+playerTargetButton.OnClicked()
+assert(removedWidgets == removesBeforeTargetChange,
+    "changing the wardrobe target rebuilt the overlay inside its click callback")
 hooks.think()
-assert(removedWidgets == removesBeforeMoreOptions + 1,
-    "expanding More Options did not replace the previous overlay on the next tick")
-assert(liveOverlayRoots == 1, "expanding More Options left an old overlay root alive")
-assert(hasVisibleText(tutorialText), "More Options unexpectedly changed the guide state")
+assert(removedWidgets == removesBeforeTargetChange + 1 and liveOverlayRoots == 1 and
+       hasVisibleButton("Wardrobe target: A Target NPC"),
+    "the crew selector did not bind the first eligible bot on the next tick")
+buttons["Save Current Outfit"].OnClicked()
+hooks.think()
+assert(lastEmptyCaptureCharacterId == selectorNpc.ID and
+       lastSavedProfileKey == stableCharacterProfileKey("A Target NPC"),
+    "Save did not capture and persist the selected bot's own wardrobe profile")
+
+local nextPageButton = buttons["Next Page"]
+assert(nextPageButton ~= nil and type(nextPageButton.OnClicked) == "function",
+    "the main page did not expose its Next Page control")
+local removesBeforeNextPage = removedWidgets
+nextPageButton.OnClicked()
+assert(removedWidgets == removesBeforeNextPage,
+    "Next Page removed the active overlay from inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeNextPage + 1 and liveOverlayRoots == 1,
+    "Next Page did not replace exactly one overlay on the next tick")
+assert(not hasVisibleButton("Appearance Layers...") and
+       hasVisibleButton("Movement: Fashion Priority") and hasVisibleButton("Diagnostics"),
+    "page two did not contain only movement and diagnostic controls")
 local fashionMovementButton = buttons["Movement: Fashion Priority"]
 assert(fashionMovementButton ~= nil and type(fashionMovementButton.OnClicked) == "function",
-    "More Options did not expose the default fashion-priority movement setting")
+    "page two did not expose the default fashion-priority movement setting")
 local removesBeforeEquipmentMovement = removedWidgets
 local savesBeforeEquipmentMovement = saveCalls
 local movementCallsBeforeEquipmentMovement = movementAnimationCalls
@@ -545,22 +694,41 @@ assert(removedWidgets == removesBeforeFashionMovement + 1 and liveOverlayRoots =
 assert(movementAnimationCalls == movementCallsBeforeEquipmentMovement,
     "restoring an inactive saved look tried to update a renderer session")
 assert(saveCalls == savesBeforeEquipmentMovement + 2 and
-       lastSaved:find("fashionMovement=true", 1, true) ~= nil,
-    "the fashion-priority movement choice was not persisted through the reducer")
-local lessOptionsButton = buttons["Hide Additional Options"]
-assert(lessOptionsButton ~= nil and type(lessOptionsButton.OnClicked) == "function",
-    "the expanded panel did not expose its collapse control")
-local removesBeforeLessOptions = removedWidgets
-lessOptionsButton.OnClicked()
-assert(removedWidgets == removesBeforeLessOptions,
-    "Hide Additional Options removed the active overlay from inside its click callback")
+       lastSaved:find("fashionMovement=true", 1, true) ~= nil and
+       lastSavedProfileKey == stableCharacterProfileKey("A Target NPC"),
+    "the selected bot's movement choice was not persisted to its own profile")
+
+local pageBackButton = buttons["Back"]
+assert(pageBackButton ~= nil and type(pageBackButton.OnClicked) == "function",
+    "page two did not expose its Back control")
+local removesBeforePageBack = removedWidgets
+pageBackButton.OnClicked()
+assert(removedWidgets == removesBeforePageBack,
+    "Back removed page two from inside its click callback")
 hooks.think()
-assert(removedWidgets == removesBeforeLessOptions + 1,
-    "collapsing More Options did not replace the expanded overlay on the next tick")
-assert(liveOverlayRoots == 1, "collapsing More Options left an old overlay root alive")
-assert(hasVisibleText(tutorialText), "collapsing More Options unexpectedly changed the guide state")
-buttons["More Options..."].OnClicked()
+assert(removedWidgets == removesBeforePageBack + 1 and liveOverlayRoots == 1 and
+       hasVisibleButton("Appearance Layers...") and not hasVisibleButton("Diagnostics"),
+    "Back did not return to the main page on the next tick")
+
+buttons["Wardrobe target: A Target NPC"].OnClicked()
 hooks.think()
+assert(hasVisibleButton("Wardrobe target: Existing NPC"),
+    "the crew selector did not advance to the next eligible bot")
+buttons["Wardrobe target: Existing NPC"].OnClicked()
+hooks.think()
+assert(hasVisibleButton("Wardrobe target: NPC Tester"),
+    "the crew selector did not advance to the second eligible bot")
+buttons["Wardrobe target: NPC Tester"].OnClicked()
+hooks.think()
+assert(hasVisibleButton("Wardrobe target: Player Tester") and Character.Controlled == player,
+    "the crew selector included a real, enemy, nonhuman, dead, or removed character")
+buttons["Wardrobe target: Player Tester"].OnClicked()
+hooks.think()
+selectorNpc.Removed = true
+hooks.think()
+assert(hasVisibleButton("Wardrobe target: Player Tester"),
+    "an unavailable selected bot did not safely fall back to the controlled character")
+selectorNpc.Removed = false
 
 local appearanceLayersButton = buttons["Appearance Layers..."]
 assert(appearanceLayersButton ~= nil and appearanceLayersButton.Enabled ~= false,
@@ -579,11 +747,13 @@ local hideStandardHairButton = buttons["Hide Standard Hair"]
 assert(hideStandardHairButton ~= nil and
     type(hideStandardHairButton.OnClicked) == "function",
     "Hide Standard Hair preset was not installed")
+local savesBeforeAttachmentVisibility = saveCalls
 hideStandardHairButton.OnClicked()
 hooks.think()
 
-assert(saveCalls == savesBeforeEquipmentMovement + 3,
-    "attachment visibility did not persist to the current character profile")
+assert(saveCalls == savesBeforeAttachmentVisibility + 1 and
+       lastSavedProfileKey == stableCharacterProfileKey("Player Tester"),
+    "attachment visibility did not persist to the controlled character profile")
 assert(lastSaved ~= nil and
     lastSaved:find("schema=4", 1, true) ~= nil and
     lastSaved:find("hidehair=true", 1, true) ~= nil and
@@ -614,6 +784,57 @@ assert(prefabCaptureCount == 1,
     "a persisted player profile did not rebuild its renderer payload from the prefab")
 assert(lastForceHideMask == 0x07 and lastForceShowMask == 0,
     "Hide Standard Hair did not project to the expected renderer masks")
+
+-- Changing real equipment under an active look refreshes only the existing
+-- local renderer session. Distinct Lua proxies for the same runtime item must
+-- still be registered once when that item occupies multiple managed slots.
+local playerEquipment = {}
+player.Inventory.GetItemInLimbSlot = function(slot)
+    return playerEquipment[slot]
+end
+local sharedProxyA = { ID = 700, Name = "Shared Gear", Prefab = { Identifier = "sharedgear" } }
+local sharedProxyB = { ID = 700, Name = "Shared Gear", Prefab = { Identifier = "sharedgear" } }
+playerEquipment[InvSlotType.Head] = sharedProxyA
+playerEquipment[InvSlotType.OuterClothes] = sharedProxyB
+local equipmentNetworkBefore = #networkSent
+local equipmentSavesBefore = saveCalls
+local equipmentCapturesBefore = prefabCaptureCount
+local equipmentSlotsBefore = fashionSlotCalls
+local equipmentRegistrationsBefore = equipmentRegistrationCalls
+local equipmentActivationsBefore = activationAttempts
+hooks.think()
+assert(#networkSent == equipmentNetworkBefore and saveCalls == equipmentSavesBefore and
+       prefabCaptureCount == equipmentCapturesBefore,
+    "equipment-only refresh sent a command, persisted, or recaptured the saved look")
+assert(fashionSlotCalls == equipmentSlotsBefore + 1 and
+       equipmentRegistrationCalls == equipmentRegistrationsBefore + 1 and
+       activationAttempts == equipmentActivationsBefore + 1,
+    "equipment-only refresh did not batch one item registration and one final activation")
+
+local observerEquipment = {}
+npc.Inventory.GetItemInLimbSlot = function(slot)
+    return observerEquipment[slot]
+end
+local observerGear = { ID = 701, Name = "Observer Gear", Prefab = { Identifier = "observergear" } }
+local observerRegistrationsBefore = equipmentRegistrationCalls
+hooks["item.equip"](observerGear, npc)
+assert(equipmentRegistrationCalls == observerRegistrationsBefore,
+    "observer hook registered an item outside the managed clothing slots")
+observerEquipment[InvSlotType.Head] = observerGear
+hooks["item.equip"](observerGear, npc)
+assert(equipmentRegistrationCalls == observerRegistrationsBefore + 1,
+    "observer managed clothing did not register local suppression")
+local observerRemovalsBefore = equipmentRemovalCalls
+observerEquipment[InvSlotType.Head] = nil
+hooks["item.unequip"](observerGear, npc)
+assert(equipmentRemovalCalls == observerRemovalsBefore + 1,
+    "observer unequip did not release stale suppression references")
+
+-- The fixture's activationCount tracks calls, while the real C# active-session
+-- fast path returns without a second activation. Keep the older transition
+-- assertions on their original baseline; activationAttempts above owns this case.
+activationCount = activationCount - 1
+table.remove(activationCharacterIds)
 
 local hairLayerButton = buttons["Hair — Hide"]
 assert(hairLayerButton ~= nil and type(hairLayerButton.OnClicked) == "function",
@@ -694,8 +915,18 @@ assert(existingNpcBackButton ~= nil and type(existingNpcBackButton.OnClicked) ==
 existingNpcBackButton.OnClicked()
 buttons = {}
 hooks.think()
+local existingNextPageButton = buttons["Next Page"]
+assert(existingNextPageButton ~= nil and type(existingNextPageButton.OnClicked) == "function",
+    "the existing NPC main page did not expose Next Page")
+existingNextPageButton.OnClicked()
+buttons = {}
+hooks.think()
 assert(buttons["Movement: Equipped Gear"] ~= nil,
     "the single-player panel did not prefer the saved look's movement source")
+buttons["Back"].OnClicked()
+buttons = {}
+hooks.think()
+applyButton = buttons["Apply Saved Look"]
 local existingProfileKey =
     profileStorageKey(campaignStorageKey, stableCharacterProfileKey("Existing NPC"))
 assert(profiles[existingProfileKey] ~= nil and
@@ -826,6 +1057,15 @@ persistence.LoadClientLook = function()
     return "captured=true|active=true|auto=true|hidehair=false|Head=helmet,"
 end
 Game.IsMultiplayer = true
+local multiplayerPlayer = makeCharacter(920, 920, "Multiplayer Player", false)
+local multiplayerBot = makeCharacter(921, 921, "Multiplayer Bot", true)
+local multiplayerHuman = makeCharacter(922, 922, "Multiplayer Human", false)
+local multiplayerEnemy = makeCharacter(923, 923, "Multiplayer Enemy", true)
+multiplayerEnemy.IsOnPlayerTeam = false
+Character.Controlled = multiplayerPlayer
+Character.CharacterList = {
+    multiplayerPlayer, multiplayerBot, multiplayerHuman, multiplayerEnemy
+}
 hooks.roundStart()
 for _ = 1, 15 do hooks.think() end
 
@@ -834,7 +1074,8 @@ assert(WardrobeCore.writeServerHello(
     serverHello,
     0,
     WardrobeCore.CAPABILITY.AttachmentVisibility +
-        WardrobeCore.CAPABILITY.MovementAnimationSource
+        WardrobeCore.CAPABILITY.MovementAnimationSource +
+        WardrobeCore.CAPABILITY.CrewTargeting
 ))
 serverHello.FinalizeForTransport()
 assert(type(networkHandlers[WardrobeCore.NET.V2_HELLO]) == "function")
@@ -884,6 +1125,10 @@ assert(finalApplyCount == applyCountAfterRejection,
 assert(buttons["Save Current Outfit"].Enabled ~= false,
     "multiplayer controls did not refresh after a rejected acknowledgement")
 
+local multiplayerNextPageButton = buttons["Next Page"]
+assert(multiplayerNextPageButton ~= nil and type(multiplayerNextPageButton.OnClicked) == "function")
+multiplayerNextPageButton.OnClicked()
+hooks.think()
 local multiplayerMovementButton = buttons["Movement: Fashion Priority"]
 assert(multiplayerMovementButton ~= nil and type(multiplayerMovementButton.OnClicked) == "function")
 multiplayerMovementButton.OnClicked()
@@ -901,6 +1146,8 @@ assert(WardrobeCore.writeAck(rejectedMovementAck, {
 }))
 rejectedMovementAck.FinalizeForTransport()
 networkHandlers[WardrobeCore.NET.V2_ACK](rejectedMovementAck)
+hooks.think()
+buttons["Back"].OnClicked()
 hooks.think()
 
 -- Accepted commands also finish asynchronously. The open panel must rebuild
@@ -1288,6 +1535,43 @@ do
     assert(clearAttempts == controlledClearAttempts + 2 and
            activeCharacterIds[nextRoundCharacter.ID] ~= true,
         "a stale same-kind clear cancelled the newer controlled-character retry")
+
+    openPanel = true
+    hooks.think()
+    local multiplayerTargetButton = buttons["Wardrobe target: Late Local Player"]
+    assert(multiplayerTargetButton ~= nil and type(multiplayerTargetButton.OnClicked) == "function" and
+        hasVisibleText("Multiplayer uses one saved look per player; this selects who the actions affect."),
+        "crew-target capable multiplayer did not expose its shared-look target selector")
+    multiplayerTargetButton.OnClicked()
+    hooks.think()
+    assert(hasVisibleButton("Wardrobe target: Multiplayer Bot"),
+        "multiplayer selector included a player or enemy before the friendly bot")
+    buttons["Apply Saved Look"].OnClicked()
+    hooks.think()
+    local targetedApplyMessage = networkSent[#networkSent]
+    assert(targetedApplyMessage ~= nil and
+        targetedApplyMessage.name == WardrobeCore.NET.V2_TARGET_COMMAND,
+        "selected multiplayer bot used the self-only command channel")
+    local targetedApply = assert(WardrobeCore.readTargetCommand(targetedApplyMessage))
+    assert(targetedApply.kind == WardrobeCore.COMMAND.Apply and
+        targetedApply.targetCharacterId == multiplayerBot.ID,
+        "multiplayer Apply did not freeze the selected bot entity ID")
+    assert(buttons["Wardrobe target: Multiplayer Bot"].Enabled == false,
+        "multiplayer target selector stayed enabled while a command was pending")
+    local rejectedTargetApplyAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+    assert(WardrobeCore.writeAck(rejectedTargetApplyAck, {
+        operationId = targetedApply.operationId,
+        accepted = false,
+        revision = 24,
+        reason = "synthetic target rejection"
+    }))
+    rejectedTargetApplyAck.FinalizeForTransport()
+    networkHandlers[WardrobeCore.NET.V2_ACK](rejectedTargetApplyAck)
+    hooks.think()
+    buttons["Wardrobe target: Multiplayer Bot"].OnClicked()
+    hooks.think()
+    assert(hasVisibleButton("Wardrobe target: Late Local Player"),
+        "multiplayer selector did not return from the only eligible bot to the player")
 
     -- Capabilities are independent. A relay may expose animation sync without
     -- attachment visibility; the animation command and false setting must survive.

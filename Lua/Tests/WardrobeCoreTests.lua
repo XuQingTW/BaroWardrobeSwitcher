@@ -232,6 +232,7 @@ assert(Core.writeServerHello(helloBuffer, 7, Core.CAPABILITY.AttachmentVisibilit
 local hello = assert(Core.readServerHello(helloBuffer))
 assertEqual(hello.revision, 7)
 assertEqual(hello.capabilities, Core.CAPABILITY.AttachmentVisibility)
+assert(Core.CAPABILITY.CrewTargeting == 0x04, "crew targeting capability changed unexpectedly")
 local oldHelloBuffer = newBuffer()
 oldHelloBuffer.WriteUInt16(Core.PROTOCOL_VERSION)
 oldHelloBuffer.WriteUInt32(8)
@@ -259,6 +260,30 @@ local decodedCommand = assert(Core.readCommand(commandBuffer))
 assertEqual(decodedCommand.operationId, command.operationId)
 assertEqual(decodedCommand.baseRevision, 3)
 assert(Core.lookEquals(decodedCommand.look, look))
+
+local targetCommand = {
+    clientSessionId = "session-1",
+    operationId = "session-1:crew",
+    baseRevision = 3,
+    kind = Core.COMMAND.Apply,
+    targetCharacterId = 77,
+    look = look
+}
+local targetCommandBuffer = newBuffer()
+assert(Core.writeTargetCommand(targetCommandBuffer, targetCommand))
+targetCommandBuffer.FinalizeForTransport()
+local decodedTargetCommand = assert(Core.readTargetCommand(targetCommandBuffer))
+assertEqual(decodedTargetCommand.targetCharacterId, 77)
+assertEqual(decodedTargetCommand.kind, Core.COMMAND.Apply)
+assert(Core.lookEquals(decodedTargetCommand.look, look),
+    "target command corrupted the look extension")
+for _, invalidTarget in ipairs({ 0, -1, 1.5, 65536 }) do
+    local invalid = {}
+    for key, value in pairs(targetCommand) do invalid[key] = value end
+    invalid.targetCharacterId = invalidTarget
+    assert(not Core.writeTargetCommand(newBuffer(), invalid),
+        "accepted invalid target character ID " .. tostring(invalidTarget))
+end
 
 local storedApplyBuffer = newBuffer()
 assert(Core.writeCommand(storedApplyBuffer, {

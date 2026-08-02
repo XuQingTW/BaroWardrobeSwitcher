@@ -5,7 +5,7 @@ Baro Wardrobe Switcher is a hybrid modular monolith. It is one Barotrauma conten
 ## Runtime boundaries
 
 - `Lua/WardrobeCore.lua` owns the versioned look schema, slot keys, network codecs, limits, and client reducer. It has no Barotrauma or LuaCs dependency and is loaded in both realms.
-- `Lua/WardrobeSwitcher.lua` is the client adapter. It owns the F8 UI, character/inventory hooks, persistence calls, renderer calls, and v1/v2 network negotiation.
+- `Lua/WardrobeSwitcher.lua` is the client adapter. It owns the configurable-key two-page UI, capability-gated bot target selection, character/inventory hooks, persistence calls, renderer calls, and v1/v2 network negotiation.
 - `Lua/WardrobeSwitcherServer.lua` is the authoritative server adapter. It validates commands against server content, owns revisions and idempotency, persists stable accounts, and sends canonical state.
 - `CSharp/Client` is a client-only compatibility adapter for Barotrauma rendering, animation, and sound. It must not own multiplayer truth.
 
@@ -25,11 +25,13 @@ Attachment visibility is a canonical four-key value object (`Hair`, `Beard`, `Mo
 
 Server state is grouped per client session. Every accepted v2 command advances a server-owned revision. Commands include their base revision and operation ID, so retries are idempotent and stale apply requests cannot reactivate a look after clear or forget. A stable account keeps the current client-session dedupe cache across reconnects. Each cache retains at most 512 results; once full, unknown operations fail closed with a stable `operation_limit_reached` result until the client starts a new session. Revision exhaustion similarly rejects mutations with `revision_exhausted` instead of reusing `UInt32.MaxValue`.
 
-In single-player, runtime state is keyed by `Character.Info.ID`, so changing the controlled Character does not replace another crew member's state. The disk key is a stable fingerprint built from `OriginalName`, `SpeciesName`, and `HumanPrefabIds`; runtime entity IDs are never persisted. Fingerprint collisions fail closed for automatic restoration.
+In single-player, runtime state is keyed by `Character.Info.ID`, so changing the controlled Character or the UI-selected wardrobe target does not replace another crew member's state. The disk key is a stable fingerprint built from `OriginalName`, `SpeciesName`, and `HumanPrefabIds`; runtime entity IDs are never persisted. Fingerprint collisions fail closed for automatic restoration.
+
+In multiplayer, protocol 4 keeps the existing one-saved-look-per-client model. A `CrewTargeting` hello capability enables a separate target-command channel whose entity ID is frozen when queued and revalidated by the server. Only living friendly human bots are accepted; bot activation is round-local, and persistent/reconnect activation remains restricted to the client's own character. A bot already owned by another active wardrobe session fails closed with `target_in_use`.
 
 At round start the client scans `Character.CharacterList` once, then follows `character.created`, `item.equip`, and `item.unequip` events. Each queued NPC waits for 12 stable equipment ticks, with a 120-tick fallback, before rebuilding its renderer session. The per-frame hook only processes this bounded queue; it does not scan the full crew list.
 
-Multiplayer connection, round, and LuaCs `character.created` events continue to rebind active sessions to new Character entity IDs. A bounded event-triggered retry handles the short assignment race during respawn; there is no per-frame client/equipment scan.
+Multiplayer connection, round, and LuaCs `character.created` events continue to rebind active sessions to new Character entity IDs. A bounded event-triggered retry handles the short assignment race during respawn. An active controlled character computes only a six-slot equipment signature each tick; a signature change refreshes the existing local renderer session without capture, persistence, or a wardrobe network command. There is no per-frame full-client or full-inventory scan.
 
 ## Renderer safety boundary
 

@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <infotexts language="Traditional Chinese">
   <entityname.barowardrobeswitcher>衣櫃（測試版）</entityname.barowardrobeswitcher>
-  <barowardrobeswitcher.notice.open_panel>按 F8 可開啟衣櫃控制面板。</barowardrobeswitcher.notice.open_panel>
+  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>衣櫃面板按鍵</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>
+  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>衣櫃</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>
+  <Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>輸入 Microsoft.Xna.Framework.Input.Keys 名稱，例如 F7 或 Insert；無效名稱會使用 F8。</Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>
+  <barowardrobeswitcher.notice.open_panel>按 {key} 可開啟衣櫃控制面板。</barowardrobeswitcher.notice.open_panel>
   <barowardrobeswitcher.panel.title>衣櫃切換器</barowardrobeswitcher.panel.title>
+  <barowardrobeswitcher.panel.main_page>主頁</barowardrobeswitcher.panel.main_page>
+  <barowardrobeswitcher.panel.tools_page>選項與診斷</barowardrobeswitcher.panel.tools_page>
+  <barowardrobeswitcher.panel.target_character>衣櫃目標</barowardrobeswitcher.panel.target_character>
+  <barowardrobeswitcher.panel.multiplayer_shared_look>多人模式每位玩家共用一份已保存外觀；此處選擇操作要套用的船員。</barowardrobeswitcher.panel.multiplayer_shared_look>
   <barowardrobeswitcher.panel.saved_look>已儲存外觀</barowardrobeswitcher.panel.saved_look>
   <barowardrobeswitcher.panel.look>外觀</barowardrobeswitcher.panel.look>
   <barowardrobeswitcher.panel.active>啟用</barowardrobeswitcher.panel.active>
@@ -19,7 +26,7 @@
   <barowardrobeswitcher.panel.debug_log_hint>診斷會寫入 WardrobeClient.log，不再洗滿遊戲控制台。</barowardrobeswitcher.panel.debug_log_hint>
   <barowardrobeswitcher.panel.log_file>衣櫃日誌</barowardrobeswitcher.panel.log_file>
   <barowardrobeswitcher.panel.saved_file>儲存外觀檔案</barowardrobeswitcher.panel.saved_file>
-  <barowardrobeswitcher.panel.tutorial>1. 儲存：穿上想要的造型，再按「儲存目前服裝」。&#10;   儲存後，服裝會卸下。&#10;2. 套用：穿回能力裝備，再套用已儲存外觀。&#10;3. 「清除」只停止顯示；「忘記」才會刪除存檔。&#10;按 F8 可關閉面板。</barowardrobeswitcher.panel.tutorial>
+  <barowardrobeswitcher.panel.tutorial>1. 儲存：穿上想要的造型，再按「儲存目前服裝」。&#10;   儲存後，服裝會卸下。&#10;2. 套用：穿回能力裝備，再套用已儲存外觀。&#10;3. 「清除」只停止顯示；「忘記」才會刪除存檔。&#10;按 {key} 可關閉面板。</barowardrobeswitcher.panel.tutorial>
   <barowardrobeswitcher.button.save>儲存目前服裝</barowardrobeswitcher.button.save>
   <barowardrobeswitcher.button.apply>套用已儲存外觀</barowardrobeswitcher.button.apply>
   <barowardrobeswitcher.button.clear>清除外觀</barowardrobeswitcher.button.clear>
@@ -30,6 +37,7 @@
   <barowardrobeswitcher.button.hide_standard_hair>隱藏標準頭髮</barowardrobeswitcher.button.hide_standard_hair>
   <barowardrobeswitcher.button.all_auto>全部自動</barowardrobeswitcher.button.all_auto>
   <barowardrobeswitcher.button.back>返回</barowardrobeswitcher.button.back>
+  <barowardrobeswitcher.button.next_page>下一頁</barowardrobeswitcher.button.next_page>
   <barowardrobeswitcher.button.enable_transfer>啟用外觀沿用</barowardrobeswitcher.button.enable_transfer>
   <barowardrobeswitcher.button.disable_transfer>停用外觀沿用</barowardrobeswitcher.button.disable_transfer>
   <barowardrobeswitcher.button.diagnostics>診斷</barowardrobeswitcher.button.diagnostics>
@@ -73,6 +81,7 @@
   <barowardrobeswitcher.status.restored_character>已恢復此角色儲存外觀。</barowardrobeswitcher.status.restored_character>
   <barowardrobeswitcher.status.apply_again>儲存外觀需要重新套用。</barowardrobeswitcher.status.apply_again>
   <barowardrobeswitcher.status.character_changed>控制角色已改變。請為此角色儲存新的服裝。</barowardrobeswitcher.status.character_changed>
+  <barowardrobeswitcher.status.target_unavailable>選擇的船員已不可用。</barowardrobeswitcher.status.target_unavailable>
   <barowardrobeswitcher.status.profile_unavailable>僅保存在記憶體</barowardrobeswitcher.status.profile_unavailable>
   <barowardrobeswitcher.status.profile_collision>角色身分重複；已停用自動恢復</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>已清除儲存的外觀。</barowardrobeswitcher.status.saved_cleared>

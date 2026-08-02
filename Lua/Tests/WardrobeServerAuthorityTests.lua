@@ -21,6 +21,7 @@ end
 local Core = loadFirst(candidates("Lua/WardrobeCore.lua"), true)
 
 SERVER = true
+Character = { CharacterList = {} }
 InvSlotType = {
     Head = 1,
     Headset = 2,
@@ -141,7 +142,7 @@ assert(memoryFiles[serverLogPath] ~= nil and
 
 local handlerCount = 0
 for _ in pairs(Networking.handlers) do handlerCount = handlerCount + 1 end
-assert(handlerCount == 6, "server must register four v1 and two v2 receivers")
+assert(handlerCount == 7, "server must register four v1 and three v2 receivers")
 assert(Hook.handlers.think == nil, "server authority must not install a think heartbeat")
 
 local client = { Connection = {}, Character = { ID = 42, Name = "Tester" } }
@@ -151,6 +152,9 @@ assert(Core.writeClientHello(hello, "client-session"))
 Networking.handlers[Core.NET.V2_HELLO](hello, client)
 local serverHello = assert(Core.readServerHello(Networking.sent[#Networking.sent].message))
 assert(serverHello.revision == 0)
+assert(serverHello.capabilities == Core.CAPABILITY.AttachmentVisibility +
+    Core.CAPABILITY.MovementAnimationSource + Core.CAPABILITY.CrewTargeting,
+    "server did not advertise multiplayer crew targeting")
 
 local function sendCommand(command, targetClient)
     targetClient = targetClient or client
@@ -173,6 +177,112 @@ local function lastSentMessage(name, connection)
     end
     return nil
 end
+
+local targetOwnerCharacter = {
+    ID = 80, Name = "Target Owner", IsHuman = true, IsOnPlayerTeam = true, IsBot = false
+}
+local friendlyBot = {
+    ID = 81, Name = "Friendly Bot", IsHuman = true, IsOnPlayerTeam = true, IsBot = true
+}
+local enemyBot = {
+    ID = 82, Name = "Enemy Bot", IsHuman = true, IsOnPlayerTeam = false, IsBot = true
+}
+local targetOwner = { Connection = {}, Character = targetOwnerCharacter }
+connectedClients[2] = targetOwner
+Character.CharacterList = { targetOwnerCharacter, friendlyBot, enemyBot }
+local targetHello = newBuffer()
+assert(Core.writeClientHello(targetHello, "target-owner-session"))
+Networking.handlers[Core.NET.V2_HELLO](targetHello, targetOwner)
+
+local function sendTargetCommand(command, targetClient)
+    local message = newBuffer()
+    assert(Core.writeTargetCommand(message, command))
+    message.FinalizeForTransport()
+    local sentBefore = #Networking.sent
+    Networking.handlers[Core.NET.V2_TARGET_COMMAND](message, targetClient)
+    for index = sentBefore + 1, #Networking.sent do
+        if Networking.sent[index].message.name == Core.NET.V2_ACK then
+            return assert(Core.readAck(Networking.sent[index].message))
+        end
+    end
+    error("target command did not receive an acknowledgement")
+end
+
+local targetLook = assert(Core.newLook(true, false, { Head = "helmet" }))
+local targetApply = sendTargetCommand({
+    clientSessionId = "target-owner-session",
+    operationId = "target-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    targetCharacterId = friendlyBot.ID,
+    look = targetLook
+}, targetOwner)
+assert(targetApply.accepted and targetApply.revision == 1,
+    "a friendly living human bot was not accepted as a wardrobe target")
+local botState = assert(Core.readState(lastSentMessage(Core.NET.V2_STATE, targetOwner.Connection)))
+assert(botState.active and botState.characterId == friendlyBot.ID,
+    "targeted apply was broadcast for the wrong character")
+local duplicateTargetApply = sendTargetCommand({
+    clientSessionId = "target-owner-session",
+    operationId = "target-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    targetCharacterId = friendlyBot.ID,
+    look = targetLook
+}, targetOwner)
+assert(duplicateTargetApply.accepted and duplicateTargetApply.revision == 1,
+    "a targeted retry was not idempotent")
+local duplicateBotState = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, targetOwner.Connection)))
+assert(duplicateBotState.active and duplicateBotState.characterId == friendlyBot.ID,
+    "a targeted retry resent state for the owner's player character")
+
+local rejectedEnemy = sendTargetCommand({
+    clientSessionId = "target-owner-session",
+    operationId = "target-enemy",
+    baseRevision = 1,
+    kind = Core.COMMAND.Apply,
+    targetCharacterId = enemyBot.ID,
+    look = targetLook
+}, targetOwner)
+assert(not rejectedEnemy.accepted and rejectedEnemy.reason == "target_not_permitted" and
+    rejectedEnemy.revision == 1, "an enemy bot target mutated server state")
+
+local secondOwnerCharacter = {
+    ID = 83, Name = "Second Owner", IsHuman = true, IsOnPlayerTeam = true, IsBot = false
+}
+local secondOwner = { Connection = {}, Character = secondOwnerCharacter }
+connectedClients[3] = secondOwner
+Character.CharacterList[#Character.CharacterList + 1] = secondOwnerCharacter
+local secondHello = newBuffer()
+assert(Core.writeClientHello(secondHello, "second-target-session"))
+Networking.handlers[Core.NET.V2_HELLO](secondHello, secondOwner)
+local contested = sendTargetCommand({
+    clientSessionId = "second-target-session",
+    operationId = "target-contested",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    targetCharacterId = friendlyBot.ID,
+    look = targetLook
+}, secondOwner)
+assert(not contested.accepted and contested.reason == "target_in_use" and contested.revision == 0,
+    "a second player silently stole an active bot target")
+
+local sentBeforeTargetRoundStart = #Networking.sent
+Hook.handlers.roundEnd()
+Hook.handlers.roundStart()
+for index = sentBeforeTargetRoundStart + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        assert(state.characterId ~= targetOwnerCharacter.ID,
+            "a bot-only active look was rebound to its owner's player character")
+    end
+end
+Hook.handlers["client.disconnected"](secondOwner)
+Hook.handlers["client.disconnected"](targetOwner)
+table.remove(connectedClients, 3)
+table.remove(connectedClients, 2)
 
 local clear = {
     clientSessionId = "client-session",
@@ -431,8 +541,9 @@ Networking.handlers[Core.NET.V2_HELLO](visibilityHello, visibilityClient)
 local visibilityServerHello =
     assert(Core.readServerHello(lastSentMessage(Core.NET.V2_HELLO, visibilityClient.Connection)))
 assert(visibilityServerHello.capabilities ==
-        Core.CAPABILITY.AttachmentVisibility + Core.CAPABILITY.MovementAnimationSource,
-    "new server hello must advertise visibility and movement-animation synchronization")
+        Core.CAPABILITY.AttachmentVisibility + Core.CAPABILITY.MovementAnimationSource +
+        Core.CAPABILITY.CrewTargeting,
+    "new server hello must advertise visibility, movement-animation, and crew targeting")
 
 local visibilityApply = sendCommand({
     clientSessionId = "visibility-session",

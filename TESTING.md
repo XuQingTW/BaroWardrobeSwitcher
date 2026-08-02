@@ -6,7 +6,7 @@ This checklist is the release gate for v0.5.3. Automated checks must pass before
 
 1. Run `scripts/Build.ps1` with explicit Barotrauma and LuaCs Publicized paths. Expected: zero warnings and errors; output only under `artifacts`.
 2. Run `scripts/Test-Compatibility.ps1 -RequireOptional`. Expected: every exact 1.13.4.0 target reports `PASS`.
-3. Run `scripts/Test-RendererContracts.ps1`. Expected: the crash characterizations, live-equipment mask/cache transaction, `RenderSession` aggregate, attachment-visibility priority/no-wearable-refresh contract, and functional-equipment-alarm lifecycle report `PASS`.
+3. Run `scripts/Test-RendererContracts.ps1`. Expected: the crash characterizations, live-equipment mask/cache transaction, inactive-render allocation guard, batched equipment refresh, `RenderSession` aggregate, attachment-visibility priority/no-wearable-refresh contract, and functional-equipment-alarm lifecycle report `PASS`.
 4. Run `scripts/Test-Persistence.ps1` with the same explicit paths. Expected: canonical client v4 color round-trip, client v1/v2/v3 migration, single-player profile v3 and v1/v2 migration, transfer round-trip, profile/campaign isolation, one-time inactive legacy import, quarantine, and atomic-failure cases report `PASS`.
 5. Run `scripts/Test-Lua.ps1`. Expected: every Lua source parses in Barotrauma's MoonSharp and every pure/authority test reports `PASS`.
 6. Run `scripts/verify_package.py`. Expected: metadata agrees, every runtime source is listed, and no generated file is present in the source package.
@@ -39,6 +39,10 @@ Run single-player, Windows host, and Linux dedicated server with at least two cl
 - Duplicate operation IDs return the original result without applying twice.
 - Out-of-order state is ignored; clear/forget followed by a late stale apply stays cleared.
 - Join, reconnect, round start/end, death/respawn, character replacement, and campaign/server changes preserve the documented intent.
+- In `Settings -> Mod Gameplay Settings`, change `Wardrobe Panel Key` from `F8` to `F7`, apply the settings, and begin a round. The notice and tutorial show `F7`; `F7` opens and closes the panel while `F8` no longer does. An invalid key name falls back to `F8` in both input and text.
+- Open the wardrobe panel at minimum supported UI scale. The scrollable main page contains Save/Apply/Clear, appearance layers, transfer, Forget, and `Next Page`; movement animation and diagnostics appear only on the scrollable second page, whose Back button returns to the main page without leaving an old overlay active. Next/Back/Close must remain reachable after expanding the guide or diagnostics.
+- On a current multiplayer server, confirm `Wardrobe target` cycles from the local player through friendly living human bots only. Save/Apply target the selected bot, the selector is disabled while a command is pending, and another client cannot steal the same active bot. On an older server without the capability, the selector remains self-only.
+- Apply a look to a multiplayer bot, then reconnect and start the next round. The saved look remains available to its owner but is not automatically rebound to the owner's player character or any replacement bot.
 - On a P2P host, change session or scene while retaining the same controlled Character and while a command is awaiting acknowledgement. Reopening F8 must leave Save, Apply, and Clear usable after the new session binds.
 - An active look survives each character/scene replacement and renders exactly once after the initial-equipment gate. A saved-but-never-applied look stays inactive.
 - `Clear Look` and `Forget Saved Look` remain inactive across round start, reconnect, death/respawn, and character replacement in single-player, v1 bridge, and v2 flows.
@@ -54,6 +58,8 @@ Expected steady state: no Wardrobe network traffic, persistence writes, or full-
 Use a campaign with at least the player and two controllable human NPC crew members.
 
 - Leave appearance transfer disabled, apply a player look, and switch to an unconfigured NPC. The NPC keeps its original appearance.
+- Without changing `Character.Controlled`, cycle `Wardrobe target` through two friendly living bots. Save, apply, clear, forget, change appearance layers, and change movement animation for each target; each operation and profile must affect only the selected NPC. Other real players, enemies, nonhumans, dead crew, and removed crew never appear in the cycle.
+- Remove or kill the selected NPC while the panel is open. The target safely returns to the controlled character and no NPC state is written into the player's profile.
 - Enable appearance transfer and switch from an active source to an unconfigured NPC. The look is copied only after a successful render and then belongs to that NPC.
 - Give two NPCs different looks, apply both, and enter the next scene without controlling either NPC. Both restore after initial equipment settles.
 - Restart the game and reload the same campaign. Active profiles restore to the matching crew members; a saved-but-inactive profile remains inactive.
@@ -73,6 +79,8 @@ Use a campaign with at least the player and two controllable human NPC crew memb
 - Full inventory and partial unequip failure do not duplicate or destroy items.
 - Each appearance layer cycles `Auto -> Hide -> Show`, previews immediately, and survives scene changes, restart, single-player profile transfer, and multiplayer synchronization.
 - With [EuropaWaifu 2](https://steamcommunity.com/sharedfiles/filedetails/?id=2948283083), apply a look whose XML does not hide Hair, then equip `cultistrobes` (Cultist Robes) and `zealotrobes` (Zealot Robes). Hair remains visible in `Auto` and `Show`; `Hide` still hides it. Clear the look and confirm both robes return to their native hair-hiding behavior.
+- With [[R18+]异种♥木卫二](https://steamcommunity.com/sharedfiles/filedetails/?id=3156077899), save and apply `divingsuit`, `abyssdivingsuit`, `combatdivingsuit`, and `respawndivingsuit`. Each `Hide LeftBreast` sprite must affect only the custom `LeftBoobs` limb (ID 17), with no duplicate or misplaced suit piece and no hidden appendage on another `LimbType.None` limb; clearing the look restores native rendering.
+- With a saved look active, raise CPU load and repeatedly equip, swap, and remove one-slot and multi-slot real clothing in single-player, as the multiplayer owner, and as an observer. Equipment changes should not produce a wardrobe capture, profile/server persistence write, or extra wardrobe Apply command; the look and cosmetic sound/animation suppression should update without a visible hitch.
 - EA-HI/manual composite-head check: apply the appearance, set `Hair=Show`, then hide only the Beard/Moustache layers actually required. The modded head and decorations must remain present and must not revert to the Vanilla head.
 - Confirm appearance-layer buttons never trigger `Character.OnWearablesChanged()` and that local persistence failure restores the complete prior policy and active render state.
 - Real equipment keeps stats, protection, oxygen, buffs, inventory, and health-interface behavior.

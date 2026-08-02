@@ -4,6 +4,7 @@ $renderer = Get-Content -LiteralPath (Join-Path $root "CSharp/Client/WardrobeVis
 $session = Get-Content -LiteralPath (Join-Path $root "CSharp/Client/WardrobeRendering.cs") -Raw
 $policy = Get-Content -LiteralPath (Join-Path $root "CSharp/Client/WardrobeFunctionalFashionFilters.cs") -Raw
 $compatibilityProbe = Get-Content -LiteralPath (Join-Path $root "tools/CompatibilityProbe/Program.cs") -Raw
+$client = Get-Content -LiteralPath (Join-Path $root "Lua/WardrobeSwitcher.lua") -Raw
 $all = $renderer + "`n" + $session + "`n" + $policy
 
 function Assert-Contract([string] $name, [string] $source, [string[]] $required) {
@@ -202,6 +203,50 @@ foreach ($identifier in @("cultistrobes", "zealotrobes")) {
     }
 }
 
+$customNoneLimb = Get-Section $renderer `
+    "private static bool IsFashionSpriteCompatibleWithLimb(" `
+    "private static LimbType GetFallbackAnchorLimb("
+Assert-Contract "workshop-left-breast-none-limb-binding" $customNoneLimb @(
+    'sprite.Limb != LimbType.None',
+    '"/3156077899/"',
+    'name.EndsWith("LeftBreast", StringComparison.OrdinalIgnoreCase)',
+    'limb.type == LimbType.None && limb.Params?.ID == 17'
+)
+if ($customNoneLimb.Contains("descriptor.SourceIdentifier") -or
+    $customNoneLimb.Contains("exo_milker2.png")) {
+    throw "Workshop left-breast routing must not be limited to the original clothing item or texture."
+}
+
+$drawWearableCompatibility = Get-Section $renderer `
+    "internal static bool TryOverrideDrawWearable(" `
+    "internal static LimbRenderTransaction BeginLimbDraw("
+Assert-Order "workshop-left-breast-draw-guard" $drawWearableCompatibility @(
+    "IsFashionSpriteCompatibleWithLimb(session, original, limb)",
+    "transaction.DrawnSprites.Add(original);",
+    "skipOriginal = true;",
+    "if (transaction.IsDrawingStoredFashion)"
+)
+
+$missingFashionSprites = Get-Section $renderer `
+    "internal static void DrawMissingFashionSprites(" `
+    "private static void DrawFashionWearable("
+Assert-Order "workshop-left-breast-fallback-guard" $missingFashionSprites @(
+    "WearableSprite sprite = descriptor.Sprite;",
+    "IsFashionSpriteCompatibleWithLimb(session, sprite, limb)",
+    "drawnSprites.Add(sprite);",
+    "DrawFashionWearable(limb, transaction, sprite"
+)
+
+$fashionInjection = Get-Section $renderer `
+    "public void Begin(RenderSession renderSession)" `
+    "public void Cleanup()"
+Assert-Order "workshop-left-breast-injection-guard" $fashionInjection @(
+    "EnumerateFashionSpritesForLimb(session.SpritesBySlot, limb.type)",
+    "IsFashionSpriteCompatibleWithLimb(session, descriptor.Sprite, limb)",
+    "wearingItems.Add(descriptor.Sprite);",
+    "SortWearablesForDraw(wearingItems);"
+)
+
 $visibility = Get-Section $renderer `
     "private static bool ShouldHideAttachmentForFashion(" `
     "private static string DescribeFashionHiddenTypes("
@@ -229,6 +274,92 @@ Assert-Order "live-equipment-hide-cache-cleanup" $maskCleanup @(
     "pair.Value.Restore(pair.Key);",
     "limb.UpdateWearableTypesToHide();",
     "session?.ExitDraw(limb);"
+)
+
+$equipmentRegistration = Get-Section $renderer `
+    "public static bool ApplyFashionItemVisual(" `
+    "public static bool RemoveFashionItemVisual("
+if ($equipmentRegistration.Contains("ActivateFashionVisual(character)")) {
+    throw "Equipment registration must not activate the renderer once per equipped item."
+}
+Assert-Contract "equipment-registration-batch" $equipmentRegistration @(
+    "RegisterSuppressedEquipmentAnimations(character, item);",
+    "RegisterSuppressedEquipmentSounds(character, item);",
+    "RegisterSuppressedEquipmentComponentSounds(character, item);",
+    "return true;"
+)
+
+$equipmentUnregistration = Get-Section $renderer `
+    "public static bool RemoveFashionItemVisual(" `
+    "public static bool ActivateFashionVisual("
+Assert-Contract "equipment-unregistration" $equipmentUnregistration @(
+    "session.SuppressedEquipmentComponentSounds.Remove(component);",
+    "session.SuppressedEquipmentSounds.Remove(statusEffect);",
+    "session.SuppressedEquipmentAnimations.Remove(animationInfo);",
+    "return true;"
+)
+
+$activation = Get-Section $renderer `
+    "public static bool ActivateFashionVisual(" `
+    "private static bool EnsureXdsFashionAppendage("
+Assert-Order "active-renderer-fast-path" $activation @(
+    "RenderSessions.TryGetValue(character, out RenderSession session)",
+    "if (session.IsActive) { return true; }",
+    "session.Validate(out error)"
+)
+if ($activation.Contains("RefreshWearables(character)")) {
+    throw "Draw-only activation must not rescan Character wearable stats."
+}
+
+$drawBegin = Get-Section $renderer `
+    "internal static LimbRenderTransaction BeginLimbDraw(" `
+    "internal static bool ShouldSuppressEquipmentAppendage("
+Assert-Order "inactive-render-allocation-guard" $drawBegin @(
+    "RenderSessions.TryGetValue(limb.character, out RenderSession session)",
+    "!session.IsActive",
+    "!session.IsValid",
+    "!HasCapability(""renderer"")",
+    "new LimbRenderTransaction(limb)"
+)
+if ($drawBegin.Contains("session.Validate(")) {
+    throw "Every Limb.Draw must not revalidate the complete renderer session."
+}
+
+$equipmentRefresh = Get-Section $client `
+    "function Helpers.refreshActiveLookIfNeeded(" `
+    "function Helpers.autoApplySavedLookIfNeeded("
+Assert-Order "local-equipment-refresh" $equipmentRefresh @(
+    "Helpers.equipmentSignature(character)",
+    "Helpers.applyCapturedFashionToCharacterEquipment(",
+    "currentLegacyLook()",
+    "false,",
+    "lastEquipmentSignature = signature"
+)
+if ($equipmentRefresh.Contains("applyFashionToCurrentEquipment") -or
+    $equipmentRefresh.Contains("dispatchReducer")) {
+    throw "Equipment-only refresh must not persist or send a wardrobe Apply command."
+}
+
+$equipmentBatch = Get-Section $client `
+    "function Helpers.applyCapturedFashionToCharacterEquipment(" `
+    "function Helpers.applyNetworkLook("
+Assert-Order "multi-slot-equipment-dedupe" $equipmentBatch @(
+    "local seenEquippedItems = {}",
+    "local seenEquippedItemIds = {}",
+    "seenEquippedItemIds[equippedId]",
+    "seenEquippedItems[equipped] = true",
+    "Helpers.applyVisualOverrideToItem(",
+    "Helpers.activateFashionVisual(character)"
+)
+
+$equipmentHooks = Get-Section $client `
+    'Hook.Add("item.equip"' `
+    'Hook.Add("character.created"'
+Assert-Order "observer-equipment-effect-lifecycle" $equipmentHooks @(
+    "Helpers.isManagedEquippedItem(character, item)",
+    "Helpers.applyVisualOverrideToItem(character, item, false)",
+    'Hook.Add("item.unequip"',
+    "Helpers.removeVisualOverrideFromItem(character, item)"
 )
 
 $fallback = Get-Section $renderer `
@@ -275,8 +406,11 @@ $slotRefresh = Get-Section $renderer `
     "public static bool SetAttachmentVisibility("
 Assert-Order "equipment-animation-rescan-lifecycle" $slotRefresh @(
     "RenderSession session = GetCaptureSession(character);",
+    "HashSet<InvSlotType> savedSlots = ParseSlotCsv(savedSlotsCsv);",
     "session.SuppressedEquipmentAnimations.Clear();",
-    "session.SavedSlots = ParseSlotCsv(savedSlotsCsv);"
+    "session.SuppressedEquipmentSounds.Clear();",
+    "session.SuppressedEquipmentComponentSounds.Clear();",
+    "session.SavedSlots = savedSlots;"
 )
 
 $xdsAppendage = Get-Section $renderer `

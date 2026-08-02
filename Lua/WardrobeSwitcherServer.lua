@@ -22,6 +22,7 @@ local MAX_REVISION = Core.LIMITS.MAX_UINT32
 local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
 local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
 local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
+local CAPABILITY_CREW_TARGETING = Core.CAPABILITY.CrewTargeting
 local COMMAND_VISIBILITY = Core.COMMAND.Visibility
 local COMMAND_ANIMATION = Core.COMMAND.Animation
 
@@ -150,6 +151,20 @@ local function clientCharacter(client)
     if client == nil then return nil end
     local ok, character = pcall(function() return client.Character end)
     return ok and character or nil
+end
+
+local function characterListSnapshot()
+    local characters = {}
+    local list = Character ~= nil and Character.CharacterList or nil
+    if list == nil then return characters end
+    if type(list) == "table" then
+        for _, character in ipairs(list) do characters[#characters + 1] = character end
+        return characters
+    end
+    pcall(function()
+        for character in list do characters[#characters + 1] = character end
+    end)
+    return characters
 end
 
 local function userDataMember(object, name)
@@ -281,6 +296,34 @@ local function connectedClients()
     local ok, gameServer = pcall(function() return Game ~= nil and Game.Server or nil end)
     if ok and gameServer ~= nil then collect(userDataMember(gameServer, "ConnectedClients")) end
     return result
+end
+
+local function resolveCrewTarget(client, targetCharacterId)
+    local requester = clientCharacter(client)
+    if requester == nil or userDataMember(requester, "IsDead") == true or
+        userDataMember(requester, "Removed") == true then
+        return nil, "character_unavailable"
+    end
+    targetCharacterId = tonumber(targetCharacterId)
+    if targetCharacterId == nil or targetCharacterId <= 0 then return nil, "target_unavailable" end
+
+    local target = nil
+    for _, character in ipairs(characterListSnapshot()) do
+        if characterEntityId(character) == targetCharacterId then target = character break end
+    end
+    if target == nil or userDataMember(target, "IsDead") == true or
+        userDataMember(target, "Removed") == true then
+        return nil, "target_unavailable"
+    end
+    if userDataMember(target, "IsHuman") ~= true or
+        userDataMember(target, "IsOnPlayerTeam") ~= true or
+        userDataMember(target, "IsBot") ~= true then
+        return nil, "target_not_permitted"
+    end
+    for _, connected in ipairs(connectedClients()) do
+        if clientCharacter(connected) == target then return nil, "target_not_permitted" end
+    end
+    return target
 end
 
 -- JSON codec kept local to avoid adding a server-side C# assembly. It accepts
@@ -1201,6 +1244,7 @@ local function sessionFor(client)
         revision = record ~= nil and (tonumber(record.revision) or 0) or 0,
         savedLook = cloneLook(recordLook),
         active = recordLook ~= nil and record.active == true and record.sessionKey ~= nil and record.sessionKey == currentGameSessionKey(),
+        activePersistent = recordLook ~= nil and record.active == true and record.sessionKey ~= nil and record.sessionKey == currentGameSessionKey(),
         activeCharacterId = nil,
         seenOperations = initialOperationCache.results,
         operationCache = initialOperationCache
@@ -1218,7 +1262,7 @@ local function updatePersistentRecord(session)
     persistentRecords[session.accountId] = {
         revision = session.revision,
         savedLook = cloneLook(session.savedLook),
-        active = session.active == true,
+        active = session.active == true and session.activePersistent == true,
         sessionKey = currentGameSessionKey()
     }
 end
@@ -1238,6 +1282,7 @@ local function snapshotCommitState(session)
         revision = session.revision,
         savedLook = cloneLook(session.savedLook),
         active = session.active == true,
+        activePersistent = session.activePersistent == true,
         activeCharacterId = session.activeCharacterId,
         persistentRecord = session.accountId ~= nil and clonePersistentRecord(persistentRecords[session.accountId]) or nil
     }
@@ -1247,6 +1292,7 @@ local function restoreCommitState(session, snapshot)
     session.revision = snapshot.revision
     session.savedLook = cloneLook(snapshot.savedLook)
     session.active = snapshot.active == true
+    session.activePersistent = snapshot.activePersistent == true
     session.activeCharacterId = snapshot.activeCharacterId
     if session.accountId ~= nil then
         persistentRecords[session.accountId] = clonePersistentRecord(snapshot.persistentRecord)
@@ -1326,7 +1372,8 @@ local function sendActiveSnapshot(client)
         local ownerSession = sessionFor(owner)
         local character = clientCharacter(owner)
         local characterId = characterEntityId(character)
-        if ownerSession ~= nil and ownerSession.active and ownerSession.savedLook ~= nil and characterId > 0 then
+        if ownerSession ~= nil and ownerSession.active and ownerSession.activePersistent and
+            ownerSession.savedLook ~= nil and characterId > 0 then
             local runtime = activeByCharacterId[characterId]
             if ownerSession == requestingSession or
                 tonumber(ownerSession.activeCharacterId) ~= characterId or runtime == nil or
@@ -1355,6 +1402,7 @@ local function clearActiveRuntime(session, shouldBroadcast)
     if session == nil then return nil end
     local characterId = tonumber(session.activeCharacterId)
     session.active = false
+    session.activePersistent = false
     session.activeCharacterId = nil
     if characterId ~= nil and characterId > 0 then
         local active = activeByCharacterId[characterId]
@@ -1375,10 +1423,10 @@ activateRuntime = function(session, character, look, restoring)
     end
     local previous = activeByCharacterId[characterId]
     if previous ~= nil and previous.session ~= session then
-        previous.session.active = false
-        previous.session.activeCharacterId = nil
+        return false
     end
     session.active = true
+    session.activePersistent = character == clientCharacter(session.client)
     session.activeCharacterId = characterId
     activeByCharacterId[characterId] = {
         session = session,
@@ -1411,10 +1459,16 @@ local function operationResultFor(session, operationId)
     return nil
 end
 
-local function rememberOperation(session, operationId, accepted, reason)
+local function rememberOperation(session, operationId, accepted, reason, command)
     local existing = operationResultFor(session, operationId)
     if existing ~= nil then return existing end
-    local result = { accepted = accepted == true, reason = reason, revision = session.revision }
+    local result = {
+        accepted = accepted == true,
+        reason = reason,
+        revision = session.revision,
+        kind = command ~= nil and command.kind or nil,
+        targetCharacterId = command ~= nil and command.targetCharacterId or nil
+    }
     local cache = session.operationCache
     cache.results[operationId] = result
     cache.count = cache.count + 1
@@ -1455,6 +1509,7 @@ local function commitSave(session, character, clientLook)
     nextRevision(session)
     session.savedLook = look
     session.active = false
+    session.activePersistent = false
     if not persistStableSessionOrRollback(session, previous) then
         local restored = restoreWardrobeItems(character, itemSnapshots)
         return false, restored and "persistence_failed" or "persistence_failed_equipment_rollback_failed"
@@ -1478,6 +1533,7 @@ local function commitApply(session, character, look)
     nextRevision(session)
     session.savedLook = cloneLook(look)
     session.active = true
+    session.activePersistent = character == clientCharacter(session.client)
     if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
     if not activateRuntime(session, character, look) then
         restoreCommitState(session, previous)
@@ -1536,6 +1592,7 @@ local function commitClear(session, deleteSaved)
     local previous = snapshotCommitState(session)
     nextRevision(session)
     session.active = false
+    session.activePersistent = false
     if deleteSaved then session.savedLook = nil end
     if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
     clearActiveRuntime(session, true)
@@ -1545,16 +1602,18 @@ end
 -- Decode and envelope validation stay separate so a request whose operation ID
 -- was readable can still receive a deterministic, correlated rejection ACK.
 -- Truly truncated packets fail before such a response is possible.
-local function parseV2Command(message)
+local function parseV2Command(message, targeted)
     local command = {
         version = tonumber(message.ReadUInt16()),
         clientSessionId = tostring(message.ReadString() or ""),
         operationId = tostring(message.ReadString() or ""),
         baseRevision = tonumber(message.ReadUInt32()),
         kind = tostring(message.ReadString() or ""):lower(),
-        hasLook = message.ReadBoolean() == true,
+        targeted = targeted == true,
         look = nil
     }
+    if command.targeted then command.targetCharacterId = tonumber(message.ReadUInt16()) end
+    command.hasLook = message.ReadBoolean() == true
     if command.hasLook then
         local ok, lookOrError, readReason = pcall(readCoreLook, message)
         if ok and lookOrError ~= nil then
@@ -1584,6 +1643,10 @@ local function validateV2Envelope(command)
         return false, "invalid_operation_id"
     end
     if command.baseRevision == nil or command.baseRevision < 0 then return false, "invalid_revision" end
+    if command.targeted and (command.targetCharacterId == nil or command.targetCharacterId <= 0 or
+        command.targetCharacterId > 65535 or command.targetCharacterId % 1 ~= 0) then
+        return false, "invalid_target"
+    end
     if validCommandKinds[command.kind] ~= true then return false, "unknown_command" end
     if command.parseError ~= nil then return false, "malformed_look" end
     local envelopeBytes = 16 + byteLength(command.clientSessionId) + byteLength(command.operationId) + byteLength(command.kind)
@@ -1596,9 +1659,13 @@ local function validateV2Envelope(command)
     return true
 end
 
-local function resendCurrentState(session)
+local function resendCurrentState(session, operation)
     if session.active and session.activeCharacterId ~= nil then
         sendV2State(session.client, session.revision, session.activeCharacterId, true, session.savedLook)
+    elseif operation ~= nil and tonumber(operation.targetCharacterId) ~= nil and
+        (operation.kind == "save" or operation.kind == "clear" or operation.kind == "forget") then
+        local look = operation.kind == "save" and session.savedLook or nil
+        sendV2State(session.client, session.revision, operation.targetCharacterId, false, look)
     else
         sendOwnInactiveState(session)
     end
@@ -1620,7 +1687,7 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     local written, writeReason = Core.writeServerHello(
         response,
         math.max(0, session.revision),
-        CAPABILITY_ATTACHMENT_VISIBILITY + CAPABILITY_MOVEMENT_ANIMATION_SOURCE
+        CAPABILITY_ATTACHMENT_VISIBILITY + CAPABILITY_MOVEMENT_ANIMATION_SOURCE + CAPABILITY_CREW_TARGETING
     )
     if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
     Networking.Send(response, client.Connection)
@@ -1628,7 +1695,7 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     sendOwnInactiveState(session)
 end)
 
-Networking.Receive(NET.V2_COMMAND, function(message, client)
+local function handleV2Command(message, client, targeted)
     local session = sessionFor(client)
     if session == nil then return end
     local wireBytes = messageLengthBytes(message)
@@ -1636,7 +1703,7 @@ Networking.Receive(NET.V2_COMMAND, function(message, client)
         warn("Rejected an oversized v2 command before decoding (" .. tostring(wireBytes) .. " bytes).")
         return
     end
-    local ok, command = pcall(parseV2Command, message)
+    local ok, command = pcall(parseV2Command, message, targeted)
     if not ok then
         warn("Rejected a truncated v2 command before its operation ID could be authenticated.")
         return
@@ -1653,7 +1720,7 @@ Networking.Receive(NET.V2_COMMAND, function(message, client)
     local duplicate = operationResultFor(session, command.operationId)
     if duplicate ~= nil then
         sendV2Ack(session, command.operationId, duplicate.accepted, duplicate.reason, duplicate.revision)
-        if duplicate.accepted then resendCurrentState(session) end
+        if duplicate.accepted then resendCurrentState(session, duplicate) end
         return
     end
     if command.baseRevision ~= session.revision then
@@ -1662,26 +1729,51 @@ Networking.Receive(NET.V2_COMMAND, function(message, client)
         return
     end
 
-    local character = clientCharacter(client)
+    local character, targetReason = clientCharacter(client), nil
+    if command.targeted then character, targetReason = resolveCrewTarget(client, command.targetCharacterId) end
     local accepted, reason = false, "character_unavailable"
+    if character == nil and targetReason ~= nil then reason = targetReason end
+    local runtime = character ~= nil and activeByCharacterId[characterEntityId(character)] or nil
+    if runtime ~= nil and runtime.session ~= session then
+        character = nil
+        reason = "target_in_use"
+    elseif command.targeted and session.active and
+        (command.kind == "clear" or command.kind == COMMAND_VISIBILITY or command.kind == COMMAND_ANIMATION) and
+        tonumber(session.activeCharacterId) ~= characterEntityId(character) then
+        character = nil
+        reason = "target_not_active"
+    end
     if command.kind == "save" then
         if character ~= nil then accepted, reason = commitSave(session, character, command.look) end
     elseif command.kind == "apply" then
-        local look = nil
-        if command.hasLook then look, reason = canonicalizeLook(command.look, true) else look = cloneLook(session.savedLook) end
+        local look, lookReason = nil, nil
+        if command.hasLook then look, lookReason = canonicalizeLook(command.look, true)
+        else look = cloneLook(session.savedLook) end
         if character ~= nil and look ~= nil then accepted, reason = commitApply(session, character, look)
-        elseif look == nil and reason == nil then reason = "look_unavailable" end
+        elseif character ~= nil and look == nil then reason = lookReason or "look_unavailable" end
     elseif command.kind == COMMAND_VISIBILITY then
-        accepted, reason = commitVisualPreference(session, command.look, COMMAND_VISIBILITY)
+        if character ~= nil or not command.targeted then
+            accepted, reason = commitVisualPreference(session, command.look, COMMAND_VISIBILITY)
+        end
     elseif command.kind == COMMAND_ANIMATION then
-        accepted, reason = commitVisualPreference(session, command.look, COMMAND_ANIMATION)
+        if character ~= nil or not command.targeted then
+            accepted, reason = commitVisualPreference(session, command.look, COMMAND_ANIMATION)
+        end
     elseif command.kind == "clear" then
-        accepted, reason = commitClear(session, false)
+        if character ~= nil or not command.targeted then accepted, reason = commitClear(session, false) end
     elseif command.kind == "forget" then
-        accepted, reason = commitClear(session, true)
+        if character ~= nil or not command.targeted then accepted, reason = commitClear(session, true) end
     end
-    local result = rememberOperation(session, command.operationId, accepted, reason)
+    local result = rememberOperation(session, command.operationId, accepted, reason, command)
     sendV2Ack(session, command.operationId, result.accepted, result.reason, result.revision)
+end
+
+Networking.Receive(NET.V2_COMMAND, function(message, client)
+    handleV2Command(message, client, false)
+end)
+
+Networking.Receive(NET.V2_TARGET_COMMAND, function(message, client)
+    handleV2Command(message, client, true)
 end)
 
 local function readLegacyApplyLook(message)
@@ -1773,7 +1865,10 @@ end)
 
 local function clearRoundRuntime()
     activeByCharacterId = {}
-    for _, session in pairs(sessionsByClient) do session.activeCharacterId = nil end
+    for _, session in pairs(sessionsByClient) do
+        session.activeCharacterId = nil
+        if session.activePersistent ~= true then session.active = false end
+    end
 end
 
 local function handleGameSessionChange()
@@ -1789,6 +1884,7 @@ local function handleGameSessionChange()
             warn("Revision exhausted while deactivating a session at a campaign/session boundary.")
         end
         session.active = false
+        session.activePersistent = false
         updatePersistentRecord(session)
     end
     persistLooks()
@@ -1797,6 +1893,11 @@ end
 
 local function reactivateSession(session)
     if session == nil or not session.active or session.savedLook == nil then return end
+    if session.activePersistent ~= true then
+        session.active = false
+        session.activeCharacterId = nil
+        return
+    end
     local character = clientCharacter(session.client)
     if character == nil or characterEntityId(character) <= 0 then return end
     activateRuntime(session, character, session.savedLook, true)
@@ -1807,7 +1908,7 @@ local function rebindCreatedCharacter(character)
     for _, client in ipairs(connectedClients()) do
         if clientCharacter(client) == character then
             local session = sessionFor(client)
-            if session ~= nil and session.active and session.savedLook ~= nil and
+            if session ~= nil and session.active and session.activePersistent and session.savedLook ~= nil and
                 tonumber(session.activeCharacterId) ~= characterEntityId(character) then
                 activateRuntime(session, character, session.savedLook, true)
             end
@@ -1837,7 +1938,7 @@ end)
 Hook.Add("client.disconnected", "barowardrobeswitcher.v2-disconnected", function(client)
     local session = sessionsByClient[client]
     if session == nil then return end
-    local wasActive = session.active == true
+    local wasActive = session.active == true and session.activePersistent == true
     clearActiveRuntime(session, true)
     -- Preserve the active intent for a stable account so reconnect/round start
     -- can assign the look to the new Character entity ID.

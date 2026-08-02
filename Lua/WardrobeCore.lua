@@ -16,6 +16,7 @@ Core.HELLO_EXTENSION_VERSION = 1
 Core.NET = {
     V2_HELLO = "barowardrobeswitcher.v2.hello",
     V2_COMMAND = "barowardrobeswitcher.v2.command",
+    V2_TARGET_COMMAND = "barowardrobeswitcher.v2.target-command",
     V2_STATE = "barowardrobeswitcher.v2.state",
     V2_ACK = "barowardrobeswitcher.v2.ack",
     V1_SAVE_REQUEST = "barowardrobeswitcher.save",
@@ -64,7 +65,8 @@ Core.ATTACHMENT_VISIBILITY = {
 
 Core.CAPABILITY = {
     AttachmentVisibility = 0x01,
-    MovementAnimationSource = 0x02
+    MovementAnimationSource = 0x02,
+    CrewTargeting = 0x04
 }
 
 Core.LIMITS = {
@@ -759,6 +761,14 @@ function Core.validateCommand(command)
     if operationId == nil then return nil, operationReason end
     local revision, revisionReason = normalizeRevision(command.baseRevision or 0, "baseRevision")
     if revision == nil then return nil, revisionReason end
+    local targetCharacterId = command.targetCharacterId
+    if targetCharacterId ~= nil then
+        targetCharacterId = tonumber(targetCharacterId)
+        if targetCharacterId == nil or targetCharacterId <= 0 or
+            targetCharacterId > 65535 or targetCharacterId % 1 ~= 0 then
+            return nil, "targetCharacterId must be a positive unsigned 16-bit integer"
+        end
+    end
 
     local look = nil
     if command.look ~= nil then
@@ -779,7 +789,8 @@ function Core.validateCommand(command)
         operationId = operationId,
         baseRevision = revision,
         kind = command.kind,
-        look = look
+        look = look,
+        targetCharacterId = targetCharacterId
     }
 end
 
@@ -809,6 +820,46 @@ function Core.readCommand(message)
         operationId = message.ReadString(),
         baseRevision = message.ReadUInt32(),
         kind = message.ReadString()
+    }
+    if message.ReadBoolean() then
+        local look, reason = Core.readLook(message)
+        if look == nil then return nil, reason end
+        command.look = look
+    end
+    return Core.validateCommand(command)
+end
+
+function Core.writeTargetCommand(message, command)
+    local valid, reason = Core.validateCommand(command)
+    if valid == nil then return false, reason end
+    if valid.targetCharacterId == nil then
+        return false, "targetCharacterId is required"
+    end
+    message.WriteUInt16(Core.PROTOCOL_VERSION)
+    message.WriteString(valid.clientSessionId)
+    message.WriteString(valid.operationId)
+    message.WriteUInt32(valid.baseRevision)
+    message.WriteString(valid.kind)
+    message.WriteUInt16(valid.targetCharacterId)
+    message.WriteBoolean(valid.look ~= nil)
+    if valid.look ~= nil then
+        return Core.writeLook(message, valid.look)
+    end
+    return true
+end
+
+function Core.readTargetCommand(message)
+    local version = message.ReadUInt16()
+    if version ~= Core.PROTOCOL_VERSION then
+        return nil, "unsupported protocol version " .. tostring(version)
+    end
+    local command = {
+        protocolVersion = version,
+        clientSessionId = message.ReadString(),
+        operationId = message.ReadString(),
+        baseRevision = message.ReadUInt32(),
+        kind = message.ReadString(),
+        targetCharacterId = message.ReadUInt16()
     }
     if message.ReadBoolean() then
         local look, reason = Core.readLook(message)

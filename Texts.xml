@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <infotexts language="English">
   <entityname.barowardrobeswitcher>Wardrobe(Beta)</entityname.barowardrobeswitcher>
-  <barowardrobeswitcher.notice.open_panel>Wardrobe control panel can be opened by pressing F8.</barowardrobeswitcher.notice.open_panel>
+  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>Wardrobe Panel Key</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayName>
+  <Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>Wardrobe</Wardrobe_x0028_beta_x0029_.PanelKey.DisplayCategory>
+  <Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>Enter a Microsoft.Xna.Framework.Input.Keys name, such as F7 or Insert. Invalid names use F8.</Wardrobe_x0028_beta_x0029_.PanelKey.Tooltip>
+  <barowardrobeswitcher.notice.open_panel>Wardrobe control panel can be opened by pressing {key}.</barowardrobeswitcher.notice.open_panel>
   <barowardrobeswitcher.panel.title>Wardrobe Switcher</barowardrobeswitcher.panel.title>
+  <barowardrobeswitcher.panel.main_page>Main</barowardrobeswitcher.panel.main_page>
+  <barowardrobeswitcher.panel.tools_page>Options &amp; Diagnostics</barowardrobeswitcher.panel.tools_page>
+  <barowardrobeswitcher.panel.target_character>Wardrobe target</barowardrobeswitcher.panel.target_character>
+  <barowardrobeswitcher.panel.multiplayer_shared_look>Multiplayer uses one saved look per player; this selects who the actions affect.</barowardrobeswitcher.panel.multiplayer_shared_look>
   <barowardrobeswitcher.panel.saved_look>Saved look</barowardrobeswitcher.panel.saved_look>
   <barowardrobeswitcher.panel.look>Look</barowardrobeswitcher.panel.look>
   <barowardrobeswitcher.panel.active>active</barowardrobeswitcher.panel.active>
@@ -19,7 +26,7 @@
   <barowardrobeswitcher.panel.debug_log_hint>Diagnostics are written to WardrobeClient.log without filling the game console.</barowardrobeswitcher.panel.debug_log_hint>
   <barowardrobeswitcher.panel.log_file>Wardrobe log</barowardrobeswitcher.panel.log_file>
   <barowardrobeswitcher.panel.saved_file>Saved-look file</barowardrobeswitcher.panel.saved_file>
-  <barowardrobeswitcher.panel.tutorial>1. Save: Wear the look, then choose “Save Current Outfit.”&#10;   Saved outfit items are unequipped.&#10;2. Apply: Equip your stat gear, then apply the saved look.&#10;3. “Clear” stops the look; “Forget” deletes its save.&#10;Press F8 to close this panel.</barowardrobeswitcher.panel.tutorial>
+  <barowardrobeswitcher.panel.tutorial>1. Save: Wear the look, then choose “Save Current Outfit.”&#10;   Saved outfit items are unequipped.&#10;2. Apply: Equip your stat gear, then apply the saved look.&#10;3. “Clear” stops the look; “Forget” deletes its save.&#10;Press {key} to close this panel.</barowardrobeswitcher.panel.tutorial>
   <barowardrobeswitcher.button.save>Save Current Outfit</barowardrobeswitcher.button.save>
   <barowardrobeswitcher.button.apply>Apply Saved Look</barowardrobeswitcher.button.apply>
   <barowardrobeswitcher.button.clear>Clear Look</barowardrobeswitcher.button.clear>
@@ -30,6 +37,7 @@
   <barowardrobeswitcher.button.hide_standard_hair>Hide Standard Hair</barowardrobeswitcher.button.hide_standard_hair>
   <barowardrobeswitcher.button.all_auto>All Auto</barowardrobeswitcher.button.all_auto>
   <barowardrobeswitcher.button.back>Back</barowardrobeswitcher.button.back>
+  <barowardrobeswitcher.button.next_page>Next Page</barowardrobeswitcher.button.next_page>
   <barowardrobeswitcher.button.enable_transfer>Enable Appearance Transfer</barowardrobeswitcher.button.enable_transfer>
   <barowardrobeswitcher.button.disable_transfer>Disable Appearance Transfer</barowardrobeswitcher.button.disable_transfer>
   <barowardrobeswitcher.button.diagnostics>Diagnostics</barowardrobeswitcher.button.diagnostics>
@@ -73,6 +81,7 @@
   <barowardrobeswitcher.status.restored_character>Saved look restored for this character.</barowardrobeswitcher.status.restored_character>
   <barowardrobeswitcher.status.apply_again>Saved look needs to be applied again.</barowardrobeswitcher.status.apply_again>
   <barowardrobeswitcher.status.character_changed>Controlled character changed. Save a new outfit for this character.</barowardrobeswitcher.status.character_changed>
+  <barowardrobeswitcher.status.target_unavailable>Selected crew member is no longer available.</barowardrobeswitcher.status.target_unavailable>
   <barowardrobeswitcher.status.profile_unavailable>memory only</barowardrobeswitcher.status.profile_unavailable>
   <barowardrobeswitcher.status.profile_collision>ambiguous identity; automatic restore disabled</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>Saved look cleared.</barowardrobeswitcher.status.saved_cleared>

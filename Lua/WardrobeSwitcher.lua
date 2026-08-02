@@ -17,6 +17,7 @@ local NET_LOOK_APPLY = NET.V1_LOOK_APPLY
 local NET_LOOK_CLEAR = NET.V1_LOOK_CLEAR
 local NET_V2_HELLO = NET.V2_HELLO
 local NET_V2_COMMAND = NET.V2_COMMAND
+local NET_V2_TARGET_COMMAND = NET.V2_TARGET_COMMAND
 local NET_V2_STATE = NET.V2_STATE
 local NET_V2_ACK = NET.V2_ACK
 local COMMAND_SAVE = Core.COMMAND.Save
@@ -29,6 +30,7 @@ local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
 local ATTACHMENT_VISIBILITY = Core.ATTACHMENT_VISIBILITY
 local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
 local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
+local CAPABILITY_CREW_TARGETING = Core.CAPABILITY.CrewTargeting
 
 if SERVER then return end
 
@@ -94,6 +96,7 @@ local statusKeys = {
     ["Saved look restored for this character."] = "status.restored_character",
     ["Saved look needs to be applied again."] = "status.apply_again",
     ["Controlled character changed. Save a new outfit for this character."] = "status.character_changed",
+    ["Selected crew member is no longer available."] = "status.target_unavailable",
     ["Saved look cleared."] = "status.saved_cleared"
 }
 
@@ -153,6 +156,8 @@ local overlayRoot = nil
 local attachmentPanelOpen = false
 local advancedPanelOpen = false
 local tutorialExpanded = true
+local selectedSinglePlayerCharacterKey = nil
+local sessionActiveCharacterId = nil
 local useFashionMovementAnimations = true
 local lastCharacter = nil
 local buildWindow
@@ -160,6 +165,26 @@ local buildAttachmentVisibilityWindow
 local toggleWindow
 local fullPanelOpen = false
 local Helpers = {}
+
+local function currentPanelKey()
+    local name = "F8"
+    local bridge = Helpers.ensureVisualOverride and Helpers.ensureVisualOverride() or nil
+    if bridge ~= nil then
+        local ok, configured = pcall(function() return bridge.GetPanelKeyName() end)
+        if ok and configured ~= nil and tostring(configured) ~= "" then
+            name = tostring(configured)
+        end
+    end
+    local key = Keys[name]
+    if key == nil then return "F8", Keys.F8 end
+    return name, key
+end
+
+local function panelKeyText(key, fallback)
+    local name = currentPanelKey()
+    return (tr(key, fallback):gsub("{key}", name))
+end
+
 local controlled
 local tryCaptureEmptyVisualOverride
 local unequipItem
@@ -720,6 +745,11 @@ function Helpers.singlePlayerCharacterEligible(character)
     if info == nil then return false end
     return Helpers.userDataMember(character, "IsHuman") == true and
         Helpers.userDataMember(character, "IsOnPlayerTeam") == true
+end
+
+local function serverSupportsCrewTargeting()
+    return protocolMode == "v3" and
+        math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_CREW_TARGETING) % 2 == 1
 end
 
 function Helpers.shouldPreserveSinglePlayerCrewRender(character)
@@ -1303,7 +1333,7 @@ end
 function Helpers.sendRoundStartNotice()
     if roundStartNoticeSent then return end
     roundStartNoticeSent = true
-    Helpers.addChatLine(tr("notice.open_panel"))
+    Helpers.addChatLine(panelKeyText("notice.open_panel"))
 end
 
 function Helpers.ensureVisualOverride()
@@ -1467,8 +1497,23 @@ function Helpers.visualOverrideDebugStatus(character)
     return nil
 end
 
+function Helpers.actualControlledCharacter()
+    return Character ~= nil and Character.Controlled or nil
+end
+
+function Helpers.multiplayerCrewTargetId(character)
+    if not Helpers.isMultiplayerClient() or not serverSupportsCrewTargeting() then return nil end
+    local actual = Helpers.actualControlledCharacter()
+    if character == nil or character == actual then return nil end
+    local id = Helpers.characterEntityId(character)
+    return id > 0 and id or nil
+end
+
 controlled = function()
-    return Character.Controlled
+    local actual = Helpers.actualControlledCharacter()
+    if not fullPanelOpen then return actual end
+    if Helpers.isMultiplayerClient() and not serverSupportsCrewTargeting() then return actual end
+    return Helpers.selectedSinglePlayerCharacter(actual)
 end
 
 function Helpers.isMultiplayerClient()
@@ -1940,6 +1985,23 @@ function Helpers.snapshot(character)
     return data
 end
 
+function Helpers.sameRuntimeItem(left, right)
+    if left == nil or right == nil then return false end
+    if left == right then return true end
+    local leftId = tonumber(Helpers.itemEntityId(left)) or 0
+    local rightId = tonumber(Helpers.itemEntityId(right)) or 0
+    return leftId > 0 and rightId > 0 and leftId == rightId
+end
+
+function Helpers.isManagedEquippedItem(character, item)
+    if character == nil or item == nil then return false end
+    local current = Helpers.snapshot(character)
+    for _, entry in ipairs(slots) do
+        if Helpers.sameRuntimeItem(current[entry.key], item) then return true end
+    end
+    return false
+end
+
 function Helpers.clearVisualOverride(character)
     if Helpers.ensureVisualOverride() == nil then return end
     pcall(function()
@@ -2127,6 +2189,14 @@ function Helpers.applyVisualOverrideToItem(character, item, carrier)
     return ok and result == true
 end
 
+function Helpers.removeVisualOverrideFromItem(character, item)
+    if Helpers.ensureVisualOverride() == nil or character == nil or item == nil then return false end
+    local ok, result = pcall(function()
+        return VisualOverride.RemoveFashionItemVisual(character, item)
+    end)
+    return ok and result == true
+end
+
 function Helpers.activateFashionVisual(character)
     if Helpers.ensureVisualOverride() == nil or character == nil then return false end
     local ok, result = pcall(function()
@@ -2188,6 +2258,10 @@ end
 
 function Helpers.sendLegacyCommand(command)
     if command == nil or Networking == nil then return false end
+    if command.targetCharacterId ~= nil then
+        Helpers.debugLog("Refused to downgrade a crew-targeted wardrobe command to v1.")
+        return false
+    end
     local ok, reason = pcall(function()
         local messageName = nil
         if command.kind == COMMAND_SAVE then
@@ -2261,14 +2335,17 @@ end
 function Helpers.writeAndSendV2Command(command, baseRevision)
     if Networking == nil or command == nil then return false end
     local ok, reason = pcall(function()
-        local message = Networking.Start(NET_V2_COMMAND)
-        if serverSupportsAttachmentVisibility() and serverSupportsMovementAnimationSource() then
-            local written, writeReason = Core.writeCommand(message, {
+        local targeted = command.targetCharacterId ~= nil
+        local message = Networking.Start(targeted and NET_V2_TARGET_COMMAND or NET_V2_COMMAND)
+        if targeted or (serverSupportsAttachmentVisibility() and serverSupportsMovementAnimationSource()) then
+            local writer = targeted and Core.writeTargetCommand or Core.writeCommand
+            local written, writeReason = writer(message, {
                 clientSessionId = clientSessionId,
                 operationId = command.operationId,
                 baseRevision = baseRevision,
                 kind = command.kind,
-                look = command.look
+                look = command.look,
+                targetCharacterId = command.targetCharacterId
             })
             if not written then error(writeReason) end
         else
@@ -2353,9 +2430,12 @@ end
 -- An accepted Apply is not complete until its authoritative state renders.
 -- Keep the existing idempotent retry alive so a lost state packet is resent
 -- and the normal command timeout can release the UI instead of leaving it busy.
-function Helpers.completeAcknowledgedApplyState(revision)
+function Helpers.completeAcknowledgedApplyState(revision, characterId)
     local command = inFlightV2Command
     if command == nil or command.kind ~= COMMAND_APPLY or command.awaitingState ~= true then return false end
+    if command.targetCharacterId ~= nil and tonumber(characterId) ~= tonumber(command.targetCharacterId) then
+        return false
+    end
     if tonumber(revision) == nil or tonumber(revision) < (tonumber(command.acknowledgedRevision) or 0) then
         return false
     end
@@ -2391,6 +2471,8 @@ function Helpers.selectV1Protocol(reason)
     if protocolMode == "v1" then return end
     protocolMode = "v1"
     serverCapabilities = 0
+    selectedSinglePlayerCharacterKey = nil
+    sessionActiveCharacterId = nil
     visibilitySyncPendingNegotiation = false
     movementAnimationSyncPendingNegotiation = false
     inFlightV2Command = nil
@@ -2401,6 +2483,7 @@ end
 function Helpers.selectV2Protocol(revision, capabilities)
     protocolMode = "v3"
     serverCapabilities = tonumber(capabilities) or 0
+    if not serverSupportsCrewTargeting() then selectedSinglePlayerCharacterKey = nil end
     local serverRevision = tonumber(revision) or 0
     dispatchReducer({ type = "RevisionObserved", revision = serverRevision })
     Helpers.debugLog("Negotiated wardrobe protocol " .. tostring(Core.PROTOCOL_VERSION) ..
@@ -2449,7 +2532,7 @@ end
 -- Commands may be queued before protocol negotiation completes. The queue owns
 -- v2 ordering/retries while reducerOwned prevents the same request from being
 -- introduced into the state machine twice.
-function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, reducerOwned, domainLookOverride)
+function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, reducerOwned, domainLookOverride, targetCharacterId)
     if not Helpers.isMultiplayerClient() or Networking == nil then return false end
     local domainLook = nil
     if kind == COMMAND_VISIBILITY or kind == COMMAND_ANIMATION then
@@ -2483,16 +2566,20 @@ function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, red
     if kind == COMMAND_APPLY and reducerOwned ~= true then
         local signature = Core.lookSignature(domainLook)
         for _, queued in ipairs(protocolCommandQueue) do
-            if queued.kind == COMMAND_APPLY and Core.lookSignature(queued.look) == signature then
+            if queued.kind == COMMAND_APPLY and queued.targetCharacterId == targetCharacterId and
+                Core.lookSignature(queued.look) == signature then
                 return true, protocolMode ~= "v1"
             end
         end
     elseif (kind == COMMAND_CLEAR or kind == COMMAND_FORGET) and reducerOwned ~= true then
         local queued = protocolCommandQueue[#protocolCommandQueue]
-        if queued ~= nil and queued.kind == kind then return true, protocolMode ~= "v1" end
+        if queued ~= nil and queued.kind == kind and queued.targetCharacterId == targetCharacterId then
+            return true, protocolMode ~= "v1"
+        end
     end
     protocolCommandQueue[#protocolCommandQueue + 1] = {
         kind = kind,
+        targetCharacterId = targetCharacterId,
         operationId = operationId or nextOperationId(),
         look = domainLook,
         legacyLook = copyLookData(lookData),
@@ -2797,9 +2884,18 @@ function Helpers.applyCapturedFashionToCharacterEquipment(
 
     local current = Helpers.snapshot(character)
     local equippedItems = {}
+    local seenEquippedItems = {}
+    local seenEquippedItemIds = {}
     for _, entry in ipairs(slots) do
         local equipped = current[entry.key]
-        if equipped ~= nil then
+        local equippedId = tonumber(Helpers.itemEntityId(equipped)) or 0
+        local alreadySeen = equipped ~= nil and (
+            seenEquippedItems[equipped] or
+            (equippedId > 0 and seenEquippedItemIds[equippedId])
+        )
+        if equipped ~= nil and not alreadySeen then
+            seenEquippedItems[equipped] = true
+            if equippedId > 0 then seenEquippedItemIds[equippedId] = true end
             equippedItems[#equippedItems + 1] = {
                 item = equipped,
                 priority = visualCarrierPriority[entry.key] or 99
@@ -3042,13 +3138,17 @@ end
 clientEffectAdapters.SendCommand = function(currentEffect)
     local lookData = legacyLookFromDomain(currentEffect.look)
     local captured = currentEffect.look ~= nil and currentEffect.look.captured == true
+    local targetCharacter = currentEffect.kind == COMMAND_SAVE and pendingSaveContext ~= nil and
+        pendingSaveContext.character or controlled()
+    local targetCharacterId = Helpers.multiplayerCrewTargetId(targetCharacter)
     local queued, awaitAck = Helpers.queueProtocolCommand(
         currentEffect.kind,
         lookData,
         captured,
         currentEffect.operationId,
         true,
-        currentEffect.look
+        currentEffect.look,
+        targetCharacterId
     )
     if not queued then
         pendingSaveContext = nil
@@ -3332,9 +3432,21 @@ end
 -- stable equipment signature changes.
 function Helpers.refreshActiveLookIfNeeded(character)
     if character == nil or not reducerState.active or not Helpers.hasSavedLook() then return end
+    if Helpers.isMultiplayerClient() and serverSupportsCrewTargeting() and
+        tonumber(sessionActiveCharacterId) ~= Helpers.characterEntityId(character) then
+        return
+    end
     local signature = Helpers.equipmentSignature(character)
     if lastEquipmentSignature == signature then return end
-    if Helpers.applyFashionToCurrentEquipment(true) then
+    local applied = Helpers.applyCapturedFashionToCharacterEquipment(
+        character,
+        currentLegacyLook(),
+        false,
+        currentAttachmentVisibility(),
+        currentMovementAnimationSource()
+    )
+    if applied then
+        lastEquipmentSignature = signature
         lastOperation = "Saved look refreshed for changed equipment."
     else
         lastEquipmentSignature = nil
@@ -3344,6 +3456,7 @@ end
 
 function Helpers.autoApplySavedLookIfNeeded(character)
     if character == nil or reducerState.active or not reducerState.autoApply or not Helpers.hasSavedLook() then return end
+    if Helpers.isMultiplayerClient() and character ~= Helpers.actualControlledCharacter() then return end
     if isSinglePlayerClient() and singlePlayerAutomaticRestoreAllowed ~= nil and
         not singlePlayerAutomaticRestoreAllowed(character) then
         return
@@ -3400,6 +3513,16 @@ end
 function Helpers.handleControlledCharacterChange(character)
     if character == nil then return end
     local nextCharacterKey = characterStateKey(character)
+    local actualCharacterKey = characterStateKey(Helpers.actualControlledCharacter())
+    if Helpers.isMultiplayerClient() and reducerCharacterKey ~= nil and
+        reducerCharacterKey == actualCharacterKey then
+        if character == lastCharacter then return end
+        lastCharacter = character
+        lastEquipmentSignature = nil
+        lastServerAutoApplySignature = nil
+        Helpers.pruneVisualOverrides()
+        return
+    end
     if character == lastCharacter and reducerCharacterKey == nextCharacterKey then return end
     local bootstrapState = nil
     if lastCharacter == nil and reducerHasUnboundLook and Core.hasLook(reducerState.look) then
@@ -3598,6 +3721,85 @@ function Helpers.singlePlayerCharactersSnapshot()
         end
     end)
     return characters
+end
+
+function Helpers.belongsToLocalWardrobeState(characterId)
+    characterId = tonumber(characterId) or 0
+    if characterId <= 0 then return false end
+    if characterId == Helpers.characterEntityId(Helpers.actualControlledCharacter()) then return true end
+    if inFlightV2Command ~= nil and
+        tonumber(inFlightV2Command.targetCharacterId) == characterId then return true end
+    return tonumber(sessionActiveCharacterId) == characterId
+end
+
+function Helpers.singlePlayerSelectableCharacters()
+    local actual = Helpers.actualControlledCharacter()
+    local targets = {}
+    local seen = {}
+    if actual ~= nil then
+        targets[#targets + 1] = actual
+        local actualKey = characterStateKey(actual)
+        if actualKey ~= nil then seen[actualKey] = true end
+    end
+    if not isSinglePlayerClient() and
+        not (Helpers.isMultiplayerClient() and serverSupportsCrewTargeting()) then
+        return targets
+    end
+
+    local bots = {}
+    for _, character in ipairs(Helpers.singlePlayerCharactersSnapshot()) do
+        local key = characterStateKey(character)
+        if character ~= actual and key ~= nil and not seen[key] and
+            Helpers.userDataMember(character, "IsHuman") == true and
+            Helpers.userDataMember(character, "IsOnPlayerTeam") == true and
+            Helpers.userDataMember(character, "IsBot") == true and
+            Helpers.userDataMember(character, "IsDead") ~= true and
+            Helpers.userDataMember(character, "Removed") ~= true then
+            seen[key] = true
+            bots[#bots + 1] = character
+        end
+    end
+    table.sort(bots, function(left, right)
+        local leftName = Helpers.singlePlayerCharacterDisplayName(left):lower()
+        local rightName = Helpers.singlePlayerCharacterDisplayName(right):lower()
+        if leftName == rightName then
+            return tostring(characterStateKey(left)) < tostring(characterStateKey(right))
+        end
+        return leftName < rightName
+    end)
+    for _, character in ipairs(bots) do targets[#targets + 1] = character end
+    return targets
+end
+
+function Helpers.selectedSinglePlayerCharacter(actual)
+    actual = actual or Helpers.actualControlledCharacter()
+    if selectedSinglePlayerCharacterKey == nil then return actual end
+    for _, character in ipairs(Helpers.singlePlayerSelectableCharacters()) do
+        if characterStateKey(character) == selectedSinglePlayerCharacterKey then return character end
+    end
+    selectedSinglePlayerCharacterKey = nil
+    lastOperation = "Selected crew member is no longer available."
+    windowNeedsRefresh = true
+    return actual
+end
+
+function Helpers.cycleSinglePlayerCharacter()
+    if reducerState ~= nil and reducerState.pendingKind ~= nil then return false end
+    if inFlightV2Command ~= nil or #protocolCommandQueue > 0 then return false end
+    local targets = Helpers.singlePlayerSelectableCharacters()
+    if #targets <= 1 then return false end
+    local current = controlled()
+    local currentIndex = 1
+    for index, character in ipairs(targets) do
+        if character == current then currentIndex = index break end
+    end
+    local selected = targets[currentIndex % #targets + 1]
+    if selected == Helpers.actualControlledCharacter() then
+        selectedSinglePlayerCharacterKey = nil
+    else
+        selectedSinglePlayerCharacterKey = characterStateKey(selected)
+    end
+    return true
 end
 
 function Helpers.scanSinglePlayerCrewForRestores()
@@ -3941,7 +4143,8 @@ function Helpers.handleNetworkLookApply(
         return false
     end
 
-    if character == controlled() and initialEquipGateActive and not Helpers.initialEquipGateReady(character) then
+    if character == Helpers.actualControlledCharacter() and
+        initialEquipGateActive and not Helpers.initialEquipGateReady(character) then
         return Helpers.deferRoundStartNetworkLook(
             character,
             networkLook,
@@ -3975,7 +4178,7 @@ function Helpers.handleNetworkLookApply(
         return applied
     end
 
-    if protocolRevision ~= nil and character == controlled() then
+    if protocolRevision ~= nil and Helpers.belongsToLocalWardrobeState(characterId) then
         local domainLook = protocolLook or domainLookFromLegacy(
             networkLook,
             true,
@@ -4000,13 +4203,15 @@ function Helpers.handleNetworkLookApply(
                 not applyDirectly() then
                 return retryAfterFailure()
             end
-            Helpers.completeAcknowledgedApplyState(protocolRevision)
+            sessionActiveCharacterId = characterId
+            Helpers.completeAcknowledgedApplyState(protocolRevision, characterId)
             return true
         end
         local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Active then
             Helpers.rememberNetworkLookApplied(character, networkLook, protocolLook)
-            Helpers.completeAcknowledgedApplyState(protocolRevision)
+            sessionActiveCharacterId = characterId
+            Helpers.completeAcknowledgedApplyState(protocolRevision, characterId)
             return true
         end
         return retryAfterFailure()
@@ -4111,7 +4316,7 @@ function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolL
         return true
     end
 
-    if protocolRevision ~= nil and character == controlled() then
+    if protocolRevision ~= nil and Helpers.belongsToLocalWardrobeState(characterId) then
         if protocolLook ~= nil then
             local canonicalLegacy = Core.toLegacyLook(protocolLook)
             if canonicalLegacy ~= nil then rememberLegacyLookMetadata(canonicalLegacy) end
@@ -4127,12 +4332,14 @@ function Helpers.handleNetworkLookClear(characterId, protocolRevision, protocolL
         if effectsContain(effects, "IgnoredDuplicateState") then
             local cleared = Helpers.tryClearVisualOverride(character)
             if not cleared then return retryAfterFailure() end
+            if tonumber(sessionActiveCharacterId) == tonumber(characterId) then sessionActiveCharacterId = nil end
             return finishClear()
         end
         local acceptedState = reducerState
         if acceptedState ~= nil and acceptedState.phase == Core.PHASE.Faulted then
             return retryAfterFailure()
         end
+        if tonumber(sessionActiveCharacterId) == tonumber(characterId) then sessionActiveCharacterId = nil end
         return finishClear()
     end
     if protocolRevision == nil and character == controlled() then
@@ -4274,9 +4481,8 @@ if Networking ~= nil then
 
             local characterId = tonumber(state.characterId) or 0
             local character = Helpers.findEntityById(characterId)
-            local controlledCharacter = controlled()
             local belongsToControlledCharacter =
-                character ~= nil and controlledCharacter ~= nil and character == controlledCharacter
+                character ~= nil and Helpers.belongsToLocalWardrobeState(characterId)
 
             -- A v2 server without the capability only understands the legacy
             -- boolean projection. Preserve this client's full four-layer policy
@@ -4419,6 +4625,7 @@ function Helpers.clearWindow()
     fullPanelOpen = false
     attachmentPanelOpen = false
     advancedPanelOpen = false
+    selectedSinglePlayerCharacterKey = nil
     diagnosticsVisible = false
     windowNeedsRefresh = false
     Helpers.resetOverlay()
@@ -4428,6 +4635,7 @@ function Helpers.requestWindowClose()
     fullPanelOpen = false
     attachmentPanelOpen = false
     advancedPanelOpen = false
+    selectedSinglePlayerCharacterKey = nil
     diagnosticsVisible = false
     -- GUI callbacks run while Barotrauma is traversing the update list. Leave
     -- the current root alive until the next think tick instead of removing it
@@ -4462,6 +4670,15 @@ function Helpers.addButton(parent, text, action, refresh, enabled)
     return button
 end
 
+function Helpers.createPanelList(frame)
+    local listBox = GUI.ListBox(
+        GUI.RectTransform(Vector2(0.94, 0.94), frame.RectTransform, GUI.Anchor.Center)
+    )
+    listBox.Spacing = 4
+    listBox.AutoHideScrollBar = true
+    return listBox.Content
+end
+
 function Helpers.clientViewModelSnapshot(character, overrideState)
     local reducerView = Core.clientViewModel(reducerState)
     local lookCopy = currentLegacyLook()
@@ -4491,6 +4708,7 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         canApply = overrideState.ready and reducerView.canApply == true,
         canClear = reducerView.canClear == true,
         canForget = reducerView.canForget == true,
+        busy = reducerView.busy == true,
         error = reducerView.error,
         lastOperation = tostring(lastOperation),
         diagnosticsVisible = diagnosticsVisible == true,
@@ -4594,9 +4812,9 @@ buildWindow = function()
         return
     end
 
-    local panelWidth = advancedPanelOpen and 0.48 or 0.44
-    local basePanelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.78) or 0.52
-    local panelHeight = math.min(0.98, basePanelHeight + 0.04 + (tutorialExpanded and 0.20 or 0))
+    local panelWidth = advancedPanelOpen and 0.40 or 0.38
+    local panelHeight = advancedPanelOpen and (diagnosticsVisible and 0.68 or 0.36) or
+        (tutorialExpanded and 0.58 or 0.46)
     local frame = GUI.Frame(
         GUI.RectTransform(Vector2(panelWidth, panelHeight), parent, GUI.Anchor.Center),
         "GUIFrame"
@@ -4604,52 +4822,51 @@ buildWindow = function()
     window = frame
     fullPanelOpen = true
 
-    local list = GUI.LayoutGroup(GUI.RectTransform(Vector2(0.94, 0.94), frame.RectTransform, GUI.Anchor.Center), false)
-    list.Stretch = true
-    list.RelativeSpacing = 0.03
+    local list = Helpers.createPanelList(frame)
 
     local character = controlled()
     local overrideState = Helpers.visualOverrideState()
     local view = Helpers.clientViewModelSnapshot(character, overrideState)
 
-    Helpers.addText(list, tr("panel.title"))
-    Helpers.addButton(
+    Helpers.addText(
         list,
-        tutorialExpanded and tr("button.hide_tutorial") or tr("button.show_tutorial"),
-        function() tutorialExpanded = not tutorialExpanded end
+        tr("panel.title") .. " - " ..
+            (advancedPanelOpen and tr("panel.tools_page") or tr("panel.main_page"))
     )
-    if tutorialExpanded then
-        Helpers.addText(list, tr("panel.tutorial"))
-    end
-    if view.singlePlayer then
-        Helpers.addText(list, tr("panel.profile") .. ": " .. tostring(view.profileLabel))
-    end
-    Helpers.addText(list, tr("panel.saved_look") .. ": " .. Helpers.savedLookSummary(view.look, view.captured) .. " | " .. tr("panel.look") .. ": " .. (view.active and tr("panel.active") or tr("panel.inactive")))
-    Helpers.addText(list, tr("panel.last") .. ": " .. localizedStatus(view.lastOperation))
+    if not advancedPanelOpen then
+        Helpers.addButton(
+            list,
+            tutorialExpanded and tr("button.hide_tutorial") or tr("button.show_tutorial"),
+            function() tutorialExpanded = not tutorialExpanded end
+        )
+        if tutorialExpanded then
+            Helpers.addText(list, panelKeyText("panel.tutorial"))
+        end
+        if view.singlePlayer or serverSupportsCrewTargeting() then
+            local targets = Helpers.singlePlayerSelectableCharacters()
+            Helpers.addButton(
+                list,
+                tr("panel.target_character") .. ": " ..
+                    Helpers.singlePlayerCharacterDisplayName(character),
+                function() Helpers.cycleSinglePlayerCharacter() end,
+                true,
+                #targets > 1 and not view.busy and inFlightV2Command == nil and #protocolCommandQueue == 0
+            )
+            if view.singlePlayer then
+                Helpers.addText(list, tr("panel.profile") .. ": " .. tostring(view.profileLabel))
+            else
+                Helpers.addText(list, tr("panel.multiplayer_shared_look"))
+            end
+        end
+        Helpers.addText(list, tr("panel.saved_look") .. ": " .. Helpers.savedLookSummary(view.look, view.captured) .. " | " .. tr("panel.look") .. ": " .. (view.active and tr("panel.active") or tr("panel.inactive")))
+        Helpers.addText(list, tr("panel.last") .. ": " .. localizedStatus(view.lastOperation))
 
-    Helpers.addButton(list, tr("button.save"), function() Helpers.saveFashionAndUnequip() end, true, view.canSave)
-    Helpers.addButton(list, tr("button.apply"), function() Helpers.applyFashionToCurrentEquipment(false) end, true, view.canApply)
-    Helpers.addButton(list, tr("button.clear"), function() Helpers.clearActiveLook() end, true, view.canClear)
-    Helpers.addButton(list, advancedPanelOpen and tr("button.less_options") or tr("button.more_options"), function()
-        advancedPanelOpen = not advancedPanelOpen
-        if not advancedPanelOpen then diagnosticsVisible = false end
-    end)
-
-    if advancedPanelOpen then
+        Helpers.addButton(list, tr("button.save"), function() Helpers.saveFashionAndUnequip() end, true, view.canSave)
+        Helpers.addButton(list, tr("button.apply"), function() Helpers.applyFashionToCurrentEquipment(false) end, true, view.canApply)
+        Helpers.addButton(list, tr("button.clear"), function() Helpers.clearActiveLook() end, true, view.canClear)
         Helpers.addButton(list, tr("button.attachment_layers"), function()
             attachmentPanelOpen = true
         end, true, view.canSetAttachmentVisibility)
-        Helpers.addButton(
-            list,
-            view.useFashionMovementAnimations and
-                tr("button.animation_fashion") or
-                tr("button.animation_equipment"),
-            function()
-                Helpers.updateMovementAnimationSource(not view.useFashionMovementAnimations)
-            end,
-            true,
-            overrideState.ready
-        )
         if view.singlePlayer then
             Helpers.addButton(
                 list,
@@ -4667,6 +4884,29 @@ buildWindow = function()
             )
         end
         Helpers.addButton(list, tr("button.forget"), function() Helpers.clearSavedLook() end, true, view.canForget)
+        Helpers.addButton(list, tr("button.next_page"), function()
+            advancedPanelOpen = true
+            diagnosticsVisible = false
+        end)
+    else
+        if view.singlePlayer or serverSupportsCrewTargeting() then
+            Helpers.addText(
+                list,
+                tr("panel.target_character") .. ": " ..
+                    Helpers.singlePlayerCharacterDisplayName(character)
+            )
+        end
+        Helpers.addButton(
+            list,
+            view.useFashionMovementAnimations and
+                tr("button.animation_fashion") or
+                tr("button.animation_equipment"),
+            function()
+                Helpers.updateMovementAnimationSource(not view.useFashionMovementAnimations)
+            end,
+            true,
+            overrideState.ready
+        )
         Helpers.addButton(list, view.diagnosticsVisible and tr("button.hide_diagnostics") or tr("button.diagnostics"), function()
             diagnosticsVisible = not diagnosticsVisible
         end)
@@ -4691,6 +4931,10 @@ buildWindow = function()
                 Helpers.addText(list, tr("panel.character") .. ": " .. debugStatus)
             end
         end
+        Helpers.addButton(list, tr("button.back"), function()
+            advancedPanelOpen = false
+            diagnosticsVisible = false
+        end)
     end
 
     Helpers.addButton(list, tr("button.close"), function()
@@ -4711,16 +4955,11 @@ buildAttachmentVisibilityWindow = function()
     end
 
     local frame = GUI.Frame(
-        GUI.RectTransform(Vector2(0.46, 0.68), parent, GUI.Anchor.Center),
+        GUI.RectTransform(Vector2(0.38, 0.56), parent, GUI.Anchor.Center),
         "GUIFrame"
     )
     window = frame
-    local list = GUI.LayoutGroup(
-        GUI.RectTransform(Vector2(0.92, 0.92), frame.RectTransform, GUI.Anchor.Center),
-        false
-    )
-    list.Stretch = true
-    list.RelativeSpacing = 0.035
+    local list = Helpers.createPanelList(frame)
 
     local character = controlled()
     local overrideState = Helpers.visualOverrideState()
@@ -4777,9 +5016,10 @@ toggleWindow = function()
     end
 end
 
-function Helpers.f8Hit()
+function Helpers.panelKeyHit()
+    local _, key = currentPanelKey()
     local ok, result = pcall(function()
-        return PlayerInput.KeyHit(Keys.F8)
+        return PlayerInput.KeyHit(key)
     end)
     return ok and result == true
 end
@@ -4816,6 +5056,7 @@ function Helpers.resetSessionTransportState()
     remoteRevisionByCharacterId = {}
     protocolMode = "probing"
     serverCapabilities = 0
+    sessionActiveCharacterId = nil
     visibilitySyncPendingNegotiation = false
     movementAnimationSyncPendingNegotiation = false
     protocolHelloSentAt = nil
@@ -4831,6 +5072,7 @@ end
 
 function Helpers.resetSavedLookForNewSession()
     Helpers.clearAllVisualOverrides()
+    selectedSinglePlayerCharacterKey = nil
     lastCharacter = nil
     windowNeedsRefresh = true
     legacyLookMetadata = {}
@@ -4948,7 +5190,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
     Helpers.processPendingNetworkMessages()
     Helpers.processProtocolNegotiation()
 
-    if Helpers.f8Hit() then
+    if Helpers.panelKeyHit() then
         toggleWindow()
     end
 
@@ -5010,6 +5252,11 @@ end)
 
 Hook.Add("item.equip", "barowardrobeswitcher.initial-equip", function(item, character)
     Helpers.noteSinglePlayerEquipmentChange(character)
+    if character ~= controlled() and Helpers.isManagedEquippedItem(character, item) then
+        -- Remote observers and uncontrolled crew refresh suppression locally;
+        -- the saved look itself did not change and needs no server Apply.
+        Helpers.applyVisualOverrideToItem(character, item, false)
+    end
     if not initialEquipGateActive or character == nil then return end
     local controlledCharacter = controlled()
     if controlledCharacter == nil or character ~= controlledCharacter then return end
@@ -5020,6 +5267,7 @@ end)
 
 Hook.Add("item.unequip", "barowardrobeswitcher.profile-equip", function(item, character)
     Helpers.noteSinglePlayerEquipmentChange(character)
+    Helpers.removeVisualOverrideFromItem(character, item)
 end)
 
 Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", function(character)
@@ -5040,7 +5288,15 @@ Hook.Add("character.created", "barowardrobeswitcher.profile-character-created", 
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
-    local preservedForNextScene = Helpers.preserveSceneTransitionLookIntent()
+    local actualId = Helpers.characterEntityId(Helpers.actualControlledCharacter())
+    local crewTargetWasActive = Helpers.isMultiplayerClient() and
+        tonumber(sessionActiveCharacterId) ~= nil and tonumber(sessionActiveCharacterId) ~= actualId
+    local preservedForNextScene = false
+    if crewTargetWasActive then
+        dispatchReducer({ type = "Deactivate" })
+    else
+        preservedForNextScene = Helpers.preserveSceneTransitionLookIntent()
+    end
     if lastCharacter ~= nil then
         saveCharacterState(lastCharacter)
     end
@@ -5065,6 +5321,10 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     suppressedNetworkAppliesByCharacterKey = {}
     remoteRevisionByCharacterId = {}
     fullPanelOpen = false
+    attachmentPanelOpen = false
+    advancedPanelOpen = false
+    selectedSinglePlayerCharacterKey = nil
+    sessionActiveCharacterId = nil
     Helpers.resetOverlay()
     slotResults = {}
     lastNetworkApplyDiagnostics = {}
@@ -5081,4 +5341,4 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     end
 end)
 
-Helpers.log("Loaded. Press F8 to open the wardrobe panel.")
+Helpers.log("Loaded. Press " .. currentPanelKey() .. " to open the wardrobe panel.")
