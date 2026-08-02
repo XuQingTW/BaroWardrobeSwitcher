@@ -105,8 +105,8 @@ namespace BaroWardrobeSwitcher
 
     public static partial class WardrobePersistence
     {
-        public const string Version = "0.5.3";
-        private const int PersistenceVersion = 4;
+        public const string Version = "0.5.10";
+        private const int PersistenceVersion = 5;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
         private const string VisibilityAuto = "auto";
@@ -347,6 +347,24 @@ namespace BaroWardrobeSwitcher
                 ValidateDocument(current);
                 return current;
             }
+            if (version == 4)
+            {
+                LegacyClientLookV4Document legacy =
+                    JsonSerializer.Deserialize<LegacyClientLookV4Document>(json, JsonOptions);
+                ClientLookDocument migratedDocument = new ClientLookDocument
+                {
+                    Version = PersistenceVersion,
+                    Captured = legacy.Captured,
+                    UseFashionMovementAnimations = legacy.UseFashionMovementAnimations,
+                    UseFashionFootstepSounds = false,
+                    AttachmentVisibility = legacy.AttachmentVisibility,
+                    Slots = legacy.Slots,
+                    Colors = legacy.Colors
+                };
+                ValidateDocument(migratedDocument);
+                migratedFromVersion = 4;
+                return migratedDocument;
+            }
             if (version == 3)
             {
                 LegacyClientLookV3Document legacy =
@@ -444,6 +462,8 @@ namespace BaroWardrobeSwitcher
                 Captured = GetBoolean(parts, "captured"),
                 UseFashionMovementAnimations =
                     GetBooleanOrDefault(parts, "fashionMovement", defaultValue: true),
+                UseFashionFootstepSounds =
+                    GetBooleanOrDefault(parts, "fashionFootstep", defaultValue: false),
                 AttachmentVisibility = ParseAttachmentVisibility(parts),
                 Slots = ParseSlots(parts),
                 Colors = ParseColors(parts)
@@ -463,6 +483,8 @@ namespace BaroWardrobeSwitcher
                 "hidehair=" + LegacyHideHair(document.AttachmentVisibility).ToString().ToLowerInvariant(),
                 "fashionMovement=" +
                     document.UseFashionMovementAnimations.ToString().ToLowerInvariant(),
+                "fashionFootstep=" +
+                    document.UseFashionFootstepSounds.ToString().ToLowerInvariant(),
                 "visibilityHair=" + document.AttachmentVisibility.Hair,
                 "visibilityBeard=" + document.AttachmentVisibility.Beard,
                 "visibilityMoustache=" + document.AttachmentVisibility.Moustache,
@@ -480,7 +502,7 @@ namespace BaroWardrobeSwitcher
             {
                 if (!slots.TryGetValue(slotKey, out string identifier) || string.IsNullOrWhiteSpace(identifier)) { continue; }
                 // Display names and runtime item ids are intentionally not persisted in
-                // schema v4. The Lua facade still receives the legacy comma separator.
+                // schema v5. The Lua facade still receives the legacy comma separator.
                 parts.Add(slotKey + "=" + Escape(identifier) + ",");
             }
         }
@@ -982,6 +1004,8 @@ namespace BaroWardrobeSwitcher
             public bool Captured { get; set; }
             [JsonPropertyName("useFashionMovementAnimations")]
             public bool UseFashionMovementAnimations { get; set; } = true;
+            [JsonPropertyName("useFashionFootstepSounds")]
+            public bool UseFashionFootstepSounds { get; set; }
             [JsonRequired]
             [JsonPropertyName("attachmentVisibility")]
             public AttachmentVisibilityDocument AttachmentVisibility { get; set; }
@@ -1008,6 +1032,27 @@ namespace BaroWardrobeSwitcher
             [JsonRequired]
             [JsonPropertyName("FaceAttachment")]
             public string FaceAttachment { get; set; }
+        }
+
+        private sealed class LegacyClientLookV4Document
+        {
+            [JsonRequired]
+            [JsonPropertyName("schemaVersion")]
+            public int Version { get; set; }
+            [JsonRequired]
+            [JsonPropertyName("captured")]
+            public bool Captured { get; set; }
+            [JsonPropertyName("useFashionMovementAnimations")]
+            public bool UseFashionMovementAnimations { get; set; } = true;
+            [JsonRequired]
+            [JsonPropertyName("attachmentVisibility")]
+            public AttachmentVisibilityDocument AttachmentVisibility { get; set; }
+            [JsonRequired]
+            [JsonPropertyName("slots")]
+            public Dictionary<string, string> Slots { get; set; }
+            [JsonRequired]
+            [JsonPropertyName("colors")]
+            public Dictionary<string, uint?> Colors { get; set; }
         }
 
         private sealed class LegacyClientLookV2Document
@@ -1046,7 +1091,7 @@ namespace BaroWardrobeSwitcher
     public static class VisualOverride
     {
 
-        public const string Version = "0.5.3";
+        public const string Version = "0.5.10";
         private const string DefaultPanelKeyName = "F8";
         private static ISettingBase<string> panelKeySetting;
 
@@ -1083,6 +1128,8 @@ namespace BaroWardrobeSwitcher
             new[] { typeof(Entity), typeof(Hull), typeof(Vector2) });
         private static readonly MethodInfo ItemComponentPlaySoundMethod =
             AccessTools.Method(typeof(ItemComponent), "PlaySound", new[] { typeof(ActionType), typeof(Character) });
+        private static readonly MethodInfo PlayImpactSoundMethod =
+            AccessTools.Method(typeof(Ragdoll), "PlayImpactSound", new[] { typeof(Limb) });
         private static readonly FieldInfo AnimationsToTriggerField =
             AccessTools.Field(typeof(StatusEffect), "animationsToTrigger");
         private static readonly FieldInfo SoundsField =
@@ -1146,6 +1193,7 @@ namespace BaroWardrobeSwitcher
             PatchStates["AnimController.TryLoadTemporaryAnimation"] = new PatchState(required: false);
             PatchStates["StatusEffect.PlaySound"] = new PatchState(required: false);
             PatchStates["ItemComponent.PlaySound"] = new PatchState(required: false);
+            PatchStates["Ragdoll.PlayImpactSound"] = new PatchState(required: false);
         }
 
         public static void InstallPatches(Harmony harmony)
@@ -1196,6 +1244,13 @@ namespace BaroWardrobeSwitcher
                 ItemComponentPlaySoundMethod,
                 prefix: AccessTools.Method(typeof(ItemComponentPlaySoundPatch), "Prefix"),
                 required: false);
+            PatchTarget(
+                harmony,
+                "Ragdoll.PlayImpactSound",
+                PlayImpactSoundMethod,
+                prefix: AccessTools.Method(typeof(RagdollPlayImpactSoundPatch), "Prefix"),
+                finalizer: AccessTools.Method(typeof(RagdollPlayImpactSoundPatch), "Finalizer"),
+                required: false);
         }
 
         public static bool IsReady()
@@ -1230,6 +1285,10 @@ namespace BaroWardrobeSwitcher
                     return PatchApplied("ItemComponent.PlaySound") &&
                            ItemComponentPlaySoundMethod != null &&
                            ComponentSoundsField != null;
+                case "footstepsound":
+                case "footstep-sound":
+                    return PatchApplied("Ragdoll.PlayImpactSound") &&
+                           PlayImpactSoundMethod != null;
                 default:
                     return false;
             }
@@ -1250,7 +1309,8 @@ namespace BaroWardrobeSwitcher
             string capabilities = "capabilities(renderer=" + HasCapability("renderer") +
                                   ",animation=" + HasCapability("animation") +
                                   ",statusSound=" + HasCapability("statusSound") +
-                                  ",itemSound=" + HasCapability("itemSound") + ")";
+                                  ",itemSound=" + HasCapability("itemSound") +
+                                  ",footstepSound=" + HasCapability("footstepSound") + ")";
 
             if (missingRequired.Count == 0)
             {
@@ -1342,6 +1402,7 @@ namespace BaroWardrobeSwitcher
                    ", forceShowAttachments=0x" + (session?.ForceShowAttachmentMask ?? 0).ToString("X2") +
                    ", sprites=" + spriteCount +
                    ", animations=" + animationCount +
+                   ", fashionFootsteps=" + (session?.UseFashionFootstepSounds ?? false) +
                    ", sounds=" + soundCount +
                    ", itemSounds=" + componentSoundCount +
                    ", suppressedSounds=" + suppressedSoundCount +
@@ -1782,6 +1843,19 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
+        public static bool SetUseFashionFootstepSounds(Character character, bool enabled)
+        {
+            if (character == null ||
+                !RenderSessions.TryGetValue(character, out RenderSession session) ||
+                (enabled && !HasCapability("footstepSound")))
+            {
+                return false;
+            }
+
+            session.UseFashionFootstepSounds = enabled;
+            return true;
+        }
+
         // Compatibility wrapper for v0.5.1 Lua and third-party integrations.
         public static bool SetHideHair(Character character, bool hideHair)
         {
@@ -2196,6 +2270,52 @@ namespace BaroWardrobeSwitcher
             // Harmony finalizers suppress an exception only when they return null. The
             // original draw exception always wins and is returned by reference unchanged;
             // a cleanup failure is propagated only when there was no draw failure.
+            return exception ?? cleanupException;
+        }
+
+        internal static FootstepSoundTransaction BeginFootstepSound(Limb limb)
+        {
+            if (limb?.character == null ||
+                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
+                !session.IsActive ||
+                !session.IsValid ||
+                !session.UseFashionFootstepSounds ||
+                !HasCapability("footstepSound"))
+            {
+                return null;
+            }
+
+            FootstepSoundTransaction transaction = new FootstepSoundTransaction(limb);
+            try
+            {
+                transaction.Begin(session);
+                return transaction;
+            }
+            catch (Exception ex)
+            {
+                LogSoundError($"Failed to select fashion footstep sounds: {ex.GetType().Name}: {ex.Message}");
+                try { transaction.Cleanup(); }
+                catch (Exception cleanupException)
+                {
+                    LogSoundError(
+                        "Fashion footstep selection failed and cleanup also failed: " +
+                        cleanupException.GetType().Name + ": " + cleanupException.Message);
+                }
+                return null;
+            }
+        }
+
+        internal static Exception EndFootstepSound(
+            FootstepSoundTransaction transaction,
+            Exception exception = null)
+        {
+            Exception cleanupException = null;
+            try { transaction?.Cleanup(); }
+            catch (Exception ex)
+            {
+                cleanupException = ex;
+                LogSoundError($"Failed to restore equipment footstep sounds: {ex.GetType().Name}: {ex.Message}");
+            }
             return exception ?? cleanupException;
         }
 
@@ -3368,6 +3488,61 @@ namespace BaroWardrobeSwitcher
                         descriptor.ResolvedSpritePath));
         }
 
+        internal sealed class FootstepSoundTransaction
+        {
+            private readonly Limb limb;
+            private List<WearableSprite> originalOrder;
+            private bool cleaned;
+
+            public FootstepSoundTransaction(Limb limb)
+            {
+                this.limb = limb;
+            }
+
+            public void Begin(RenderSession session)
+            {
+                if (session == null) { throw new ArgumentNullException(nameof(session)); }
+                List<WearableSprite> wearingItems = limb?.WearingItems;
+                if (wearingItems == null) { return; }
+
+                originalOrder = new List<WearableSprite>(wearingItems);
+                for (int index = wearingItems.Count - 1; index >= 0; index--)
+                {
+                    if (IsEquipmentSprite(wearingItems[index]))
+                    {
+                        wearingItems.RemoveAt(index);
+                    }
+                }
+
+                foreach (FashionSpriteDescriptor descriptor in session.Descriptors)
+                {
+                    if (descriptor == null)
+                    {
+                        throw new InvalidOperationException("fashion footstep descriptor is missing");
+                    }
+                    if (!descriptor.IsValid(out string error))
+                    {
+                        throw new InvalidOperationException("invalid fashion footstep descriptor: " + error);
+                    }
+                    WearableSprite sprite = descriptor.Sprite;
+                    if (sprite.Limb == limb.type && !wearingItems.Contains(sprite))
+                    {
+                        wearingItems.Add(sprite);
+                    }
+                }
+            }
+
+            public void Cleanup()
+            {
+                if (cleaned) { return; }
+                cleaned = true;
+                if (originalOrder == null || limb?.WearingItems == null) { return; }
+                limb.WearingItems.Clear();
+                limb.WearingItems.AddRange(originalOrder);
+                originalOrder.Clear();
+            }
+        }
+
         internal sealed class LimbRenderTransaction
         {
             private readonly Limb limb;
@@ -3660,6 +3835,21 @@ namespace BaroWardrobeSwitcher
         private static bool Prefix(ItemComponent __instance, ActionType type, Character user)
         {
             return VisualOverride.ShouldPlayOriginalItemComponentSound(__instance, type, user);
+        }
+    }
+
+    internal static class RagdollPlayImpactSoundPatch
+    {
+        private static void Prefix(Limb __0, out VisualOverride.FootstepSoundTransaction __state)
+        {
+            __state = VisualOverride.BeginFootstepSound(__0);
+        }
+
+        private static Exception Finalizer(
+            Exception __exception,
+            VisualOverride.FootstepSoundTransaction __state)
+        {
+            return VisualOverride.EndFootstepSound(__state, __exception);
         }
     }
 }

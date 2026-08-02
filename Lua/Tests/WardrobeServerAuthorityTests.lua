@@ -32,47 +32,32 @@ InvSlotType = {
 }
 local connectedClients = {}
 local memoryFiles = {}
-local failReplace = false
-local failOverwriteMove = false
+local failPrimaryMove = false
 local storageRoot = "/local/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
 local MemoryFile = {
     Exists = function(path) return memoryFiles[tostring(path)] ~= nil end,
-    ReadAllText = function(path)
+    Read = function(path)
         local value = memoryFiles[tostring(path)]
         if value == nil then error("file not found") end
         return value
     end,
-    WriteAllText = function(path, value) memoryFiles[tostring(path)] = tostring(value) end,
-    AppendAllText = function(path, value)
-        path = tostring(path)
-        memoryFiles[path] = tostring(memoryFiles[path] or "") .. tostring(value)
-    end,
+    Write = function(path, value) memoryFiles[tostring(path)] = tostring(value) end,
+    CreateDirectory = function() return true end,
     Delete = function(path) memoryFiles[tostring(path)] = nil end,
-    Copy = function(source, destination, overwrite)
-        source, destination = tostring(source), tostring(destination)
+    Move = function(...)
+        local args = { ... }
+        if #args ~= 2 then error("native File.Move accepts exactly two arguments") end
+        local source, destination = tostring(args[1]), tostring(args[2])
         if memoryFiles[source] == nil then error("source missing") end
-        if memoryFiles[destination] ~= nil and overwrite ~= true then error("destination exists") end
-        memoryFiles[destination] = memoryFiles[source]
-    end,
-    Move = function(source, destination, overwrite)
-        source, destination = tostring(source), tostring(destination)
-        if memoryFiles[source] == nil then error("source missing") end
-        if memoryFiles[destination] ~= nil then
-            if overwrite ~= true then error("destination exists") end
-            if failOverwriteMove then error("synthetic overwrite failure") end
+        if failPrimaryMove and source:sub(-4) == ".tmp" and
+            destination == storageRoot .. "/ServerLooks.json" then
+            error("synthetic primary move failure")
         end
-        memoryFiles[destination] = memoryFiles[source]
-        memoryFiles[source] = nil
-    end,
-    Replace = function(source, destination, backup)
-        source, destination, backup = tostring(source), tostring(destination), tostring(backup)
-        if failReplace then error("synthetic replace failure") end
-        if memoryFiles[source] == nil or memoryFiles[destination] == nil then error("replace input missing") end
-        memoryFiles[backup] = memoryFiles[destination]
         memoryFiles[destination] = memoryFiles[source]
         memoryFiles[source] = nil
     end
 }
+File = MemoryFile
 local fakeWearableElement = {
     GetAttributeString = function(name, defaultValue)
         if tostring(name):lower() == "slots" then return "Head" end
@@ -94,7 +79,14 @@ local gameSession = {
     DataPath = gameSessionDataPath,
     GameMode = { Preset = { Identifier = "sandbox" } }
 }
+Game = {
+    SaveFolder = "/local/Daedalic Entertainment GmbH/Barotrauma"
+}
+local requestedSystemStatic = false
 LuaUserData = {
+    RegisterType = function(name)
+        if tostring(name):find("^System%.") then error("system type access is unavailable") end
+    end,
     CreateStatic = function(name)
         if name == "Barotrauma.ItemPrefab" then
             return { Prefabs = { helmet = fakeHelmetPrefab } }
@@ -105,13 +97,10 @@ LuaUserData = {
         if name == "Barotrauma.GameMain" then
             return { GameSession = gameSession }
         end
-        if name == "System.Environment" then
-            return { GetFolderPath = function() return "/local" end }
+        if name:find("^System%.") then
+            requestedSystemStatic = true
+            error("system static userdata is unavailable")
         end
-        if name == "System.IO.Directory" then
-            return { CreateDirectory = function() return true end }
-        end
-        if name == "System.IO.File" then return MemoryFile end
         return nil
     end
 }
@@ -135,6 +124,8 @@ Hook = {
 }
 
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+assert(not requestedSystemStatic,
+    "server persistence must use LuaCs native File instead of System.IO userdata")
 local serverLogPath = storageRoot .. "/WardrobeServer.log"
 assert(memoryFiles[serverLogPath] ~= nil and
        memoryFiles[serverLogPath]:find("Server authority", 1, true) ~= nil,
@@ -153,8 +144,9 @@ Networking.handlers[Core.NET.V2_HELLO](hello, client)
 local serverHello = assert(Core.readServerHello(Networking.sent[#Networking.sent].message))
 assert(serverHello.revision == 0)
 assert(serverHello.capabilities == Core.CAPABILITY.AttachmentVisibility +
-    Core.CAPABILITY.MovementAnimationSource + Core.CAPABILITY.CrewTargeting,
-    "server did not advertise multiplayer crew targeting")
+    Core.CAPABILITY.MovementAnimationSource + Core.CAPABILITY.CrewTargeting +
+    Core.CAPABILITY.FootstepSoundSource,
+    "server did not advertise all authoritative appearance preferences")
 
 local function sendCommand(command, targetClient)
     targetClient = targetClient or client
@@ -542,8 +534,8 @@ local visibilityServerHello =
     assert(Core.readServerHello(lastSentMessage(Core.NET.V2_HELLO, visibilityClient.Connection)))
 assert(visibilityServerHello.capabilities ==
         Core.CAPABILITY.AttachmentVisibility + Core.CAPABILITY.MovementAnimationSource +
-        Core.CAPABILITY.CrewTargeting,
-    "new server hello must advertise visibility, movement-animation, and crew targeting")
+        Core.CAPABILITY.CrewTargeting + Core.CAPABILITY.FootstepSoundSource,
+    "new server hello must advertise visibility, movement, crew targeting, and footsteps")
 
 local visibilityApply = sendCommand({
     clientSessionId = "visibility-session",
@@ -603,17 +595,43 @@ assert(activeAnimationState.active and
        activeAnimationState.look.useFashionMovementAnimations == false,
     "animation command must retain authoritative slots/visibility and broadcast its value")
 
+local footstepAck = sendCommand({
+    clientSessionId = "visibility-session",
+    operationId = "footstep-active-update",
+    baseRevision = 3,
+    kind = Core.COMMAND.Footstep,
+    -- Client-supplied equipment and other appearance preferences are never authoritative here.
+    look = assert(Core.newLook(
+        true,
+        false,
+        { Head = "not-a-real-prefab" },
+        Core.attachmentVisibilityFromLegacy(false),
+        nil,
+        true,
+        true
+    ))
+}, visibilityClient)
+assert(footstepAck.accepted and footstepAck.revision == 4)
+local activeFootstepState = assert(Core.readState(
+    lastSentMessage(Core.NET.V2_STATE, visibilityClient.Connection)))
+assert(activeFootstepState.active and
+       activeFootstepState.look.slots.Head == "helmet" and
+       activeFootstepState.look.attachmentVisibility.Hair == "show" and
+       activeFootstepState.look.useFashionMovementAnimations == false and
+       activeFootstepState.look.useFashionFootstepSounds == true,
+    "footstep command must merge only its authoritative sound-source value")
+
 local visibilityClear = sendCommand({
     clientSessionId = "visibility-session",
     operationId = "visibility-clear",
-    baseRevision = 3,
+    baseRevision = 4,
     kind = Core.COMMAND.Clear
 }, visibilityClient)
-assert(visibilityClear.accepted and visibilityClear.revision == 4)
+assert(visibilityClear.accepted and visibilityClear.revision == 5)
 local inactiveVisibilityAck = sendCommand({
     clientSessionId = "visibility-session",
     operationId = "visibility-inactive-update",
-    baseRevision = 4,
+    baseRevision = 5,
     kind = Core.COMMAND.Visibility,
     look = assert(Core.newLook(
         true,
@@ -622,20 +640,21 @@ local inactiveVisibilityAck = sendCommand({
         Core.attachmentVisibilityFromLegacy(false)
     ))
 }, visibilityClient)
-assert(inactiveVisibilityAck.accepted and inactiveVisibilityAck.revision == 5)
+assert(inactiveVisibilityAck.accepted and inactiveVisibilityAck.revision == 6)
 local inactiveVisibilityState = assert(Core.readState(
     lastSentMessage(Core.NET.V2_STATE, visibilityClient.Connection)))
 assert(not inactiveVisibilityState.active and
        inactiveVisibilityState.look.slots.Head == "helmet" and
        inactiveVisibilityState.look.attachmentVisibility.Hair == "auto" and
-       inactiveVisibilityState.look.useFashionMovementAnimations == false,
-    "inactive visibility command must preserve animation source in the authoritative look")
+       inactiveVisibilityState.look.useFashionMovementAnimations == false and
+       inactiveVisibilityState.look.useFashionFootstepSounds == true,
+    "inactive visibility command must preserve movement and footstep sources")
 
 local overlappingVisibility = newBuffer()
 overlappingVisibility.WriteUInt16(Core.PROTOCOL_VERSION)
     overlappingVisibility.WriteString("visibility-session")
 overlappingVisibility.WriteString("visibility-overlap")
-    overlappingVisibility.WriteUInt32(5)
+    overlappingVisibility.WriteUInt32(6)
 overlappingVisibility.WriteString(Core.COMMAND.Visibility)
 overlappingVisibility.WriteBoolean(true)
 overlappingVisibility.WriteUInt16(Core.LOOK_SCHEMA_VERSION)
@@ -647,12 +666,13 @@ overlappingVisibility.WriteByte(Core.LOOK_EXTENSION_VERSION)
     overlappingVisibility.WriteByte(0x01)
     overlappingVisibility.WriteByte(0x01)
     overlappingVisibility.WriteByte(1)
+    overlappingVisibility.WriteByte(0)
 Networking.handlers[Core.NET.V2_COMMAND](overlappingVisibility, visibilityClient)
 local overlappingVisibilityAck =
     assert(Core.readAck(Networking.sent[#Networking.sent].message))
 assert(not overlappingVisibilityAck.accepted and
        overlappingVisibilityAck.reason == "malformed_look" and
-       overlappingVisibilityAck.revision == 5,
+       overlappingVisibilityAck.revision == 6,
     "overlapping visibility masks must be rejected without changing revision")
 
 local noLookClient = {
@@ -779,7 +799,11 @@ local stableItem = {
     Prefab = fakeHelmetPrefab,
     SpriteColor = { PackedValue = authoritativeColor }
 }
-stableItem.Unequip = function() stableSlots[InvSlotType.Head] = nil end
+local stableUnequipCalls = 0
+stableItem.Unequip = function()
+    stableUnequipCalls = stableUnequipCalls + 1
+    stableSlots[InvSlotType.Head] = nil
+end
 stableSlots[InvSlotType.Head] = stableItem
 stableClient.Character.Inventory = {
     GetItemInLimbSlot = function(slot) return stableSlots[slot] end,
@@ -789,6 +813,21 @@ connectedClients[3] = stableClient
 local stableHello = newBuffer()
 assert(Core.writeClientHello(stableHello, "stable-session"))
 Networking.handlers[Core.NET.V2_HELLO](stableHello, stableClient)
+
+local serverJsonPath = storageRoot .. "/ServerLooks.json"
+failPrimaryMove = true
+local failedSavePreflight = sendCommand({
+    clientSessionId = "stable-session",
+    operationId = "stable-save-preflight-fails",
+    baseRevision = 0,
+    kind = Core.COMMAND.Save
+}, stableClient)
+assert(not failedSavePreflight.accepted and failedSavePreflight.reason == "persistence_failed" and
+       failedSavePreflight.revision == 0,
+    "an unavailable native File backend must reject Save before changing equipment")
+assert(stableSlots[InvSlotType.Head] == stableItem and stableUnequipCalls == 0,
+    "a persistence preflight failure must not unequip physical gear")
+failPrimaryMove = false
 
 local stableSave = sendCommand({
     clientSessionId = "stable-session",
@@ -804,12 +843,13 @@ local stableSave = sendCommand({
     ))
 }, stableClient)
 assert(stableSave.accepted and stableSave.revision == 1)
-local serverJsonPath = storageRoot .. "/ServerLooks.json"
 local persistedAfterSave = assert(memoryFiles[serverJsonPath])
-assert(persistedAfterSave:find('{"schemaVersion":4', 1, true) == 1)
+assert(persistedAfterSave:find('{"schemaVersion":5', 1, true) == 1)
 assert(persistedAfterSave:find('"attachmentVisibility"', 1, true) ~= nil and
        persistedAfterSave:find('"hideHair"', 1, true) == nil,
-    "server persistence v4 must store the complete visibility policy without authoritative hideHair")
+    "server persistence v5 must store the complete visibility policy without authoritative hideHair")
+assert(persistedAfterSave:find('"useFashionFootstepSounds":false', 1, true) ~= nil,
+    "server persistence v5 must store the footstep sound source")
 assert(persistedAfterSave:find('"colors":{"Head":' .. tostring(authoritativeColor), 1, true) ~= nil and
        persistedAfterSave:find(tostring(authoritativeColor + 1), 1, true) == nil,
     "server Save must persist the equipped item's authoritative SpriteColor")
@@ -848,8 +888,7 @@ local reconnectDuplicateAck = assert(Core.readAck(Networking.sent[beforeReconnec
 assert(reconnectDuplicateAck.accepted and reconnectDuplicateAck.revision == 1,
     "a stable account reconnecting with the same client session must receive the original operation result")
 
-failReplace = true
-failOverwriteMove = true
+failPrimaryMove = true
 local failedClear = sendCommand({
     clientSessionId = "stable-session",
     operationId = "stable-clear-fails",
@@ -859,8 +898,7 @@ local failedClear = sendCommand({
 assert(not failedClear.accepted and failedClear.reason == "persistence_failed" and failedClear.revision == 1)
 assert(memoryFiles[serverJsonPath] == persistedAfterSave,
     "atomic replacement failure must preserve the prior server document")
-failReplace = false
-failOverwriteMove = false
+failPrimaryMove = false
 
 local stableForget = sendCommand({
     clientSessionId = "stable-session",
@@ -970,10 +1008,10 @@ memoryFiles[storageRoot .. "/ServerLooks.txt"] =
     "key=account:stale-account|active=true|Head=helmet,Stale Helmet\n"
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
 local corruptGuard = assert(memoryFiles[serverJsonPath])
-assert(corruptGuard:find('"schemaVersion":4', 1, true) ~= nil and
+assert(corruptGuard:find('"schemaVersion":5', 1, true) ~= nil and
        corruptGuard:find('"records":[]', 1, true) ~= nil and
        corruptGuard:find("stale-account", 1, true) == nil,
-    "truncated persistence must be replaced with an empty durable v4 tombstone")
+    "truncated persistence must be replaced with an empty durable v5 tombstone")
 assert(memoryFiles[storageRoot .. "/ServerLooks.txt"] ~= nil,
     "a stale legacy source must not be imported in the same startup as corrupt-primary quarantine")
 local quarantinedJson = false
@@ -1084,9 +1122,9 @@ memoryFiles[serverJsonPath] =
     '"FaceAttachment":"auto"},"slots":{"Head":"helmet"}}}],' ..
     '"pendingLegacySteamRecords":[],"migratedLegacySteamIds":[]}'
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
-assert(memoryFiles[serverJsonPath]:find('"schemaVersion":4', 1, true) ~= nil and
+assert(memoryFiles[serverJsonPath]:find('"schemaVersion":5', 1, true) ~= nil and
        memoryFiles[serverJsonPath]:find('"colors":{}', 1, true) ~= nil,
-    "valid server persistence v3 must migrate to v4 with missing colors")
+    "valid server persistence v3 must migrate to v5 with missing colors")
 assert(memoryFiles[serverJsonPath .. ".v3.bak"] ~= nil,
     "server persistence v3 migration must preserve a .v3.bak source")
 
@@ -1097,9 +1135,9 @@ memoryFiles[serverJsonPath] =
     '"hideHair":false,"slots":{"Head":"helmet"}}}],"pendingLegacySteamRecords":[],' ..
     '"migratedLegacySteamIds":[]}'
 loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
-assert(memoryFiles[serverJsonPath]:find('"schemaVersion":4', 1, true) ~= nil and
+assert(memoryFiles[serverJsonPath]:find('"schemaVersion":5', 1, true) ~= nil and
        memoryFiles[serverJsonPath]:find('"attachmentVisibility"', 1, true) ~= nil,
-    "valid server persistence v2 must migrate to v4")
+    "valid server persistence v2 must migrate to v5")
 assert(memoryFiles[serverJsonPath .. ".v2.bak"] ~= nil,
     "server persistence v2 migration must preserve a .v2.bak source")
 local maxAccount = { StringRepresentation = "max-account" }
@@ -1151,6 +1189,12 @@ local noKeyApply = sendCommand({
 }, noKeyClient)
 assert(noKeyApply.accepted)
 
+local delayedRoundCallbacks = {}
+Timer = {
+    Wait = function(callback)
+        delayedRoundCallbacks[#delayedRoundCallbacks + 1] = callback
+    end
+}
 Hook.handlers.roundEnd()
 gameSession.GameMode.Preset = nil
 local sentBeforeMissingKeyRound = #Networking.sent
@@ -1179,5 +1223,228 @@ for index = sentBeforeMissingKeyRebind + 1, #Networking.sent do
     end
 end
 gameSession.GameMode.Preset = { Identifier = "sandbox" }
+local sentBeforeDelayedRecovery = #Networking.sent
+local delayedIndex = 1
+while delayedIndex <= #delayedRoundCallbacks do
+    local callback = delayedRoundCallbacks[delayedIndex]
+    delayedIndex = delayedIndex + 1
+    callback()
+end
+local recoveredAfterDelayedKey = false
+for index = sentBeforeDelayedRecovery + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        if state.characterId == 122 and state.active then
+            recoveredAfterDelayedKey = state.revision == noKeyApply.revision
+        end
+    end
+end
+assert(recoveredAfterDelayedKey,
+    "an active look did not recover after the same round session key became available")
+
+local reconnectRaceAccount = { StringRepresentation = "reconnect-race-account" }
+local reconnectRaceAccountId = {
+    IsSome = function() return true end,
+    TryUnwrap = function() return true, reconnectRaceAccount end
+}
+local reconnectRaceClient = {
+    Connection = {},
+    Character = { ID = 130, Name = "Reconnect Race" },
+    AccountId = reconnectRaceAccountId
+}
+connectedClients[#connectedClients + 1] = reconnectRaceClient
+local reconnectRaceHello = newBuffer()
+assert(Core.writeClientHello(reconnectRaceHello, "reconnect-race-session"))
+Networking.handlers[Core.NET.V2_HELLO](reconnectRaceHello, reconnectRaceClient)
+local reconnectRaceApply = sendCommand({
+    clientSessionId = "reconnect-race-session",
+    operationId = "reconnect-race-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    look = assert(Core.newLook(true, false, { Head = "helmet" }))
+}, reconnectRaceClient)
+assert(reconnectRaceApply.accepted)
+Hook.handlers["client.disconnected"](reconnectRaceClient)
+
+local reconnectGameSession = gameSession
+gameSession = nil
+delayedRoundCallbacks = {}
+local pendingReconnectClient = {
+    Connection = {},
+    Character = nil,
+    AccountId = reconnectRaceAccountId
+}
+connectedClients[#connectedClients] = pendingReconnectClient
+Hook.handlers["client.connected"](pendingReconnectClient)
+Hook.handlers["client.disconnected"](pendingReconnectClient)
+assert(memoryFiles[serverJsonPath]:find(
+        '"accountId":"reconnect-race-account","revision":1,"active":true', 1, true) ~= nil,
+    "disconnecting while reconnect is pending must not erase the durable active intent")
+
+local delayedReconnectClient = {
+    Connection = {},
+    Character = nil,
+    AccountId = reconnectRaceAccountId
+}
+connectedClients[#connectedClients] = delayedReconnectClient
+Hook.handlers["client.connected"](delayedReconnectClient)
+delayedReconnectClient.Character = { ID = 131, Name = "Reconnect Race Restored" }
+gameSession = reconnectGameSession
+local sentBeforeReconnectRecovery = #Networking.sent
+local reconnectCallbackIndex = 1
+while reconnectCallbackIndex <= #delayedRoundCallbacks do
+    local callback = delayedRoundCallbacks[reconnectCallbackIndex]
+    reconnectCallbackIndex = reconnectCallbackIndex + 1
+    callback()
+end
+local recoveredReconnectLook = false
+for index = sentBeforeReconnectRecovery + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        if state.characterId == 131 and state.active then
+            recoveredReconnectLook = state.revision == reconnectRaceApply.revision
+        end
+    end
+end
+assert(recoveredReconnectLook,
+    "an active persisted look did not recover when reconnect initially had no GameSession or Character")
+
+Hook.handlers["client.disconnected"](delayedReconnectClient)
+local accountNotReady = {
+    IsSome = function() return false end,
+    TryUnwrap = function() return false, nil end
+}
+local lateIdentityClient = {
+    Connection = {},
+    Character = nil,
+    AccountId = accountNotReady
+}
+connectedClients[#connectedClients] = lateIdentityClient
+Hook.handlers["client.connected"](lateIdentityClient)
+lateIdentityClient.AccountId = reconnectRaceAccountId
+lateIdentityClient.Character = { ID = 132, Name = "Late Account Restored" }
+local lateIdentityHello = newBuffer()
+assert(Core.writeClientHello(lateIdentityHello, "late-account-session"))
+local sentBeforeLateIdentity = #Networking.sent
+Networking.handlers[Core.NET.V2_HELLO](lateIdentityHello, lateIdentityClient)
+local recoveredLateIdentityLook = false
+for index = sentBeforeLateIdentity + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        if state.characterId == 132 and state.active then
+            recoveredLateIdentityLook = state.revision == reconnectRaceApply.revision
+        end
+    end
+end
+assert(recoveredLateIdentityLook,
+    "a client cached before AccountId became available did not rebind its persisted look")
+
+local steamFallbackClient = {
+    Connection = {},
+    Character = { ID = 134, Name = "Listen Host" },
+    SteamID = "76561198000000134",
+    AccountId = {
+        IsSome = function() return false end,
+        TryUnwrap = function() return false, nil end
+    }
+}
+connectedClients[#connectedClients + 1] = steamFallbackClient
+local steamFallbackHello = newBuffer()
+assert(Core.writeClientHello(steamFallbackHello, "steam-fallback-session"))
+Networking.handlers[Core.NET.V2_HELLO](steamFallbackHello, steamFallbackClient)
+local steamFallbackApply = sendCommand({
+    clientSessionId = "steam-fallback-session",
+    operationId = "steam-fallback-apply",
+    baseRevision = 0,
+    kind = Core.COMMAND.Apply,
+    look = assert(Core.newLook(true, false, { Head = "helmet" }))
+}, steamFallbackClient)
+assert(steamFallbackApply.accepted and memoryFiles[serverJsonPath]:find(
+        '"accountId":"steam:76561198000000134","revision":1,"active":true', 1, true) ~= nil,
+    "a listen host without Client.AccountId did not persist through its stable SteamID")
+
+-- A dedicated server can initialize the mod in a pathless lobby before it
+-- loads the selected campaign. The temporary process-scoped runtime key must
+-- neither apply the old look in the lobby nor erase the matching campaign
+-- intent before roundStart exposes the durable save path.
+local restartCampaignJson =
+    '{"schemaVersion":5,"records":[{"accountId":"restart-campaign-account",' ..
+    '"revision":7,"active":true,"sessionKey":"campaign:restart-campaign.save",' ..
+    '"look":{"schemaVersion":4,"captured":true,' ..
+    '"useFashionMovementAnimations":true,"useFashionFootstepSounds":false,' ..
+    '"attachmentVisibility":{"Hair":"auto","Beard":"auto",' ..
+    '"Moustache":"auto","FaceAttachment":"auto"},' ..
+    '"slots":{"Head":"helmet"},"colors":{}}}],' ..
+    '"pendingLegacySteamRecords":[],"migratedLegacySteamIds":[]}'
+memoryFiles[serverJsonPath] = restartCampaignJson
+local restartLobbyDataPath = {}
+gameSession = {
+    DataPath = restartLobbyDataPath,
+    GameMode = { Preset = { Identifier = "sandbox" } }
+}
+connectedClients = {}
+local restartCallbacks = {}
+Timer = {
+    Wait = function(callback)
+        restartCallbacks[#restartCallbacks + 1] = callback
+    end
+}
+loadFirst(candidates("Lua/WardrobeSwitcherServer.lua"), false)
+local restartCampaignAccount = { StringRepresentation = "restart-campaign-account" }
+local restartCampaignClient = {
+    Connection = {},
+    Character = { ID = 133, Name = "Restarted Campaign" },
+    AccountId = {
+        IsSome = function() return true end,
+        TryUnwrap = function() return true, restartCampaignAccount end
+    }
+}
+connectedClients[1] = restartCampaignClient
+Hook.handlers["client.connected"](restartCampaignClient)
+local restartCampaignHello = newBuffer()
+assert(Core.writeClientHello(restartCampaignHello, "restart-campaign-session"))
+local sentBeforeLobbyHello = #Networking.sent
+Networking.handlers[Core.NET.V2_HELLO](restartCampaignHello, restartCampaignClient)
+for index = sentBeforeLobbyHello + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        assert(state.characterId ~= 133 or not state.active,
+            "a campaign look was applied while the restarted server was still in its lobby")
+    end
+end
+
+restartLobbyDataPath.SavePath = "restart-campaign.save"
+local sentBeforeRestartedRound = #Networking.sent
+Hook.handlers.roundStart()
+local restartCallbackIndex = 1
+while restartCallbackIndex <= #restartCallbacks do
+    local callback = restartCallbacks[restartCallbackIndex]
+    restartCallbackIndex = restartCallbackIndex + 1
+    callback()
+end
+local restoredAfterServerRestart = false
+for index = sentBeforeRestartedRound + 1, #Networking.sent do
+    local sent = Networking.sent[index]
+    if sent.message.name == Core.NET.V2_STATE then
+        local state = assert(Core.readState(sent.message))
+        if state.characterId == 133 and state.active then
+            restoredAfterServerRestart = state.revision == 7 and
+                state.look.slots.Head == "helmet"
+        end
+    end
+end
+assert(restoredAfterServerRestart,
+    "a matching campaign look did not survive a full dedicated-server restart: " ..
+    tostring(memoryFiles[serverJsonPath]))
+
+restartLobbyDataPath.SavePath = "different-campaign.save"
+Hook.handlers.roundStart()
+assert(memoryFiles[serverJsonPath]:find(
+        '"accountId":"restart-campaign-account","revision":8,"active":false', 1, true) ~= nil,
+    "loading a genuinely different campaign retained the previous campaign's active intent")
 
 print("Wardrobe server authority tests passed")

@@ -85,6 +85,29 @@ $contracts = @(
         )
     },
     @{
+        Name = "fashion-footstep-transaction"
+        Source = $renderer
+        Required = @(
+            'AccessTools.Method(typeof(Ragdoll), "PlayImpactSound", new[] { typeof(Limb) })',
+            'PatchStates["Ragdoll.PlayImpactSound"] = new PatchState(required: false);',
+            'public static bool SetUseFashionFootstepSounds(Character character, bool enabled)',
+            '!session.UseFashionFootstepSounds',
+            'originalOrder = new List<WearableSprite>(wearingItems);',
+            'if (IsEquipmentSprite(wearingItems[index]))',
+            'if (sprite.Limb == limb.type && !wearingItems.Contains(sprite))',
+            'limb.WearingItems.AddRange(originalOrder);',
+            'return exception ?? cleanupException;'
+        )
+    },
+    @{
+        Name = "fashion-footstep-compatibility-probe"
+        Source = $compatibilityProbe
+        Required = @(
+            '"Limb.WearingItems",',
+            'RequireMethod("Ragdoll.PlayImpactSound(Limb)", ragdoll, "PlayImpactSound",'
+        )
+    },
+    @{
         Name = "physical-limb-guard"
         Source = $renderer
         Required = @(

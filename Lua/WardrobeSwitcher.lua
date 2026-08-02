@@ -3,10 +3,10 @@
 local MOD_NAME = "Baro Wardrobe Switcher"
 local Core = assert(
     type(WardrobeCore) == "table" and
-    tonumber(WardrobeCore.PROTOCOL_VERSION) == 4 and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 5 and
     type(WardrobeCore.NET) == "table" and
     WardrobeCore,
-    "Baro Wardrobe Switcher requires WardrobeCore protocol 4")
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 5")
 local EXPECTED_CSHARP_VERSION = tostring(Core.MOD_VERSION)
 local NET = Core.NET
 local NET_SAVE_REQUEST = NET.V1_SAVE_REQUEST
@@ -26,11 +26,13 @@ local COMMAND_CLEAR = Core.COMMAND.Clear
 local COMMAND_FORGET = Core.COMMAND.Forget
 local COMMAND_VISIBILITY = Core.COMMAND.Visibility
 local COMMAND_ANIMATION = Core.COMMAND.Animation
+local COMMAND_FOOTSTEP = Core.COMMAND.Footstep
 local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
 local ATTACHMENT_VISIBILITY = Core.ATTACHMENT_VISIBILITY
 local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
 local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
 local CAPABILITY_CREW_TARGETING = Core.CAPABILITY.CrewTargeting
+local CAPABILITY_FOOTSTEP_SOUND_SOURCE = Core.CAPABILITY.FootstepSoundSource
 
 if SERVER then return end
 
@@ -158,7 +160,9 @@ local advancedPanelOpen = false
 local tutorialExpanded = true
 local selectedSinglePlayerCharacterKey = nil
 local sessionActiveCharacterId = nil
+local multiplayerOwnerCharacterId = nil
 local useFashionMovementAnimations = true
+local useFashionFootstepSounds = false
 local lastCharacter = nil
 local buildWindow
 local buildAttachmentVisibilityWindow
@@ -224,8 +228,10 @@ local protocolMode = "probing"
 local serverCapabilities = 0
 local visibilitySyncPendingNegotiation = false
 local movementAnimationSyncPendingNegotiation = false
+local footstepSoundSyncPendingNegotiation = false
 -- Forward declaration: persistence helpers are defined before the UI/render helpers.
 local currentMovementAnimationSource
+local currentFootstepSoundSource
 local protocolHelloSentAt = nil
 local protocolCommandQueue = {}
 local inFlightV2Command = nil
@@ -332,6 +338,11 @@ local function serverSupportsMovementAnimationSource()
         math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_MOVEMENT_ANIMATION_SOURCE) % 2 == 1
 end
 
+local function serverSupportsFootstepSoundSource()
+    return protocolMode == "v3" and
+        math.floor((tonumber(serverCapabilities) or 0) / CAPABILITY_FOOTSTEP_SOUND_SOURCE) % 2 == 1
+end
+
 local function lookDataHasSavedLook(lookData, captured)
     if captured == true then return true end
     lookData = lookData or {}
@@ -385,13 +396,20 @@ local function rememberLegacyLookMetadata(lookData)
     end
 end
 
-local function domainLookFromLegacy(lookData, captured, hairHidden, visibility, movementAnimationSource)
+local function domainLookFromLegacy(
+    lookData,
+    captured,
+    hairHidden,
+    visibility,
+    movementAnimationSource,
+    footstepSoundSource)
     local look = Core.fromLegacyLook(
         lookData or {},
         captured == true,
         hairHidden == true,
         visibility,
-        movementAnimationSource
+        movementAnimationSource,
+        footstepSoundSource
     )
     return look
 end
@@ -686,7 +704,8 @@ function Helpers.encodePersistentClientLook(
     active,
     auto,
     visibilityValue,
-    movementAnimationSource
+    movementAnimationSource,
+    footstepSoundSource
 )
     local state = reducerState
     lookData = lookData or currentLegacyLook()
@@ -705,14 +724,18 @@ function Helpers.encodePersistentClientLook(
     if type(movementAnimationSource) ~= "boolean" then
         movementAnimationSource = currentMovementAnimationSource()
     end
+    if type(footstepSoundSource) ~= "boolean" then
+        footstepSoundSource = currentFootstepSoundSource()
+    end
     local hairHidden = legacyHideHairForVisibility(visibility)
     local parts = {
-        "schema=4",
+        "schema=5",
         "captured=" .. tostring(captured == true),
         "active=" .. tostring(active == true),
         "auto=" .. tostring(auto == true),
         "hidehair=" .. tostring(hairHidden == true),
         "fashionMovement=" .. tostring(movementAnimationSource),
+        "fashionFootstep=" .. tostring(footstepSoundSource),
         "visibilityHair=" .. visibility.Hair,
         "visibilityBeard=" .. visibility.Beard,
         "visibilityMoustache=" .. visibility.Moustache,
@@ -900,7 +923,8 @@ function Helpers.saveSinglePlayerProfile(
     active,
     auto,
     visibilityValue,
-    movementAnimationSource
+    movementAnimationSource,
+    footstepSoundSource
 )
     if not Helpers.singlePlayerCharacterEligible(character) then return true end
     local campaignKey = Helpers.currentSinglePlayerCampaignKey()
@@ -918,7 +942,8 @@ function Helpers.saveSinglePlayerProfile(
         active,
         auto,
         visibilityValue,
-        movementAnimationSource
+        movementAnimationSource,
+        footstepSoundSource
     )
     local ok, saved = pcall(function()
         return persistence.SaveSinglePlayerProfile(
@@ -991,6 +1016,7 @@ function Helpers.restorePersistentClientLookLine(line, source)
     local restoredHideHair = false
     local restoredAttachmentVisibility = nil
     local restoredMovementAnimationSource = true
+    local restoredFootstepSoundSource = false
     local restoredSessionKey = nil
     local restoredColors = {}
     local seen = {}
@@ -1030,6 +1056,9 @@ function Helpers.restorePersistentClientLookLine(line, source)
         elseif name == "fashionMovement" then
             restoredMovementAnimationSource = parseBoolean(name, value)
             if restoredMovementAnimationSource == nil then return false end
+        elseif name == "fashionFootstep" then
+            restoredFootstepSoundSource = parseBoolean(name, value)
+            if restoredFootstepSoundSource == nil then return false end
         elseif name == "visibilityHair" or
             name == "visibilityBeard" or
             name == "visibilityMoustache" or
@@ -1037,7 +1066,7 @@ function Helpers.restorePersistentClientLookLine(line, source)
             restoredAttachmentVisibility = restoredAttachmentVisibility or {}
             restoredAttachmentVisibility[name:sub(#"visibility" + 1)] = value
         elseif name == "schema" then
-            if value ~= "1" and value ~= "2" and value ~= "3" and value ~= "4" then
+            if value ~= "1" and value ~= "2" and value ~= "3" and value ~= "4" and value ~= "5" then
                 Helpers.debugLog("Rejected persistent client look with unsupported schema " .. tostring(value) .. ".")
                 return false
             end
@@ -1093,7 +1122,8 @@ function Helpers.restorePersistentClientLookLine(line, source)
         captured,
         restoredHideHair,
         restoredAttachmentVisibility,
-        restoredMovementAnimationSource
+        restoredMovementAnimationSource,
+        restoredFootstepSoundSource
     )
     if domainLook == nil then
         Helpers.debugLog("Rejected persistent client look: " .. tostring(lookReason))
@@ -1101,6 +1131,7 @@ function Helpers.restorePersistentClientLookLine(line, source)
     end
     rememberLegacyLookMetadata(restoredLook)
     useFashionMovementAnimations = restoredMovementAnimationSource
+    useFashionFootstepSounds = restoredFootstepSoundSource
     persistentClientLookLoaded = true
     lastEquipmentSignature = nil
     lastServerAutoApplySignature = nil
@@ -1145,6 +1176,7 @@ persistClientLook = function(domainLook, viewModel)
     local auto = reducerState.autoApply == true
     local visibility = currentAttachmentVisibility()
     local movementAnimationSource = currentMovementAnimationSource()
+    local footstepSoundSource = currentFootstepSoundSource()
     if domainLook ~= nil then
         lookData = Core.toLegacyLook(domainLook) or {}
         for _, entry in ipairs(slots) do
@@ -1162,6 +1194,7 @@ persistClientLook = function(domainLook, viewModel)
         ) or Core.attachmentVisibilityFromLegacy(domainLook.hideHair == true)
         movementAnimationSource =
             domainLook.useFashionMovementAnimations ~= false
+        footstepSoundSource = domainLook.useFashionFootstepSounds == true
         if viewModel ~= nil then
             active = viewModel.active == true
             auto = viewModel.autoApply == true
@@ -1183,7 +1216,8 @@ persistClientLook = function(domainLook, viewModel)
             active,
             auto,
             visibility,
-            movementAnimationSource
+            movementAnimationSource,
+            footstepSoundSource
         )
     end
 
@@ -1193,7 +1227,8 @@ persistClientLook = function(domainLook, viewModel)
         active,
         auto,
         visibility,
-        movementAnimationSource
+        movementAnimationSource,
+        footstepSoundSource
     )
     local persistence = ensureWardrobePersistence()
     if persistence == nil then
@@ -1511,6 +1546,7 @@ end
 
 controlled = function()
     local actual = Helpers.actualControlledCharacter()
+    if Helpers.isMultiplayerClient() and actual == nil then return nil end
     if not fullPanelOpen then return actual end
     if Helpers.isMultiplayerClient() and not serverSupportsCrewTargeting() then return actual end
     return Helpers.selectedSinglePlayerCharacter(actual)
@@ -2181,6 +2217,35 @@ function Helpers.setFashionMovementAnimationsVisual(character, enabled)
     return result == true
 end
 
+currentFootstepSoundSource = function()
+    local multiplayer = Game ~= nil and Game.IsMultiplayer == true
+    local look = reducerState.look
+    if not multiplayer then
+        if look ~= nil then return look.useFashionFootstepSounds == true end
+        return useFashionFootstepSounds == true
+    end
+    if footstepSoundSyncPendingNegotiation or
+        protocolMode == "v1" or
+        (protocolMode == "v3" and not serverSupportsFootstepSoundSource()) then
+        return useFashionFootstepSounds == true
+    end
+    if look ~= nil then return look.useFashionFootstepSounds == true end
+    return useFashionFootstepSounds == true
+end
+
+function Helpers.setFashionFootstepSoundsVisual(character, enabled)
+    if Helpers.ensureVisualOverride() == nil or character == nil then return false end
+    local ok, result = pcall(function()
+        return VisualOverride.SetUseFashionFootstepSounds(character, enabled == true)
+    end)
+    if not ok then
+        Helpers.log("Footstep-sound source update failed: " .. tostring(result) ..
+            ". Reload the mod so LuaCs recompiles the C# plugin.")
+        return false
+    end
+    return result == true
+end
+
 function Helpers.applyVisualOverrideToItem(character, item, carrier)
     if Helpers.ensureVisualOverride() == nil or character == nil or item == nil then return false end
     local ok, result = pcall(function()
@@ -2294,7 +2359,8 @@ function Helpers.writeProjectedV2Look(
     message,
     look,
     includeAttachmentVisibility,
-    includeMovementAnimationSource
+    includeMovementAnimationSource,
+    includeFootstepSoundSource
 )
     local valid, reason = Core.validateLook(look)
     if valid == nil then return false, reason end
@@ -2316,17 +2382,24 @@ function Helpers.writeProjectedV2Look(
             if color ~= nil then message.WriteUInt32(color) end
         end
     end
-    if includeAttachmentVisibility == true or includeMovementAnimationSource == true then
+    if includeAttachmentVisibility == true or includeMovementAnimationSource == true or
+        includeFootstepSoundSource == true then
         local forceHide, forceShow = 0, 0
         if includeAttachmentVisibility == true then
             forceHide, forceShow = Core.attachmentVisibilityMasks(valid.attachmentVisibility)
         end
         message.WriteByte(Core.LOOK_EXTENSION_MARKER)
-        message.WriteByte(includeMovementAnimationSource == true and Core.LOOK_EXTENSION_VERSION or 1)
+        local extensionVersion = includeFootstepSoundSource == true and Core.LOOK_EXTENSION_VERSION or
+            (includeMovementAnimationSource == true and 2 or 1)
+        message.WriteByte(extensionVersion)
         message.WriteByte(forceHide)
         message.WriteByte(forceShow)
-        if includeMovementAnimationSource == true then
-            message.WriteByte(valid.useFashionMovementAnimations and 1 or 0)
+        if extensionVersion >= 2 then
+            message.WriteByte(includeMovementAnimationSource == true and
+                (valid.useFashionMovementAnimations and 1 or 0) or 1)
+        end
+        if extensionVersion >= 3 then
+            message.WriteByte(valid.useFashionFootstepSounds and 1 or 0)
         end
     end
     return true
@@ -2337,7 +2410,8 @@ function Helpers.writeAndSendV2Command(command, baseRevision)
     local ok, reason = pcall(function()
         local targeted = command.targetCharacterId ~= nil
         local message = Networking.Start(targeted and NET_V2_TARGET_COMMAND or NET_V2_COMMAND)
-        if targeted or (serverSupportsAttachmentVisibility() and serverSupportsMovementAnimationSource()) then
+        if serverSupportsAttachmentVisibility() and serverSupportsMovementAnimationSource() and
+            serverSupportsFootstepSoundSource() then
             local writer = targeted and Core.writeTargetCommand or Core.writeCommand
             local written, writeReason = writer(message, {
                 clientSessionId = clientSessionId,
@@ -2357,19 +2431,25 @@ function Helpers.writeAndSendV2Command(command, baseRevision)
                 if not serverSupportsMovementAnimationSource() then
                     error("server does not advertise movement animation synchronization support")
                 end
+            elseif command.kind == COMMAND_FOOTSTEP then
+                if not serverSupportsFootstepSoundSource() then
+                    error("server does not advertise footstep sound synchronization support")
+                end
             end
             message.WriteUInt16(Core.PROTOCOL_VERSION)
             message.WriteString(clientSessionId)
             message.WriteString(command.operationId)
             message.WriteUInt32(baseRevision)
             message.WriteString(command.kind)
+            if targeted then message.WriteUInt16(command.targetCharacterId) end
             message.WriteBoolean(command.look ~= nil)
             if command.look ~= nil then
                 local written, writeReason = Helpers.writeProjectedV2Look(
                     message,
                     command.look,
                     serverSupportsAttachmentVisibility(),
-                    serverSupportsMovementAnimationSource()
+                    serverSupportsMovementAnimationSource(),
+                    serverSupportsFootstepSoundSource()
                 )
                 if not written then error(writeReason) end
             end
@@ -2475,6 +2555,7 @@ function Helpers.selectV1Protocol(reason)
     sessionActiveCharacterId = nil
     visibilitySyncPendingNegotiation = false
     movementAnimationSyncPendingNegotiation = false
+    footstepSoundSyncPendingNegotiation = false
     inFlightV2Command = nil
     Helpers.debugLog("Using v1 wardrobe protocol" .. (reason ~= nil and (": " .. tostring(reason)) or "."))
     Helpers.sendNextProtocolCommand()
@@ -2529,15 +2610,34 @@ function Helpers.flushPendingMovementAnimationSync()
     return true
 end
 
+function Helpers.flushPendingFootstepSoundSync()
+    if not footstepSoundSyncPendingNegotiation then return false end
+    if not serverSupportsFootstepSoundSource() or not Helpers.hasSavedLook() then
+        footstepSoundSyncPendingNegotiation = false
+        return false
+    end
+    local state = reducerState
+    if state == nil or state.pendingKind ~= nil then return false end
+    footstepSoundSyncPendingNegotiation = false
+    dispatchReducer({
+        type = "SetFootstepSoundSource",
+        enabled = useFashionFootstepSounds == true,
+        remote = true,
+        operationId = nextOperationId()
+    })
+    return true
+end
+
 -- Commands may be queued before protocol negotiation completes. The queue owns
 -- v2 ordering/retries while reducerOwned prevents the same request from being
 -- introduced into the state machine twice.
 function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, reducerOwned, domainLookOverride, targetCharacterId)
     if not Helpers.isMultiplayerClient() or Networking == nil then return false end
     local domainLook = nil
-    if kind == COMMAND_VISIBILITY or kind == COMMAND_ANIMATION then
+    if kind == COMMAND_VISIBILITY or kind == COMMAND_ANIMATION or kind == COMMAND_FOOTSTEP then
         local supported = kind == COMMAND_VISIBILITY and serverSupportsAttachmentVisibility() or
-            kind == COMMAND_ANIMATION and serverSupportsMovementAnimationSource()
+            kind == COMMAND_ANIMATION and serverSupportsMovementAnimationSource() or
+            kind == COMMAND_FOOTSTEP and serverSupportsFootstepSoundSource()
         if not supported then
             Helpers.debugLog("Kept visual preference local because the server did not advertise support.")
             return false
@@ -2555,7 +2655,8 @@ function Helpers.queueProtocolCommand(kind, lookData, captured, operationId, red
                 captured == true,
                 legacyHideHairForVisibility(visibility),
                 visibility,
-                currentMovementAnimationSource()
+                currentMovementAnimationSource(),
+                currentFootstepSoundSource()
             )
         if domainLook == nil then
             Helpers.debugLog("Refused to queue invalid wardrobe look for " .. tostring(kind) .. ".")
@@ -2637,6 +2738,7 @@ function Helpers.processProtocolNegotiation()
     if protocolMode == "v3" then
         Helpers.flushPendingVisibilitySync()
         Helpers.flushPendingMovementAnimationSync()
+        Helpers.flushPendingFootstepSoundSync()
     end
 
     if protocolMode == "v3" and inFlightV2Command ~= nil then
@@ -2836,7 +2938,8 @@ function Helpers.applyCapturedFashionToCharacterEquipment(
     lookData,
     recapturePayload,
     visibilityValue,
-    movementAnimationSource
+    movementAnimationSource,
+    footstepSoundSource
 )
     if character == nil then return false, 0 end
 
@@ -2881,6 +2984,9 @@ function Helpers.applyCapturedFashionToCharacterEquipment(
         animationSource = movementAnimationSource
     end
     Helpers.setFashionMovementAnimationsVisual(character, animationSource)
+    local soundSource = useFashionFootstepSounds
+    if type(footstepSoundSource) == "boolean" then soundSource = footstepSoundSource end
+    Helpers.setFashionFootstepSoundsVisual(character, soundSource)
 
     local current = Helpers.snapshot(character)
     local equippedItems = {}
@@ -2919,7 +3025,12 @@ function Helpers.applyCapturedFashionToCharacterEquipment(
     return true, visualItems, nil
 end
 
-function Helpers.applyNetworkLook(character, networkLook, visibilityValue, movementAnimationSource)
+function Helpers.applyNetworkLook(
+    character,
+    networkLook,
+    visibilityValue,
+    movementAnimationSource,
+    footstepSoundSource)
     local diagnostics = {}
     if character == nil or networkLook == nil then return false, diagnostics end
     local visualStatus = Helpers.visualOverrideStatus()
@@ -2955,7 +3066,8 @@ function Helpers.applyNetworkLook(character, networkLook, visibilityValue, movem
         networkLook,
         false,
         visibilityValue,
-        movementAnimationSource
+        movementAnimationSource,
+        footstepSoundSource
     )
     diagnostics[#diagnostics + 1] = "activated=" .. tostring(activated == true) .. ", expectedItems=" .. tostring(expectedItems) .. ", capturedItems=" .. tostring(capturedItems)
     return activated == true, diagnostics
@@ -2980,9 +3092,10 @@ clientEffectAdapters.Capture = function(currentEffect)
         true,
         legacyHideHairForVisibility(visibility),
         visibility,
-        currentMovementAnimationSource()
+        currentMovementAnimationSource(),
+        currentFootstepSoundSource()
     )
-    if domainLook == nil then return false, tostring(lookReason or "captured look failed schema v3 validation") end
+    if domainLook == nil then return false, tostring(lookReason or "captured look failed schema v4 validation") end
     rememberLegacyLookMetadata(lookData)
 
     local context = {
@@ -3199,7 +3312,8 @@ clientEffectAdapters.Render = function(currentEffect)
             character,
             lookData,
             currentEffect.look.attachmentVisibility,
-            currentEffect.look.useFashionMovementAnimations
+            currentEffect.look.useFashionMovementAnimations,
+            currentEffect.look.useFashionFootstepSounds
         )
     else
         local reason
@@ -3209,7 +3323,8 @@ clientEffectAdapters.Render = function(currentEffect)
             lookData,
             not reuseCapturedSession,
             currentEffect.look.attachmentVisibility,
-            currentEffect.look.useFashionMovementAnimations
+            currentEffect.look.useFashionMovementAnimations,
+            currentEffect.look.useFashionFootstepSounds
         )
         diagnostics = reason ~= nil and { reason } or
             (reuseCapturedSession and { "reused committed renderer session" } or {})
@@ -3245,7 +3360,8 @@ clientEffectAdapters.RenderCompensation = function(currentEffect)
         lookData,
         true,
         currentEffect.look.attachmentVisibility,
-        currentEffect.look.useFashionMovementAnimations
+        currentEffect.look.useFashionMovementAnimations,
+        currentEffect.look.useFashionFootstepSounds
     )
     if applied then return { type = "CompensationSucceeded" } end
     return { type = "CompensationFailed", reason = reason }
@@ -3335,6 +3451,29 @@ clientEffectAdapters.ApplyMovementAnimationSourceCompensation = function(current
         return { type = "CompensationSucceeded" }
     end
     return { type = "CompensationFailed", reason = "movement animation source rollback failed" }
+end
+
+clientEffectAdapters.ApplyFootstepSoundSource = function(currentEffect)
+    local character = controlled()
+    if character == nil then return false, "no controlled character" end
+    if Helpers.setFashionFootstepSoundsVisual(
+        character,
+        currentEffect.useFashionFootstepSounds == true
+    ) then
+        return { type = "FootstepSoundSourceUpdateSucceeded" }
+    end
+    return false, "renderer rejected footstep sound source"
+end
+
+clientEffectAdapters.ApplyFootstepSoundSourceCompensation = function(currentEffect)
+    local character = controlled()
+    if character ~= nil and Helpers.setFashionFootstepSoundsVisual(
+        character,
+        currentEffect.useFashionFootstepSounds == true
+    ) then
+        return { type = "CompensationSucceeded" }
+    end
+    return { type = "CompensationFailed", reason = "footstep sound source rollback failed" }
 end
 
 function Helpers.saveFashionAndUnequip()
@@ -3443,7 +3582,8 @@ function Helpers.refreshActiveLookIfNeeded(character)
         currentLegacyLook(),
         false,
         currentAttachmentVisibility(),
-        currentMovementAnimationSource()
+        currentMovementAnimationSource(),
+        currentFootstepSoundSource()
     )
     if applied then
         lastEquipmentSignature = signature
@@ -3873,7 +4013,8 @@ function Helpers.processPendingSinglePlayerRestores()
                     lookData,
                     true,
                     state.look.attachmentVisibility,
-                    state.look.useFashionMovementAnimations
+                    state.look.useFashionMovementAnimations,
+                    state.look.useFashionFootstepSounds
                 )
                 if applied then
                     state.active = true
@@ -3999,8 +4140,11 @@ function Helpers.networkApplySignature(character, networkLook, protocolLook)
     local visibility = protocolLook ~= nil and protocolLook.attachmentVisibility or nil
     local animationSource = protocolLook ~= nil and
         tostring(protocolLook.useFashionMovementAnimations ~= false) or "legacy"
+    local footstepSource = protocolLook ~= nil and
+        tostring(protocolLook.useFashionFootstepSounds == true) or "legacy"
     return key .. "|" .. lookDataSignature(networkLook, true, visibility) ..
         "|fashionMovement=" .. animationSource ..
+        "|fashionFootstep=" .. footstepSource ..
         "|" .. Helpers.equipmentSignature(character)
 end
 
@@ -4161,15 +4305,18 @@ function Helpers.handleNetworkLookApply(
             Core.attachmentVisibilityFromLegacy(hairHidden == true)
     end
     local networkAnimationSource = nil
+    local networkFootstepSource = nil
     if protocolRevision ~= nil and protocolLook ~= nil then
         networkAnimationSource = protocolLook.useFashionMovementAnimations ~= false
+        networkFootstepSource = protocolLook.useFashionFootstepSounds == true
     end
     local function applyDirectly()
         local applied, diagnostics = Helpers.applyNetworkLook(
             character,
             networkLook,
             networkVisibility,
-            networkAnimationSource
+            networkAnimationSource,
+            networkFootstepSource
         )
         lastNetworkApplyDiagnostics = diagnostics or {}
         if applied then
@@ -4184,7 +4331,8 @@ function Helpers.handleNetworkLookApply(
             true,
             hairHidden,
             protocolLook ~= nil and protocolLook.attachmentVisibility or nil,
-            useFashionMovementAnimations
+            useFashionMovementAnimations,
+            useFashionFootstepSounds
         )
         rememberLegacyLookMetadata(networkLook)
         local effects = dispatchReducer({
@@ -4228,7 +4376,8 @@ function Helpers.handleNetworkLookApply(
             true,
             legacyHideHairForVisibility(visibility),
             visibility,
-            useFashionMovementAnimations
+            useFashionMovementAnimations,
+            useFashionFootstepSounds
         )
         rememberLegacyLookMetadata(networkLook)
         dispatchReducer({ type = "LocalApplyRequested", look = domainLook })
@@ -4505,6 +4654,11 @@ if Networking ~= nil then
                 state.look ~= nil then
                 state.look.useFashionMovementAnimations = currentMovementAnimationSource()
             end
+            if belongsToControlledCharacter and
+                not serverSupportsFootstepSoundSource() and
+                state.look ~= nil then
+                state.look.useFashionFootstepSounds = currentFootstepSoundSource()
+            end
 
             if not belongsToControlledCharacter then
                 local lastRevision = tonumber(remoteRevisionByCharacterId[characterId]) or -1
@@ -4718,6 +4872,7 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         profileLabel = Helpers.singlePlayerProfileLabel(character),
         transferEnabled = transferToUnconfiguredCharacter == true,
         useFashionMovementAnimations = currentMovementAnimationSource(),
+        useFashionFootstepSounds = currentFootstepSoundSource(),
         overrideLabel = tostring(overrideState.label),
         overrideDetails = overrideState.details
     }
@@ -4794,6 +4949,34 @@ function Helpers.updateMovementAnimationSource(enabled)
     local state = reducerState
     if state ~= nil and state.phase == Core.PHASE.Faulted then
         Helpers.log("Movement-animation source update failed: " .. tostring(state.error))
+        return false
+    end
+    return true
+end
+
+function Helpers.updateFootstepSoundSource(enabled)
+    local character = controlled()
+    useFashionFootstepSounds = enabled == true
+    local multiplayer = Helpers.isMultiplayerClient()
+    if not Helpers.hasSavedLook() then
+        return Helpers.setFashionFootstepSoundsVisual(character, useFashionFootstepSounds)
+    end
+    if multiplayer and protocolMode == "probing" then
+        footstepSoundSyncPendingNegotiation = true
+        return Helpers.setFashionFootstepSoundsVisual(character, useFashionFootstepSounds)
+    end
+    if multiplayer and not serverSupportsFootstepSoundSource() then
+        return Helpers.setFashionFootstepSoundsVisual(character, useFashionFootstepSounds)
+    end
+    dispatchReducer({
+        type = "SetFootstepSoundSource",
+        enabled = useFashionFootstepSounds,
+        remote = multiplayer,
+        operationId = multiplayer and nextOperationId() or nil
+    })
+    local state = reducerState
+    if state ~= nil and state.phase == Core.PHASE.Faulted then
+        Helpers.log("Footstep-sound source update failed: " .. tostring(state.error))
         return false
     end
     return true
@@ -4903,6 +5086,17 @@ buildWindow = function()
                 tr("button.animation_equipment"),
             function()
                 Helpers.updateMovementAnimationSource(not view.useFashionMovementAnimations)
+            end,
+            true,
+            overrideState.ready
+        )
+        Helpers.addButton(
+            list,
+            view.useFashionFootstepSounds and
+                tr("button.footstep_fashion") or
+                tr("button.footstep_equipment"),
+            function()
+                Helpers.updateFootstepSoundSource(not view.useFashionFootstepSounds)
             end,
             true,
             overrideState.ready
@@ -5057,6 +5251,7 @@ function Helpers.resetSessionTransportState()
     protocolMode = "probing"
     serverCapabilities = 0
     sessionActiveCharacterId = nil
+    multiplayerOwnerCharacterId = nil
     visibilitySyncPendingNegotiation = false
     movementAnimationSyncPendingNegotiation = false
     protocolHelloSentAt = nil
@@ -5201,6 +5396,11 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
         windowNeedsRefresh = false
     end
 
+    local actualCharacter = Helpers.actualControlledCharacter()
+    if Helpers.isMultiplayerClient() then
+        local actualCharacterId = Helpers.characterEntityId(actualCharacter)
+        if actualCharacterId > 0 then multiplayerOwnerCharacterId = actualCharacterId end
+    end
     local character = controlled()
     if character == nil then
         Helpers.handleNoControlledCharacter()
@@ -5289,15 +5489,20 @@ end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     local actualId = Helpers.characterEntityId(Helpers.actualControlledCharacter())
+    local ownerId = actualId > 0 and actualId or
+        tonumber(multiplayerOwnerCharacterId) or tonumber(reducerCharacterKey)
     local crewTargetWasActive = Helpers.isMultiplayerClient() and
-        tonumber(sessionActiveCharacterId) ~= nil and tonumber(sessionActiveCharacterId) ~= actualId
+        tonumber(sessionActiveCharacterId) ~= nil and tonumber(ownerId) ~= nil and
+        tonumber(sessionActiveCharacterId) ~= tonumber(ownerId)
     local preservedForNextScene = false
     if crewTargetWasActive then
         dispatchReducer({ type = "Deactivate" })
+        dispatchReducer({ type = "SetAutoApply", enabled = false })
+        Helpers.preserveSceneTransitionLookIntent()
     else
         preservedForNextScene = Helpers.preserveSceneTransitionLookIntent()
     end
-    if lastCharacter ~= nil then
+    if isSinglePlayerClient() and lastCharacter ~= nil then
         saveCharacterState(lastCharacter)
     end
     Helpers.resetInitialEquipGate()
@@ -5325,6 +5530,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     advancedPanelOpen = false
     selectedSinglePlayerCharacterKey = nil
     sessionActiveCharacterId = nil
+    multiplayerOwnerCharacterId = nil
     Helpers.resetOverlay()
     slotResults = {}
     lastNetworkApplyDiagnostics = {}
@@ -5333,6 +5539,11 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     lastEquipmentSignature = nil
     Helpers.clearAllVisualOverrides()
     lastCharacter = nil
+    if Helpers.isMultiplayerClient() then
+        characterStates = {}
+        reducerCharacterKey = nil
+        reducerHasUnboundLook = Core.hasLook(reducerState.look)
+    end
     roundStartNoticeSent = false
     if preservedForNextScene then
         lastOperation = "Saved look will be reapplied in the next scene."

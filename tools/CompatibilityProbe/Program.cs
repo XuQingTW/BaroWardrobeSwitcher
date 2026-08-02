@@ -276,6 +276,11 @@ RequireMethod("Limb.DrawWearable(WearableSprite,float,SpriteBatch,Color,float,Sp
     new[] { wearableSprite, typeof(float), spriteBatch, color, typeof(float), spriteEffects }, typeof(void));
 RequireMethod("Limb.UpdateWearableTypesToHide()", limb, "UpdateWearableTypesToHide",
     Array.Empty<Type>(), typeof(void));
+RequirePublicField(
+    "Limb.WearingItems",
+    limb,
+    "WearingItems",
+    typeof(List<>).MakeGenericType(wearableSprite));
 RequireMethod("AfflictionHusk.AttachHuskAppendage(...)", afflictionHusk, "AttachHuskAppendage",
     new[] { character, afflictionPrefabHusk, identifier, contentXElement, ragdoll },
     typeof(List<>).MakeGenericType(limb));
@@ -283,6 +288,8 @@ RequireMethod("AfflictionHusk.GetHuskedSpeciesName(CharacterParams,AfflictionPre
     afflictionHusk, "GetHuskedSpeciesName",
     new[] { characterParams, afflictionPrefabHusk }, identifier);
 RequireMethod("Ragdoll.RemoveLimb(Limb)", ragdoll, "RemoveLimb", new[] { limb }, typeof(void));
+RequireMethod("Ragdoll.PlayImpactSound(Limb)", ragdoll, "PlayImpactSound",
+    new[] { limb }, typeof(void), optional: true);
 RequirePublicStaticField("AfflictionPrefab.Prefabs", afflictionPrefab, "Prefabs");
 RequireMethod("CharacterInventory.GetItemInLimbSlot(InvSlotType)", characterInventory, "GetItemInLimbSlot",
     new[] { RequireType("Barotrauma.InvSlotType") }, item);

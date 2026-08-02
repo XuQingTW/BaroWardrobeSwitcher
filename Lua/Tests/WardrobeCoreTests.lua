@@ -45,9 +45,12 @@ local emptyLook = assert(Core.newLook(true, false, {}))
 assert(Core.hasLook(emptyLook), "captured empty look must be preserved")
 assertEqual(emptyLook.useFashionMovementAnimations, true,
     "looks without an animation-source field must keep fashion-priority movement")
+assertEqual(emptyLook.useFashionFootstepSounds, false,
+    "looks without a footstep-source field must keep equipment footsteps")
 assert(Core.validateLook({ schemaVersion = 99, slots = {} }) == nil)
 assert(Core.validateLook({ slots = { Unknown = "bad" } }) == nil)
 assert(Core.validateLook({ slots = {}, useFashionMovementAnimations = "false" }) == nil)
+assert(Core.validateLook({ slots = {}, useFashionFootstepSounds = "true" }) == nil)
 
 local allSlots = {
     Head = "helmet",
@@ -64,6 +67,24 @@ local decodedLook = assert(Core.readLook(lookBuffer))
 assert(Core.lookEquals(look, decodedLook))
 assertEqual(decodedLook.hideHair, true)
 assertEqual(decodedLook.useFashionMovementAnimations, true)
+assertEqual(decodedLook.useFashionFootstepSounds, false)
+
+local fashionFootstepLook = assert(Core.newLook(
+    true,
+    true,
+    allSlots,
+    nil,
+    nil,
+    true,
+    true
+))
+assert(not Core.lookEquals(look, fashionFootstepLook),
+    "footstep sound source must participate in look equality/signatures")
+local fashionFootstepBuffer = newBuffer()
+assert(Core.writeLook(fashionFootstepBuffer, fashionFootstepLook))
+fashionFootstepBuffer.FinalizeForTransport()
+assertEqual(assert(Core.readLook(fashionFootstepBuffer)).useFashionFootstepSounds, true,
+    "wire look round-trip lost fashion footsteps")
 
 local equippedMovementLook = assert(Core.newLook(
     true,
@@ -179,8 +200,23 @@ oldExtensionLook.WriteByte(1)
 oldExtensionLook.WriteByte(0)
 oldExtensionLook.WriteByte(0)
 oldExtensionLook.FinalizeForTransport()
-assertEqual(assert(Core.readLook(oldExtensionLook)).useFashionMovementAnimations, true,
+local migratedOldExtensionLook = assert(Core.readLook(oldExtensionLook))
+assertEqual(migratedOldExtensionLook.useFashionMovementAnimations, true,
     "v1 look extensions must default to fashion-priority movement")
+assertEqual(migratedOldExtensionLook.useFashionFootstepSounds, false,
+    "v1 look extensions must default to equipment footsteps")
+
+local movementExtensionLook = lookPrefixBuffer()
+movementExtensionLook.WriteByte(Core.LOOK_EXTENSION_MARKER)
+movementExtensionLook.WriteByte(2)
+movementExtensionLook.WriteByte(0)
+movementExtensionLook.WriteByte(0)
+movementExtensionLook.WriteByte(0)
+movementExtensionLook.FinalizeForTransport()
+local migratedMovementExtensionLook = assert(Core.readLook(movementExtensionLook))
+assertEqual(migratedMovementExtensionLook.useFashionMovementAnimations, false)
+assertEqual(migratedMovementExtensionLook.useFashionFootstepSounds, false,
+    "v2 look extensions must default to equipment footsteps")
 
 local invalidAnimationSource = lookPrefixBuffer()
 invalidAnimationSource.WriteByte(Core.LOOK_EXTENSION_MARKER)
@@ -188,8 +224,19 @@ invalidAnimationSource.WriteByte(Core.LOOK_EXTENSION_VERSION)
 invalidAnimationSource.WriteByte(0)
 invalidAnimationSource.WriteByte(0)
 invalidAnimationSource.WriteByte(2)
+invalidAnimationSource.WriteByte(0)
 invalidAnimationSource.FinalizeForTransport()
 assert(Core.readLook(invalidAnimationSource) == nil)
+
+local invalidFootstepSource = lookPrefixBuffer()
+invalidFootstepSource.WriteByte(Core.LOOK_EXTENSION_MARKER)
+invalidFootstepSource.WriteByte(Core.LOOK_EXTENSION_VERSION)
+invalidFootstepSource.WriteByte(0)
+invalidFootstepSource.WriteByte(0)
+invalidFootstepSource.WriteByte(1)
+invalidFootstepSource.WriteByte(2)
+invalidFootstepSource.FinalizeForTransport()
+assert(Core.readLook(invalidFootstepSource) == nil)
 
 for byteCount = 1, 3 do
     local partial = lookPrefixBuffer()
@@ -233,6 +280,8 @@ local hello = assert(Core.readServerHello(helloBuffer))
 assertEqual(hello.revision, 7)
 assertEqual(hello.capabilities, Core.CAPABILITY.AttachmentVisibility)
 assert(Core.CAPABILITY.CrewTargeting == 0x04, "crew targeting capability changed unexpectedly")
+assert(Core.CAPABILITY.FootstepSoundSource == 0x08,
+    "footstep sound-source capability changed unexpectedly")
 local oldHelloBuffer = newBuffer()
 oldHelloBuffer.WriteUInt16(Core.PROTOCOL_VERSION)
 oldHelloBuffer.WriteUInt32(8)
@@ -597,6 +646,17 @@ local lifecyclePendingCases = {
             return Core.reduce(activeApplyRollbackBase, {
                 type = "SetMovementAnimationSource",
                 enabled = false,
+                remote = true,
+                operationId = operationId
+            })
+        end
+    },
+    {
+        name = Core.COMMAND.Footstep,
+        state = function(operationId)
+            return Core.reduce(activeApplyRollbackBase, {
+                type = "SetFootstepSoundSource",
+                enabled = true,
                 remote = true,
                 operationId = operationId
             })
@@ -1212,6 +1272,35 @@ local rejectedAnimation, rejectedAnimationEffects = Core.reduce(activeAnimationR
 assertEqual(rejectedAnimation.look.useFashionMovementAnimations, true)
 assertEqual(rejectedAnimationEffects[1].type, "ApplyMovementAnimationSourceCompensation")
 assertEqual(rejectedAnimationEffects[1].useFashionMovementAnimations, true)
+
+local activeFootstepPending, activeFootstepEffects = Core.reduce(
+    activeVisibilityState,
+    {
+        type = "SetFootstepSoundSource",
+        enabled = true,
+        remote = true,
+        operationId = "footstep-active"
+    }
+)
+assertEqual(activeFootstepEffects[1].type, "ApplyFootstepSoundSource")
+assertEqual(activeFootstepEffects[1].useFashionFootstepSounds, true)
+local activeFootstepRendered, footstepRenderedEffects = Core.reduce(
+    activeFootstepPending,
+    { type = "FootstepSoundSourceUpdateSucceeded" }
+)
+assertEqual(footstepRenderedEffects[1].type, "SendCommand")
+assertEqual(footstepRenderedEffects[1].kind, Core.COMMAND.Footstep)
+assertEqual(footstepRenderedEffects[1].look.useFashionFootstepSounds, true)
+local rejectedFootstep, rejectedFootstepEffects = Core.reduce(activeFootstepRendered, {
+    type = "AckReceived",
+    operationId = "footstep-active",
+    accepted = false,
+    revision = 10,
+    reason = "denied"
+})
+assertEqual(rejectedFootstep.look.useFashionFootstepSounds, false)
+assertEqual(rejectedFootstepEffects[1].type, "ApplyFootstepSoundSourceCompensation")
+assertEqual(rejectedFootstepEffects[1].useFashionFootstepSounds, false)
 
 local inactiveRemotePending, inactiveRemoteEffects = Core.reduce(
     inactiveVisibilityState,

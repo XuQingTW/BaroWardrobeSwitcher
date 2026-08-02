@@ -260,6 +260,9 @@ local lastForceShowMask = nil
 local movementAnimationCalls = 0
 local lastUseFashionMovementAnimations = nil
 local movementAnimationByCharacterId = {}
+local footstepSoundCalls = 0
+local lastUseFashionFootstepSounds = nil
+local footstepSoundByCharacterId = {}
 local activationCharacterIds = {}
 local activeCharacterIds = {}
 local capturedIdentifierByCharacterId = {}
@@ -330,6 +333,12 @@ local visualOverride = {
         movementAnimationCalls = movementAnimationCalls + 1
         lastUseFashionMovementAnimations = enabled == true
         movementAnimationByCharacterId[characterId(character)] = enabled == true
+        return true
+    end,
+    SetUseFashionFootstepSounds = function(character, enabled)
+        footstepSoundCalls = footstepSoundCalls + 1
+        lastUseFashionFootstepSounds = enabled == true
+        footstepSoundByCharacterId[characterId(character)] = enabled == true
         return true
     end,
     ApplyFashionItemVisual = function()
@@ -662,8 +671,10 @@ hooks.think()
 assert(removedWidgets == removesBeforeNextPage + 1 and liveOverlayRoots == 1,
     "Next Page did not replace exactly one overlay on the next tick")
 assert(not hasVisibleButton("Appearance Layers...") and
-       hasVisibleButton("Movement: Fashion Priority") and hasVisibleButton("Diagnostics"),
-    "page two did not contain only movement and diagnostic controls")
+       hasVisibleButton("Movement: Fashion Priority") and
+       hasVisibleButton("Footstep Sounds: Follow Equipment") and
+       hasVisibleButton("Diagnostics"),
+    "page two did not contain movement, footsteps, and diagnostic controls")
 local fashionMovementButton = buttons["Movement: Fashion Priority"]
 assert(fashionMovementButton ~= nil and type(fashionMovementButton.OnClicked) == "function",
     "page two did not expose the default fashion-priority movement setting")
@@ -697,6 +708,32 @@ assert(saveCalls == savesBeforeEquipmentMovement + 2 and
        lastSaved:find("fashionMovement=true", 1, true) ~= nil and
        lastSavedProfileKey == stableCharacterProfileKey("A Target NPC"),
     "the selected bot's movement choice was not persisted to its own profile")
+
+local equipmentFootstepButton = buttons["Footstep Sounds: Follow Equipment"]
+assert(equipmentFootstepButton ~= nil and type(equipmentFootstepButton.OnClicked) == "function",
+    "page two did not expose the default equipment-footstep setting")
+local removesBeforeFashionFootsteps = removedWidgets
+local savesBeforeFashionFootsteps = saveCalls
+local footstepCallsBeforeFashionFootsteps = footstepSoundCalls
+equipmentFootstepButton.OnClicked()
+assert(removedWidgets == removesBeforeFashionFootsteps,
+    "changing the footstep source rebuilt the overlay inside its click callback")
+hooks.think()
+assert(removedWidgets == removesBeforeFashionFootsteps + 1 and liveOverlayRoots == 1,
+    "changing to fashion footsteps did not replace exactly one overlay")
+assert(footstepSoundCalls == footstepCallsBeforeFashionFootsteps,
+    "an inactive saved look tried to update footstep rendering")
+assert(saveCalls == savesBeforeFashionFootsteps + 1 and
+       lastSaved:find("fashionFootstep=true", 1, true) ~= nil,
+    "the fashion-footstep choice was not persisted through the reducer")
+local fashionFootstepButton = buttons["Footstep Sounds: Follow Fashion"]
+assert(fashionFootstepButton ~= nil and type(fashionFootstepButton.OnClicked) == "function",
+    "the fashion-footstep choice did not update its button label")
+fashionFootstepButton.OnClicked()
+hooks.think()
+assert(saveCalls == savesBeforeFashionFootsteps + 2 and
+       lastSaved:find("fashionFootstep=false", 1, true) ~= nil,
+    "restoring equipment footsteps was not persisted")
 
 local pageBackButton = buttons["Back"]
 assert(pageBackButton ~= nil and type(pageBackButton.OnClicked) == "function",
@@ -755,9 +792,10 @@ assert(saveCalls == savesBeforeAttachmentVisibility + 1 and
        lastSavedProfileKey == stableCharacterProfileKey("Player Tester"),
     "attachment visibility did not persist to the controlled character profile")
 assert(lastSaved ~= nil and
-    lastSaved:find("schema=4", 1, true) ~= nil and
+    lastSaved:find("schema=5", 1, true) ~= nil and
     lastSaved:find("hidehair=true", 1, true) ~= nil and
     lastSaved:find("fashionMovement=true", 1, true) ~= nil and
+    lastSaved:find("fashionFootstep=false", 1, true) ~= nil and
     lastSaved:find("visibilityHair=hide", 1, true) ~= nil and
     lastSaved:find("visibilityFaceAttachment=auto", 1, true) ~= nil,
     "attachment visibility persistence did not store the complete policy")
@@ -939,6 +977,8 @@ assert(capturedIdentifierByCharacterId[44] == "existinghelmet",
     "the existing NPC profile did not use its own saved appearance")
 assert(movementAnimationByCharacterId[44] == false,
     "the existing NPC profile did not apply its equipped-gear movement source")
+assert(footstepSoundByCharacterId[44] == false,
+    "an existing profile without the new field did not default to equipment footsteps")
 assert(activeCharacterIds[43] == true and activeCharacterIds[44] == true,
     "switching crew did not preserve both independently active appearances")
 
@@ -1075,7 +1115,8 @@ assert(WardrobeCore.writeServerHello(
     0,
     WardrobeCore.CAPABILITY.AttachmentVisibility +
         WardrobeCore.CAPABILITY.MovementAnimationSource +
-        WardrobeCore.CAPABILITY.CrewTargeting
+        WardrobeCore.CAPABILITY.CrewTargeting +
+        WardrobeCore.CAPABILITY.FootstepSoundSource
 ))
 serverHello.FinalizeForTransport()
 assert(type(networkHandlers[WardrobeCore.NET.V2_HELLO]) == "function")
@@ -1147,6 +1188,28 @@ assert(WardrobeCore.writeAck(rejectedMovementAck, {
 rejectedMovementAck.FinalizeForTransport()
 networkHandlers[WardrobeCore.NET.V2_ACK](rejectedMovementAck)
 hooks.think()
+
+local multiplayerFootstepButton = buttons["Footstep Sounds: Follow Equipment"]
+assert(multiplayerFootstepButton ~= nil and
+       type(multiplayerFootstepButton.OnClicked) == "function")
+multiplayerFootstepButton.OnClicked()
+hooks.think()
+local footstepCommand = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+assert(footstepCommand.kind == WardrobeCore.COMMAND.Footstep and
+       footstepCommand.look.useFashionFootstepSounds == true,
+    "multiplayer footstep toggle did not send its authoritative sound-source command")
+local rejectedFootstepAck = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+assert(WardrobeCore.writeAck(rejectedFootstepAck, {
+    operationId = footstepCommand.operationId,
+    accepted = false,
+    revision = 0,
+    reason = "synthetic rejection"
+}))
+rejectedFootstepAck.FinalizeForTransport()
+networkHandlers[WardrobeCore.NET.V2_ACK](rejectedFootstepAck)
+hooks.think()
+assert(buttons["Footstep Sounds: Follow Equipment"] ~= nil,
+    "rejected multiplayer footstep change did not roll back its label")
 buttons["Back"].OnClicked()
 hooks.think()
 
@@ -1431,8 +1494,13 @@ do
     end
     assert(helloBeforeRound ~= nil, "initial v2 hello was not sent")
     local initialSessionId = assert(WardrobeCore.readClientHello(helloBeforeRound)).clientSessionId
-    hooks.roundEnd()
     Character.Controlled = nil
+    hooks.think()
+    hooks.roundEnd()
+    assert(lastSaved ~= nil and
+           lastSaved:find("active=false", 1, true) ~= nil and
+           lastSaved:find("auto=true", 1, true) ~= nil,
+        "roundEnd lost the local player's cross-round apply intent after Character.Controlled cleared")
     hooks.roundStart()
     local helloCountBeforeCharacterReady = 0
     for _, message in ipairs(networkSent) do

@@ -327,6 +327,8 @@ namespace BaroWardrobeSwitcher
 
         public bool UseFashionMovementAnimations { get; set; } = true;
 
+        public bool UseFashionFootstepSounds { get; set; }
+
         public HashSet<object> SuppressedEquipmentAnimations { get; } = new HashSet<object>();
 
         public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();

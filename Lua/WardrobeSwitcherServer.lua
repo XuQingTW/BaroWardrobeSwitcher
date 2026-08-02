@@ -4,10 +4,10 @@ if not SERVER then return end
 
 local Core = assert(
     type(WardrobeCore) == "table" and
-    tonumber(WardrobeCore.PROTOCOL_VERSION) == 4 and
+    tonumber(WardrobeCore.PROTOCOL_VERSION) == 5 and
     type(WardrobeCore.NET) == "table" and
     WardrobeCore,
-    "Baro Wardrobe Switcher requires WardrobeCore protocol 4")
+    "Baro Wardrobe Switcher requires WardrobeCore protocol 5")
 local NET = Core.NET
 local PROTOCOL_VERSION = Core.PROTOCOL_VERSION
 local LOOK_SCHEMA_VERSION = Core.LOOK_SCHEMA_VERSION
@@ -23,25 +23,21 @@ local ATTACHMENT_KEYS = Core.ATTACHMENT_KEYS
 local CAPABILITY_ATTACHMENT_VISIBILITY = Core.CAPABILITY.AttachmentVisibility
 local CAPABILITY_MOVEMENT_ANIMATION_SOURCE = Core.CAPABILITY.MovementAnimationSource
 local CAPABILITY_CREW_TARGETING = Core.CAPABILITY.CrewTargeting
+local CAPABILITY_FOOTSTEP_SOUND_SOURCE = Core.CAPABILITY.FootstepSoundSource
 local COMMAND_VISIBILITY = Core.COMMAND.Visibility
 local COMMAND_ANIMATION = Core.COMMAND.Animation
+local COMMAND_FOOTSTEP = Core.COMMAND.Footstep
 
 local CharacterInventory = nil
 local Client = nil
 local GameMain = nil
+local GameApi = rawget(_G, "Game")
 local ItemPrefab = nil
-local Environment = nil
-local Directory = nil
-local File = nil
-local EnvironmentSpecialFolder = nil
+local File = rawget(_G, "File")
 pcall(function() CharacterInventory = LuaUserData.CreateStatic("Barotrauma.CharacterInventory", true) end)
 pcall(function() Client = LuaUserData.CreateStatic("Barotrauma.Networking.Client", true) end)
 pcall(function() GameMain = LuaUserData.CreateStatic("Barotrauma.GameMain", true) end)
 pcall(function() ItemPrefab = LuaUserData.CreateStatic("Barotrauma.ItemPrefab", true) end)
-pcall(function() Environment = LuaUserData.CreateStatic("System.Environment", true) end)
-pcall(function() Directory = LuaUserData.CreateStatic("System.IO.Directory", true) end)
-pcall(function() File = LuaUserData.CreateStatic("System.IO.File", true) end)
-pcall(function() EnvironmentSpecialFolder = CreateEnum("System.Environment+SpecialFolder") end)
 
 local slots = {
     { key = "Head", slot = InvSlotType.Head },
@@ -62,19 +58,31 @@ local operationCachesByAccount = {}
 local activeByCharacterId = {}
 local serverSessionId = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
 local lastGameSessionKey = nil
+local roundReactivationGeneration = 0
 
 local function writeLog(level, message)
     local line = "[" .. MOD_NAME .. "] " .. tostring(message)
-    if Environment == nil or Directory == nil or File == nil then return end
+    local written = false
+    local writeFailure = nil
+    if File ~= nil and GameApi ~= nil then
+        written, writeFailure = pcall(function()
+            local root = GameApi.SaveFolder
+            if root == nil or tostring(root) == "" then error("Game.SaveFolder unavailable") end
+            local directory = tostring(root):gsub("\\", "/"):gsub("/$", "") ..
+                "/ModData/BaroWardrobeSwitcher"
+            File.CreateDirectory(directory)
+            local path = directory .. "/WardrobeServer.log"
+            local previous = File.Exists(path) and File.Read(path) or ""
+            File.Write(path, previous ..
+                "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] [" .. level .. "] " .. line .. "\n")
+        end)
+    end
+    if written then return end
     pcall(function()
-        local root = Environment.GetFolderPath(
-            EnvironmentSpecialFolder ~= nil and EnvironmentSpecialFolder.LocalApplicationData or 28)
-        local directory = tostring(root):gsub("\\", "/") ..
-            "/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
-        Directory.CreateDirectory(directory)
-        File.AppendAllText(
-            directory .. "/WardrobeServer.log",
-            "[" .. os.date("%Y-%m-%d %H:%M:%S") .. "] [" .. level .. "] " .. line .. "\n")
+        local consoleLine = line .. (writeFailure ~= nil and
+            (" [file log unavailable: " .. tostring(writeFailure) .. "]") or "")
+        if level == "WARN" and type(printerror) == "function" then printerror(consoleLine)
+        else print(consoleLine) end
     end)
 end
 
@@ -121,6 +129,7 @@ local function cloneLook(look)
         hideHair = legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = look.useFashionMovementAnimations ~= false,
+        useFashionFootstepSounds = look.useFashionFootstepSounds == true,
         slots = {}
     }
     for _, entry in ipairs(slots) do
@@ -187,8 +196,8 @@ local function firstSessionValue(object, names)
 end
 
 local function currentGameSessionKey()
-    if GameMain == nil then return nil end
-    local session = userDataMember(GameMain, "GameSession")
+    local session = userDataMember(GameMain, "GameSession") or
+        userDataMember(GameApi, "GameSession")
     if session == nil then return nil end
     local dataPath = userDataMember(session, "DataPath")
     local fromDataPath = firstSessionValue(dataPath, { "SavePath", "LoadPath" })
@@ -209,6 +218,16 @@ local function currentGameSessionKey()
         return "runtime:" .. serverSessionId .. ":" .. presetIdentifier
     end
     return nil
+end
+
+local function isRuntimeSessionKey(key)
+    return type(key) == "string" and key:sub(1, 8) == "runtime:"
+end
+
+local function canAwaitPersistentSessionKey(persistentKey, currentKey)
+    return persistentKey ~= nil and
+        (currentKey == nil or persistentKey == currentKey or
+            (isRuntimeSessionKey(currentKey) and not isRuntimeSessionKey(persistentKey)))
 end
 
 local function accountIdForClient(client)
@@ -269,6 +288,11 @@ local function steamIdForClient(client)
     value = trim(value)
     if value == nil or value:match("^0+$") then return nil end
     return value
+end
+
+local function steamPersistenceIdForClient(client)
+    local steamId = steamIdForClient(client)
+    return steamId ~= nil and ("steam:" .. steamId) or nil
 end
 
 local function connectedClients()
@@ -441,13 +465,12 @@ local function decodeJson(text)
 end
 
 local function storageDirectory()
-    if Environment == nil then return nil end
-    local ok, root = pcall(function()
-        local value = EnvironmentSpecialFolder ~= nil and EnvironmentSpecialFolder.LocalApplicationData or 28
-        return Environment.GetFolderPath(value)
-    end)
-    if not ok or trim(root) == nil then return nil end
-    return tostring(root):gsub("\\", "/") .. "/Daedalic Entertainment GmbH/Barotrauma/ModData/BaroWardrobeSwitcher"
+    local saveFolder = trim(userDataMember(GameApi, "SaveFolder"))
+    if saveFolder ~= nil then
+        return tostring(saveFolder):gsub("\\", "/"):gsub("/$", "") ..
+            "/ModData/BaroWardrobeSwitcher"
+    end
+    return nil
 end
 
 local function storagePath(fileName)
@@ -463,14 +486,15 @@ end
 
 local function readAllText(path)
     if File == nil or path == nil then return nil end
-    local ok, text = pcall(function() return File.ReadAllText(path) end)
+    local ok, text = pcall(function() return File.Read(path) end)
     return ok and tostring(text) or nil
 end
 
 local function ensureStorageDirectory()
     local directory = storageDirectory()
-    if Directory == nil or directory == nil then return false end
-    return pcall(function() Directory.CreateDirectory(directory) end)
+    if File == nil or directory == nil then return false end
+    local ok, created = pcall(function() return File.CreateDirectory(directory) end)
+    return ok and created ~= false
 end
 
 -- Persistence is replace-based so a crash cannot expose a partially written
@@ -480,21 +504,20 @@ local function atomicWrite(path, contents)
     if File == nil or path == nil or not ensureStorageDirectory() then return false, "storage_unavailable" end
     local temporaryPath = path .. ".tmp"
     local backupPath = path .. ".bak"
+    local hadPrimary = false
     local ok, failure = pcall(function()
         if File.Exists(temporaryPath) then File.Delete(temporaryPath) end
-        File.WriteAllText(temporaryPath, contents)
-        if File.Exists(path) then
-            if File.Exists(backupPath) then File.Delete(backupPath) end
-            local replaced = pcall(function() File.Replace(temporaryPath, path, backupPath) end)
-            if not replaced then
-                File.Copy(path, backupPath, true)
-                File.Move(temporaryPath, path, true)
-            end
-        else
-            File.Move(temporaryPath, path)
-        end
+        File.Write(temporaryPath, contents)
+        if readAllText(temporaryPath) ~= contents then error("temporary_write_verification_failed") end
+        hadPrimary = File.Exists(path)
+        if hadPrimary then File.Move(path, backupPath) end
+        File.Move(temporaryPath, path)
+        if readAllText(path) ~= contents then error("write_verification_failed") end
     end)
     if not ok then
+        if hadPrimary then
+            pcall(function() if File.Exists(backupPath) then File.Move(backupPath, path) end end)
+        end
         pcall(function() if File.Exists(temporaryPath) then File.Delete(temporaryPath) end end)
         return false, tostring(failure)
     end
@@ -525,6 +548,8 @@ local function encodeLookJson(look)
         '"captured":' .. tostring(look ~= nil and look.captured == true),
         '"useFashionMovementAnimations":' ..
             tostring(look == nil or look.useFashionMovementAnimations ~= false),
+        '"useFashionFootstepSounds":' ..
+            tostring(look ~= nil and look.useFashionFootstepSounds == true),
         '"attachmentVisibility":' .. encodeAttachmentVisibilityJson(
             look ~= nil and look.attachmentVisibility or nil
         )
@@ -617,6 +642,8 @@ local function parseLegacyDocument(text)
             captured = true,
             hideHair = false,
             attachmentVisibility = Core.attachmentVisibilityFromLegacy(false),
+            useFashionMovementAnimations = true,
+            useFashionFootstepSounds = false,
             slots = {}
         }
         for part in line:gmatch("[^|]+") do
@@ -656,7 +683,8 @@ local function parseLegacyDocument(text)
 end
 
 local function validateStoredLook(raw, persistenceVersion)
-    local expectedLookSchema = persistenceVersion == PERSISTENCE_VERSION and LOOK_SCHEMA_VERSION or 2
+    local expectedLookSchema = persistenceVersion == PERSISTENCE_VERSION and LOOK_SCHEMA_VERSION or
+        (persistenceVersion == 4 and 3 or 2)
     if type(raw) ~= "table" or type(raw.schemaVersion) ~= "number" or
         raw.schemaVersion ~= expectedLookSchema or
         raw.captured ~= true or type(raw.slots) ~= "table" then
@@ -664,6 +692,24 @@ local function validateStoredLook(raw, persistenceVersion)
     end
     local visibility
     if persistenceVersion == PERSISTENCE_VERSION then
+        if not hasOnlyFields(raw, {
+            schemaVersion = true,
+            captured = true,
+            attachmentVisibility = true,
+            useFashionMovementAnimations = true,
+            useFashionFootstepSounds = true,
+            slots = true,
+            colors = true
+        }) or raw.hideHair ~= nil or type(raw.attachmentVisibility) ~= "table" or
+            type(raw.colors) ~= "table" or
+            (raw.useFashionMovementAnimations ~= nil and
+                type(raw.useFashionMovementAnimations) ~= "boolean") or
+            (raw.useFashionFootstepSounds ~= nil and
+                type(raw.useFashionFootstepSounds) ~= "boolean") then
+            return nil
+        end
+        visibility = Core.validateAttachmentVisibility(raw.attachmentVisibility, false)
+    elseif persistenceVersion == 4 then
         if not hasOnlyFields(raw, {
             schemaVersion = true,
             captured = true,
@@ -708,7 +754,9 @@ local function validateStoredLook(raw, persistenceVersion)
         hideHair = legacyHideHair(visibility),
         attachmentVisibility = visibility,
         useFashionMovementAnimations =
-            persistenceVersion ~= PERSISTENCE_VERSION or raw.useFashionMovementAnimations ~= false,
+            persistenceVersion < 4 or raw.useFashionMovementAnimations ~= false,
+        useFashionFootstepSounds =
+            persistenceVersion == PERSISTENCE_VERSION and raw.useFashionFootstepSounds == true,
         slots = {}
     }
     local count = 0
@@ -720,7 +768,7 @@ local function validateStoredLook(raw, persistenceVersion)
         if count > MAX_SLOTS then return nil end
         look.slots[key] = { identifier = identifier, itemId = 0, name = "" }
     end
-    if persistenceVersion == PERSISTENCE_VERSION then
+    if persistenceVersion == PERSISTENCE_VERSION or persistenceVersion == 4 then
         for key, color in pairs(raw.colors) do
             if slotByKey[key] == nil or look.slots[key] == nil or type(color) ~= "number" or
                 color < 0 or color > MAX_REVISION or color % 1 ~= 0 then
@@ -735,7 +783,7 @@ end
 local function quarantine(path, reason)
     local suffix = os.date("!%Y%m%d-%H%M%S")
     local destination = path .. "." .. suffix .. ".corrupt"
-    local moved = File ~= nil and pcall(function() File.Move(path, destination, true) end)
+    local moved = File ~= nil and pcall(function() File.Move(path, destination) end)
     warn("Quarantined invalid wardrobe persistence" .. (moved and " to " .. destination or "") .. ": " .. tostring(reason))
 end
 
@@ -776,7 +824,8 @@ local function loadJsonPersistence(path)
         ok and type(document) == "table" and type(document.schemaVersion) == "number" and
         document.schemaVersion or nil
     if not ok or
-        (documentVersion ~= PERSISTENCE_VERSION and documentVersion ~= 3 and documentVersion ~= 2) or
+        (documentVersion ~= PERSISTENCE_VERSION and documentVersion ~= 4 and
+            documentVersion ~= 3 and documentVersion ~= 2) or
         type(document.records) ~= "table" or
         type(document.pendingLegacySteamRecords) ~= "table" or
         type(document.migratedLegacySteamIds) ~= "table" or
@@ -827,10 +876,9 @@ local function loadJsonPersistence(path)
     legacySteamRecords = pendingLegacy
     if documentVersion ~= PERSISTENCE_VERSION then
         local backupPath = path .. ".v" .. tostring(documentVersion) .. ".bak"
-        local backedUp = File ~= nil and pcall(function()
-            if File.Exists(backupPath) then File.Delete(backupPath) end
-            File.Copy(path, backupPath, true)
-        end)
+        local source = readAllText(path)
+        local backedUp = File ~= nil and source ~= nil and
+            pcall(function() File.Write(backupPath, source) end)
         if not backedUp then
             warn("Could not preserve " .. backupPath .. "; leaving the valid legacy file unchanged.")
             return true
@@ -850,7 +898,6 @@ local function moveLegacyToBackup(path)
     if File == nil or not fileExists(path) then return end
     local backup = path .. ".v1.bak"
     pcall(function()
-        if File.Exists(backup) then File.Delete(backup) end
         File.Move(path, backup)
     end)
 end
@@ -1084,6 +1131,7 @@ local function canonicalizeLook(raw, requireCaptured)
         hideHair = legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = raw.useFashionMovementAnimations ~= false,
+        useFashionFootstepSounds = raw.useFashionFootstepSounds == true,
         slots = {}
     }
     local count, payloadBytes = 0, 16
@@ -1126,6 +1174,8 @@ local function captureAuthoritativeLook(character, clientLook)
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations =
             type(clientLook) ~= "table" or clientLook.useFashionMovementAnimations ~= false,
+        useFashionFootstepSounds =
+            type(clientLook) == "table" and clientLook.useFashionFootstepSounds == true,
         slots = {}
     }
     for _, entry in ipairs(slots) do
@@ -1162,20 +1212,29 @@ local function writeLegacyLook(message, characterId, look)
     end
 end
 
-local function sessionRecord(session)
-    return session ~= nil and session.accountId ~= nil and persistentRecords[session.accountId] or nil
-end
-
 local function migrateLegacyForClient(client, accountId)
     local steamId = steamIdForClient(client)
-    if accountId == nil or steamId == nil or migratedLegacySteamIds[steamId] == true then return end
+    if accountId == nil or steamId == nil then return end
+    local changed = false
+    local fallbackAccountId = "steam:" .. steamId
+    if fallbackAccountId ~= accountId and persistentRecords[fallbackAccountId] ~= nil then
+        if persistentRecords[accountId] == nil then
+            persistentRecords[accountId] = persistentRecords[fallbackAccountId]
+        end
+        persistentRecords[fallbackAccountId] = nil
+        changed = true
+    end
     local legacy = legacySteamRecords[steamId]
-    if legacy == nil then return end
-    if persistentRecords[accountId] == nil then persistentRecords[accountId] = legacy end
-    legacySteamRecords[steamId] = nil
-    migratedLegacySteamIds[steamId] = true
-    persistLooks()
-    log("Migrated a legacy Steam wardrobe record to Client.AccountId.")
+    if legacy ~= nil and migratedLegacySteamIds[steamId] ~= true then
+        if persistentRecords[accountId] == nil then persistentRecords[accountId] = legacy end
+        legacySteamRecords[steamId] = nil
+        migratedLegacySteamIds[steamId] = true
+        changed = true
+    end
+    if changed then
+        persistLooks()
+        log("Migrated a Steam wardrobe record to Client.AccountId.")
+    end
 end
 
 -- v2 retries reuse operation IDs. Retaining the first result per account/session
@@ -1216,9 +1275,32 @@ end
 local function sessionFor(client)
     if client == nil then return nil end
     local existing = sessionsByClient[client]
-    if existing ~= nil then return existing end
+    if existing ~= nil then
+        -- client.connected can run before LuaCs exposes Client.AccountId. If
+        -- the hello/character arrives after that, replace the still-pristine
+        -- anonymous cache with the stable account session instead of losing
+        -- the persisted look for the whole connection.
+        local lateAccountId = existing.accountId == nil and accountIdForClient(client) or nil
+        if lateAccountId ~= nil and existing.savedLook == nil and
+            existing.active ~= true and existing.activeCharacterId == nil and
+            (tonumber(existing.revision) or 0) == 0 then
+            local previousProtocol = existing.protocol
+            local previousClientSessionId = existing.clientSessionId
+            sessionsByClient[client] = nil
+            local rebound = sessionFor(client)
+            if rebound ~= nil then
+                rebound.protocol = previousProtocol
+                if previousClientSessionId ~= nil then
+                    bindOperationCache(rebound, previousClientSessionId)
+                end
+            end
+            return rebound
+        end
+        return existing
+    end
     local accountId = accountIdForClient(client)
-    migrateLegacyForClient(client, accountId)
+    if accountId ~= nil then migrateLegacyForClient(client, accountId) end
+    accountId = accountId or steamPersistenceIdForClient(client)
     local record = accountId ~= nil and persistentRecords[accountId] or nil
     local recordLook = nil
     if record ~= nil then
@@ -1231,6 +1313,10 @@ local function sessionFor(client)
             record.savedLook = cloneLook(recordLook)
         end
     end
+    local gameSessionKey = currentGameSessionKey()
+    local persistentSessionKey = record ~= nil and record.sessionKey or nil
+    local shouldRestorePersistentLook = recordLook ~= nil and record.active == true and
+        canAwaitPersistentSessionKey(persistentSessionKey, gameSessionKey)
     local initialOperationCache = newOperationCache(nil)
     local session = {
         client = client,
@@ -1243,8 +1329,12 @@ local function sessionFor(client)
         clientSessionId = nil,
         revision = record ~= nil and (tonumber(record.revision) or 0) or 0,
         savedLook = cloneLook(recordLook),
-        active = recordLook ~= nil and record.active == true and record.sessionKey ~= nil and record.sessionKey == currentGameSessionKey(),
-        activePersistent = recordLook ~= nil and record.active == true and record.sessionKey ~= nil and record.sessionKey == currentGameSessionKey(),
+        -- GameSession can still be nil while a reconnecting client is being
+        -- constructed. Preserve the persisted intent until the bounded
+        -- reactivation retry can compare the eventual key.
+        active = shouldRestorePersistentLook,
+        activePersistent = shouldRestorePersistentLook,
+        persistentSessionKey = shouldRestorePersistentLook and persistentSessionKey or nil,
         activeCharacterId = nil,
         seenOperations = initialOperationCache.results,
         operationCache = initialOperationCache
@@ -1263,7 +1353,7 @@ local function updatePersistentRecord(session)
         revision = session.revision,
         savedLook = cloneLook(session.savedLook),
         active = session.active == true and session.activePersistent == true,
-        sessionKey = currentGameSessionKey()
+        sessionKey = session.persistentSessionKey or currentGameSessionKey()
     }
 end
 
@@ -1283,6 +1373,7 @@ local function snapshotCommitState(session)
         savedLook = cloneLook(session.savedLook),
         active = session.active == true,
         activePersistent = session.activePersistent == true,
+        persistentSessionKey = session.persistentSessionKey,
         activeCharacterId = session.activeCharacterId,
         persistentRecord = session.accountId ~= nil and clonePersistentRecord(persistentRecords[session.accountId]) or nil
     }
@@ -1293,6 +1384,7 @@ local function restoreCommitState(session, snapshot)
     session.savedLook = cloneLook(snapshot.savedLook)
     session.active = snapshot.active == true
     session.activePersistent = snapshot.activePersistent == true
+    session.persistentSessionKey = snapshot.persistentSessionKey
     session.activeCharacterId = snapshot.activeCharacterId
     if session.accountId ~= nil then
         persistentRecords[session.accountId] = clonePersistentRecord(snapshot.persistentRecord)
@@ -1361,6 +1453,7 @@ local function broadcastState(revision, characterId, active, look)
 end
 
 local activateRuntime
+local handleGameSessionChange
 
 local function sendActiveSnapshot(client)
     local reboundCharacterIds = {}
@@ -1403,6 +1496,7 @@ local function clearActiveRuntime(session, shouldBroadcast)
     local characterId = tonumber(session.activeCharacterId)
     session.active = false
     session.activePersistent = false
+    session.persistentSessionKey = nil
     session.activeCharacterId = nil
     if characterId ~= nil and characterId > 0 then
         local active = activeByCharacterId[characterId]
@@ -1414,8 +1508,13 @@ end
 
 activateRuntime = function(session, character, look, restoring)
     local characterId = characterEntityId(character)
+    local restoreSessionKey = restoring == true and currentGameSessionKey() or nil
+    local expectedSessionKey = restoring == true and session ~= nil and
+        session.persistentSessionKey or nil
     if session == nil or characterId <= 0 or look == nil or
-        (restoring == true and currentGameSessionKey() == nil) then
+        (restoring == true and (restoreSessionKey == nil or lastGameSessionKey == nil or
+            restoreSessionKey ~= lastGameSessionKey or
+            (expectedSessionKey ~= nil and restoreSessionKey ~= expectedSessionKey))) then
         return false
     end
     if session.activeCharacterId ~= nil and tonumber(session.activeCharacterId) ~= characterId then
@@ -1427,6 +1526,7 @@ activateRuntime = function(session, character, look, restoring)
     end
     session.active = true
     session.activePersistent = character == clientCharacter(session.client)
+    session.persistentSessionKey = nil
     session.activeCharacterId = characterId
     activeByCharacterId[characterId] = {
         session = session,
@@ -1491,6 +1591,12 @@ local function commitSave(session, character, clientLook)
     local look, reason = captureAuthoritativeLook(character, clientLook)
     if look == nil then return false, reason end
 
+    -- Verify durable storage before Save changes physical equipment. This keeps
+    -- an unavailable server filesystem from turning a rejected Save into lost gear.
+    if session.accountId ~= nil and not persistLooks() then
+        return false, "persistence_failed"
+    end
+
     -- Treat equipment removal as part of the command transaction. Do not advance
     -- the revision, persist, or broadcast unless every captured item left all
     -- managed slots. Best-effort re-equip restores already removed items when a
@@ -1510,6 +1616,7 @@ local function commitSave(session, character, clientLook)
     session.savedLook = look
     session.active = false
     session.activePersistent = false
+    session.persistentSessionKey = nil
     if not persistStableSessionOrRollback(session, previous) then
         local restored = restoreWardrobeItems(character, itemSnapshots)
         return false, restored and "persistence_failed" or "persistence_failed_equipment_rollback_failed"
@@ -1534,6 +1641,7 @@ local function commitApply(session, character, look)
     session.savedLook = cloneLook(look)
     session.active = true
     session.activePersistent = character == clientCharacter(session.client)
+    session.persistentSessionKey = nil
     if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
     if not activateRuntime(session, character, look) then
         restoreCommitState(session, previous)
@@ -1564,6 +1672,8 @@ local function commitVisualPreference(session, requestedLook, preference)
         merged.hideHair = legacyHideHair(merged.attachmentVisibility)
     elseif preference == COMMAND_ANIMATION then
         merged.useFashionMovementAnimations = requestedLook.useFashionMovementAnimations ~= false
+    elseif preference == COMMAND_FOOTSTEP then
+        merged.useFashionFootstepSounds = requestedLook.useFashionFootstepSounds == true
     else
         return false, "unknown_preference"
     end
@@ -1593,6 +1703,7 @@ local function commitClear(session, deleteSaved)
     nextRevision(session)
     session.active = false
     session.activePersistent = false
+    session.persistentSessionKey = nil
     if deleteSaved then session.savedLook = nil end
     if not persistStableSessionOrRollback(session, previous) then return false, "persistence_failed" end
     clearActiveRuntime(session, true)
@@ -1631,7 +1742,8 @@ local validCommandKinds = {
     clear = true,
     forget = true,
     [COMMAND_VISIBILITY] = true,
-    [COMMAND_ANIMATION] = true
+    [COMMAND_ANIMATION] = true,
+    [COMMAND_FOOTSTEP] = true
 }
 
 local function validateV2Envelope(command)
@@ -1652,7 +1764,8 @@ local function validateV2Envelope(command)
     local envelopeBytes = 16 + byteLength(command.clientSessionId) + byteLength(command.operationId) + byteLength(command.kind)
     if envelopeBytes > MAX_PAYLOAD_BYTES then return false, "payload_too_large" end
     if (command.kind == "clear" or command.kind == "forget") and command.hasLook then return false, "unexpected_look" end
-    if (command.kind == COMMAND_VISIBILITY or command.kind == COMMAND_ANIMATION) and
+    if (command.kind == COMMAND_VISIBILITY or command.kind == COMMAND_ANIMATION or
+        command.kind == COMMAND_FOOTSTEP) and
         not command.hasLook then
         return false, "missing_look"
     end
@@ -1679,6 +1792,7 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     end
     local clientSessionId = tostring(hello.clientSessionId or "")
     if byteLength(clientSessionId) == 0 or byteLength(clientSessionId) > MAX_SESSION_ID_BYTES then return end
+    if handleGameSessionChange ~= nil then handleGameSessionChange() end
     local session = sessionFor(client)
     if session == nil then return end
     session.protocol = PROTOCOL_VERSION
@@ -1687,7 +1801,8 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     local written, writeReason = Core.writeServerHello(
         response,
         math.max(0, session.revision),
-        CAPABILITY_ATTACHMENT_VISIBILITY + CAPABILITY_MOVEMENT_ANIMATION_SOURCE + CAPABILITY_CREW_TARGETING
+        CAPABILITY_ATTACHMENT_VISIBILITY + CAPABILITY_MOVEMENT_ANIMATION_SOURCE +
+            CAPABILITY_CREW_TARGETING + CAPABILITY_FOOTSTEP_SOUND_SOURCE
     )
     if not written then warn("Could not encode v2 hello response: " .. tostring(writeReason)) return end
     Networking.Send(response, client.Connection)
@@ -1696,6 +1811,7 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
 end)
 
 local function handleV2Command(message, client, targeted)
+    if handleGameSessionChange ~= nil then handleGameSessionChange() end
     local session = sessionFor(client)
     if session == nil then return end
     local wireBytes = messageLengthBytes(message)
@@ -1738,7 +1854,8 @@ local function handleV2Command(message, client, targeted)
         character = nil
         reason = "target_in_use"
     elseif command.targeted and session.active and
-        (command.kind == "clear" or command.kind == COMMAND_VISIBILITY or command.kind == COMMAND_ANIMATION) and
+        (command.kind == "clear" or command.kind == COMMAND_VISIBILITY or
+            command.kind == COMMAND_ANIMATION or command.kind == COMMAND_FOOTSTEP) and
         tonumber(session.activeCharacterId) ~= characterEntityId(character) then
         character = nil
         reason = "target_not_active"
@@ -1758,6 +1875,10 @@ local function handleV2Command(message, client, targeted)
     elseif command.kind == COMMAND_ANIMATION then
         if character ~= nil or not command.targeted then
             accepted, reason = commitVisualPreference(session, command.look, COMMAND_ANIMATION)
+        end
+    elseif command.kind == COMMAND_FOOTSTEP then
+        if character ~= nil or not command.targeted then
+            accepted, reason = commitVisualPreference(session, command.look, COMMAND_FOOTSTEP)
         end
     elseif command.kind == "clear" then
         if character ~= nil or not command.targeted then accepted, reason = commitClear(session, false) end
@@ -1871,46 +1992,71 @@ local function clearRoundRuntime()
     end
 end
 
-local function handleGameSessionChange()
+handleGameSessionChange = function()
     local key = currentGameSessionKey()
     if key == nil then return end
     if lastGameSessionKey == nil then lastGameSessionKey = key return end
     if key == lastGameSessionKey then return end
     lastGameSessionKey = key
     clearRoundRuntime()
-    for _, record in pairs(persistentRecords) do record.active = false end
+    for _, record in pairs(persistentRecords) do
+        if record.sessionKey ~= key then record.active = false end
+    end
     for _, session in pairs(sessionsByClient) do
-        if session.active and not nextRevision(session) then
-            warn("Revision exhausted while deactivating a session at a campaign/session boundary.")
+        local keepPendingRestore = session.active == true and
+            session.activePersistent == true and
+            session.persistentSessionKey == key
+        if not keepPendingRestore then
+            if session.active and not nextRevision(session) then
+                warn("Revision exhausted while deactivating a session at a campaign/session boundary.")
+            end
+            session.active = false
+            session.activePersistent = false
+            session.persistentSessionKey = nil
+            updatePersistentRecord(session)
         end
-        session.active = false
-        session.activePersistent = false
-        updatePersistentRecord(session)
     end
     persistLooks()
-    log("Detected a new campaign/session; deactivated persisted wardrobe looks.")
+    log("Detected a new campaign/session; retained only matching wardrobe intent.")
 end
 
 local function reactivateSession(session)
-    if session == nil or not session.active or session.savedLook == nil then return end
+    if session == nil or not session.active or session.savedLook == nil then return true end
     if session.activePersistent ~= true then
         session.active = false
         session.activeCharacterId = nil
-        return
+        return true
+    end
+    local expectedSessionKey = session.persistentSessionKey
+    if expectedSessionKey ~= nil then
+        local gameSessionKey = currentGameSessionKey()
+        if gameSessionKey == nil then return false end
+        if gameSessionKey ~= expectedSessionKey then
+            if isRuntimeSessionKey(gameSessionKey) and
+                not isRuntimeSessionKey(expectedSessionKey) then
+                return false
+            end
+            session.active = false
+            session.activePersistent = false
+            session.persistentSessionKey = nil
+            session.activeCharacterId = nil
+            return true
+        end
     end
     local character = clientCharacter(session.client)
-    if character == nil or characterEntityId(character) <= 0 then return end
-    activateRuntime(session, character, session.savedLook, true)
+    if character == nil or characterEntityId(character) <= 0 then return false end
+    return activateRuntime(session, character, session.savedLook, true)
 end
 
 local function rebindCreatedCharacter(character)
     if character == nil or characterEntityId(character) <= 0 then return false end
+    handleGameSessionChange()
     for _, client in ipairs(connectedClients()) do
         if clientCharacter(client) == character then
             local session = sessionFor(client)
             if session ~= nil and session.active and session.activePersistent and session.savedLook ~= nil and
                 tonumber(session.activeCharacterId) ~= characterEntityId(character) then
-                activateRuntime(session, character, session.savedLook, true)
+                return activateRuntime(session, character, session.savedLook, true)
             end
             return true
         end
@@ -1918,10 +2064,27 @@ local function rebindCreatedCharacter(character)
     return false
 end
 
+local function scheduleSessionReactivation(session, generation)
+    local attempts = 0
+    local function attemptReactivation()
+        attempts = attempts + 1
+        if generation ~= roundReactivationGeneration or
+            session == nil or sessionsByClient[session.client] ~= session then
+            return
+        end
+        handleGameSessionChange()
+        if reactivateSession(session) or attempts >= 8 then return end
+        if Timer ~= nil and Timer.Wait ~= nil then
+            Timer.Wait(attemptReactivation, attempts == 1 and 100 or 500)
+        end
+    end
+    attemptReactivation()
+end
+
 Hook.Add("client.connected", "barowardrobeswitcher.v2-connected", function(client)
     handleGameSessionChange()
     local session = sessionFor(client)
-    reactivateSession(session)
+    scheduleSessionReactivation(session, roundReactivationGeneration)
 
     -- Old clients have no hello message. Give a v2-capable client the full
     -- negotiation window before selecting the bridge, then send one targeted
@@ -1938,12 +2101,10 @@ end)
 Hook.Add("client.disconnected", "barowardrobeswitcher.v2-disconnected", function(client)
     local session = sessionsByClient[client]
     if session == nil then return end
-    local wasActive = session.active == true and session.activePersistent == true
     clearActiveRuntime(session, true)
-    -- Preserve the active intent for a stable account so reconnect/round start
-    -- can assign the look to the new Character entity ID.
-    local record = sessionRecord(session)
-    if record ~= nil then record.active = wasActive end
+    -- Disconnect only clears the runtime binding. The durable account record
+    -- already contains the active intent and must not be rewritten from a
+    -- transient reconnect session whose Character may not exist yet.
     sessionsByClient[client] = nil
 end)
 
@@ -1962,12 +2123,17 @@ Hook.Add("character.created", "barowardrobeswitcher.v2-character-created", funct
 end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.v2-round-start", function()
+    roundReactivationGeneration = roundReactivationGeneration + 1
+    local generation = roundReactivationGeneration
     handleGameSessionChange()
     clearRoundRuntime()
-    for _, client in ipairs(connectedClients()) do reactivateSession(sessionFor(client)) end
+    for _, client in ipairs(connectedClients()) do
+        scheduleSessionReactivation(sessionFor(client), generation)
+    end
 end)
 
 Hook.Add("roundEnd", "barowardrobeswitcher.v2-round-end", function()
+    roundReactivationGeneration = roundReactivationGeneration + 1
     clearRoundRuntime()
 end)
 

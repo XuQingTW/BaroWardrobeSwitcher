@@ -121,6 +121,8 @@ namespace BaroWardrobeSwitcher
                 existing.Captured = look.Captured;
                 existing.UseFashionMovementAnimations =
                     look.UseFashionMovementAnimations;
+                existing.UseFashionFootstepSounds =
+                    look.UseFashionFootstepSounds;
                 existing.AttachmentVisibility =
                     CopyAttachmentVisibility(look.AttachmentVisibility);
                 existing.Slots = CopySlots(look.Slots);
@@ -202,6 +204,8 @@ namespace BaroWardrobeSwitcher
                             Captured = legacyLook.Captured,
                             UseFashionMovementAnimations =
                                 legacyLook.UseFashionMovementAnimations,
+                            UseFashionFootstepSounds =
+                                legacyLook.UseFashionFootstepSounds,
                             AttachmentVisibility =
                                 CopyAttachmentVisibility(legacyLook.AttachmentVisibility),
                             Slots = CopySlots(legacyLook.Slots),
@@ -448,6 +452,8 @@ namespace BaroWardrobeSwitcher
                     Captured = profile.Captured,
                     UseFashionMovementAnimations =
                         profile.UseFashionMovementAnimations,
+                    UseFashionFootstepSounds =
+                        profile.UseFashionFootstepSounds,
                     AttachmentVisibility =
                         CopyAttachmentVisibility(profile.AttachmentVisibility),
                     Slots = profile.Slots,
@@ -477,6 +483,8 @@ namespace BaroWardrobeSwitcher
                     LegacyHideHair(profile.AttachmentVisibility).ToString().ToLowerInvariant(),
                 "fashionMovement=" +
                     profile.UseFashionMovementAnimations.ToString().ToLowerInvariant(),
+                "fashionFootstep=" +
+                    profile.UseFashionFootstepSounds.ToString().ToLowerInvariant(),
                 "visibilityHair=" + profile.AttachmentVisibility.Hair,
                 "visibilityBeard=" + profile.AttachmentVisibility.Beard,
                 "visibilityMoustache=" + profile.AttachmentVisibility.Moustache,
@@ -593,6 +601,9 @@ namespace BaroWardrobeSwitcher
 
             [JsonPropertyName("useFashionMovementAnimations")]
             public bool UseFashionMovementAnimations { get; set; } = true;
+
+            [JsonPropertyName("useFashionFootstepSounds")]
+            public bool UseFashionFootstepSounds { get; set; }
 
             [JsonRequired]
             [JsonPropertyName("attachmentVisibility")]

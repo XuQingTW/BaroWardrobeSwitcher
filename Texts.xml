@@ -34,6 +34,8 @@
   <barowardrobeswitcher.button.attachment_layers>Appearance Layers...</barowardrobeswitcher.button.attachment_layers>
   <barowardrobeswitcher.button.animation_fashion>Movement: Fashion Priority</barowardrobeswitcher.button.animation_fashion>
   <barowardrobeswitcher.button.animation_equipment>Movement: Equipped Gear</barowardrobeswitcher.button.animation_equipment>
+  <barowardrobeswitcher.button.footstep_fashion>Footstep Sounds: Follow Fashion</barowardrobeswitcher.button.footstep_fashion>
+  <barowardrobeswitcher.button.footstep_equipment>Footstep Sounds: Follow Equipment</barowardrobeswitcher.button.footstep_equipment>
   <barowardrobeswitcher.button.hide_standard_hair>Hide Standard Hair</barowardrobeswitcher.button.hide_standard_hair>
   <barowardrobeswitcher.button.all_auto>All Auto</barowardrobeswitcher.button.all_auto>
   <barowardrobeswitcher.button.back>Back</barowardrobeswitcher.button.back>

@@ -95,13 +95,14 @@ Directory.CreateDirectory(normalizedProbeRoot);
 List<string> failures = [];
 try
 {
-    Run("canonical-v4-json", TestCanonicalV4, failures);
+    Run("canonical-v5-json", TestCanonicalV5, failures);
     Run("persistence-diagnostic-contract", TestDiagnosticContract, failures);
     Run("private-file-log", TestPrivateFileLog, failures);
     Run("utf8-identifier-limit", TestUtf8IdentifierLimit, failures);
     Run("v1-migration-and-backup", TestV1Migration, failures);
     Run("v2-migration-and-backup", TestV2Migration, failures);
     Run("v3-migration-and-backup", TestV3Migration, failures);
+    Run("v4-migration-and-backup", TestV4Migration, failures);
     Run("legacy-text-migration-and-backup", TestLegacyTextMigration, failures);
     Run("noncanonical-persistence-quarantine", TestNoncanonicalPersistenceQuarantine, failures);
     Run("atomic-replace-failure-preserves-old", TestAtomicFailure, failures);
@@ -132,11 +133,12 @@ if (failures.Count > 0)
 }
 return 0;
 
-void TestCanonicalV4()
+void TestCanonicalV5()
 {
     string directory = NewCaseDirectory("canonical");
     Assert(Save(
-            "schema=4|captured=true|active=true|auto=true|hidehair=false|fashionMovement=false|" +
+            "schema=5|captured=true|active=true|auto=true|hidehair=false|fashionMovement=false|" +
+            "fashionFootstep=true|" +
             "visibilityHair=show|visibilityBeard=hide|visibilityMoustache=auto|" +
             "visibilityFaceAttachment=show|Head=divinghelmet,Display Name|HeadColor=2131821311"),
         "SaveClientLook rejected a valid canonical look.");
@@ -152,14 +154,16 @@ void TestCanonicalV4()
         expectedMoustache: "auto",
         expectedFaceAttachment: "show",
         expectedFashionMovement: false,
+        expectedFashionFootstep: true,
         expectedHeadColor: 2131821311);
     string loaded = Load();
     Assert(loaded.Contains("Head=divinghelmet,", StringComparison.Ordinal) &&
            loaded.Contains("HeadColor=2131821311", StringComparison.Ordinal) &&
            loaded.Contains("visibilityHair=show", StringComparison.Ordinal) &&
            loaded.Contains("visibilityFaceAttachment=show", StringComparison.Ordinal) &&
-           loaded.Contains("fashionMovement=false", StringComparison.Ordinal),
-        "Canonical visibility or movement-animation source did not round-trip through LoadClientLook.");
+           loaded.Contains("fashionMovement=false", StringComparison.Ordinal) &&
+           loaded.Contains("fashionFootstep=true", StringComparison.Ordinal),
+        "Canonical visibility, movement, or footstep source did not round-trip.");
     byte[] beforeInvalidColor = File.ReadAllBytes(path);
     Assert(!Save("captured=true|Head=helmet,|HeadColor=4294967296"),
         "An out-of-range encoded color was accepted.");
@@ -188,7 +192,7 @@ void TestPrivateFileLog()
 void TestDiagnosticContract()
 {
     _ = NewCaseDirectory("diagnostic-contract");
-    Assert(string.Equals((string?)Invoke(getVersion), "0.5.3", StringComparison.Ordinal),
+    Assert(string.Equals((string?)Invoke(getVersion), "0.5.10", StringComparison.Ordinal),
         "WardrobePersistence did not report the current plugin version.");
 
     AppContext.SetData(FailurePointKey, "BeforeReplace");
@@ -331,6 +335,65 @@ void TestV3Migration()
         expectedBeard: "hide",
         expectedMoustache: "auto",
         expectedFaceAttachment: "show");
+}
+
+void TestV4Migration()
+{
+    _ = NewCaseDirectory("v4-migration");
+    string path = CurrentPath();
+    const string legacyJson = """
+        {
+          "schemaVersion": 4,
+          "captured": true,
+          "useFashionMovementAnimations": false,
+          "attachmentVisibility": {
+            "Hair": "show",
+            "Beard": "hide",
+            "Moustache": "auto",
+            "FaceAttachment": "show"
+          },
+          "slots": {
+            "Head": "v4helmet",
+            "Headset": null,
+            "InnerClothes": null,
+            "OuterClothes": null,
+            "Bag": null,
+            "HealthInterface": null
+          },
+          "colors": {
+            "Head": 2131821311,
+            "Headset": null,
+            "InnerClothes": null,
+            "OuterClothes": null,
+            "Bag": null,
+            "HealthInterface": null
+          }
+        }
+        """;
+    File.WriteAllText(path, legacyJson, new UTF8Encoding(false));
+
+    string loaded = Load();
+    Assert(loaded.Contains("Head=v4helmet,", StringComparison.Ordinal) &&
+           loaded.Contains("HeadColor=2131821311", StringComparison.Ordinal) &&
+           loaded.Contains("fashionMovement=false", StringComparison.Ordinal) &&
+           loaded.Contains("fashionFootstep=false", StringComparison.Ordinal),
+        "Migrated v4 look did not default to equipment footsteps.");
+    Assert(File.Exists(path + ".v4.bak"),
+        "v4 migration did not retain ClientLook.json.v4.bak.");
+    Assert(File.ReadAllText(path + ".v4.bak", Encoding.UTF8) == legacyJson,
+        "v4 migration backup does not match the original document.");
+    ValidateCanonicalFile(
+        path,
+        "v4helmet",
+        expectedCaptured: true,
+        expectedHideHair: false,
+        expectedHair: "show",
+        expectedBeard: "hide",
+        expectedMoustache: "auto",
+        expectedFaceAttachment: "show",
+        expectedFashionMovement: false,
+        expectedFashionFootstep: false,
+        expectedHeadColor: 2131821311);
 }
 
 void TestLegacyTextMigration()
@@ -484,8 +547,8 @@ void TestSinglePlayerProfileIsolation()
             campaignA,
             characterA,
             "Alice",
-            "schema=4|captured=true|active=true|auto=true|hidehair=false|" +
-            "fashionMovement=false|" +
+            "schema=5|captured=true|active=true|auto=true|hidehair=false|" +
+            "fashionMovement=false|fashionFootstep=true|" +
             "visibilityHair=show|visibilityBeard=hide|visibilityMoustache=auto|" +
             "visibilityFaceAttachment=show|Head=alphahelmet,|HeadColor=2131821311"),
         "Could not save the first campaign profile.");
@@ -505,7 +568,8 @@ void TestSinglePlayerProfileIsolation()
     Assert(LoadProfile(campaignA, characterA).Contains("Head=alphahelmet,", StringComparison.Ordinal) &&
            LoadProfile(campaignA, characterA).Contains("HeadColor=2131821311", StringComparison.Ordinal) &&
            LoadProfile(campaignA, characterA).Contains("visibilityHair=show", StringComparison.Ordinal) &&
-           LoadProfile(campaignA, characterA).Contains("fashionMovement=false", StringComparison.Ordinal),
+           LoadProfile(campaignA, characterA).Contains("fashionMovement=false", StringComparison.Ordinal) &&
+           LoadProfile(campaignA, characterA).Contains("fashionFootstep=true", StringComparison.Ordinal),
         "The first character profile did not round-trip.");
     Assert(LoadProfile(campaignA, characterB).Contains("Head=bobhelmet,", StringComparison.Ordinal) &&
            LoadProfile(campaignA, characterB).Contains("fashionMovement=true", StringComparison.Ordinal),
@@ -548,6 +612,8 @@ void TestSinglePlayerProfileIsolation()
             "Single-player profile did not persist the custom clothing color.");
         Assert(!alice.GetProperty("useFashionMovementAnimations").GetBoolean(),
             "Single-player profile did not persist the equipped-gear movement source.");
+        Assert(alice.GetProperty("useFashionFootstepSounds").GetBoolean(),
+            "Single-player profile did not persist the fashion-footstep source.");
     }
 
     Assert(DeleteProfile(campaignA, characterA),
@@ -603,7 +669,8 @@ void TestSinglePlayerV1Migration()
     Assert(loaded.Contains("Head=profilev1helmet,", StringComparison.Ordinal) &&
            loaded.Contains("visibilityHair=hide", StringComparison.Ordinal) &&
            loaded.Contains("visibilityFaceAttachment=auto", StringComparison.Ordinal) &&
-           loaded.Contains("fashionMovement=true", StringComparison.Ordinal),
+           loaded.Contains("fashionMovement=true", StringComparison.Ordinal) &&
+           loaded.Contains("fashionFootstep=false", StringComparison.Ordinal),
         "Single-player v1 migration did not preserve the legacy visibility preset.");
     using JsonDocument migrated = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
     ValidateSinglePlayerRoot(migrated.RootElement);
@@ -651,6 +718,7 @@ void TestSinglePlayerV2Migration()
     Assert(loaded.Contains("Head=profilev2helmet,", StringComparison.Ordinal) &&
            loaded.Contains("visibilityHair=show", StringComparison.Ordinal) &&
            loaded.Contains("fashionMovement=true", StringComparison.Ordinal) &&
+           loaded.Contains("fashionFootstep=false", StringComparison.Ordinal) &&
            !loaded.Contains("HeadColor=", StringComparison.Ordinal),
         "Single-player v2 migration did not preserve missing-color semantics.");
     Assert(File.Exists(path + ".v2.bak"),
@@ -711,6 +779,10 @@ void TestSinglePlayerV3MovementDefault()
             "fashionMovement=true",
             StringComparison.Ordinal),
         "An existing schema-v3 profile did not default to fashion-priority movement.");
+    Assert(LoadProfile(campaign, character).Contains(
+            "fashionFootstep=false",
+            StringComparison.Ordinal),
+        "An existing schema-v3 profile did not default to equipment footsteps.");
     Assert(SetSinglePlayerTransfer(true),
         "Could not rewrite the existing schema-v3 profile.");
     using JsonDocument rewritten = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
@@ -718,6 +790,9 @@ void TestSinglePlayerV3MovementDefault()
     Assert(rewritten.RootElement.GetProperty("profiles")[0]
             .GetProperty("useFashionMovementAnimations").GetBoolean(),
         "Rewritten schema-v3 profile did not canonicalize the default movement source.");
+    Assert(!rewritten.RootElement.GetProperty("profiles")[0]
+            .GetProperty("useFashionFootstepSounds").GetBoolean(),
+        "Rewritten schema-v3 profile did not canonicalize equipment footsteps.");
 }
 
 void TestSinglePlayerLegacyImport()
@@ -951,7 +1026,8 @@ void ValidateSinglePlayerRoot(JsonElement root)
             "displayName",
             "attachmentVisibility",
             "slots",
-            "useFashionMovementAnimations"
+            "useFashionMovementAnimations",
+            "useFashionFootstepSounds"
         ];
         Array.Sort(expectedProfileProperties, StringComparer.Ordinal);
         Assert(actualProfileProperties.SequenceEqual(expectedProfileProperties, StringComparer.Ordinal),
@@ -1024,22 +1100,26 @@ void ValidateCanonicalFile(
     string? expectedMoustache = null,
     string expectedFaceAttachment = "auto",
     bool expectedFashionMovement = true,
+    bool expectedFashionFootstep = false,
     uint? expectedHeadColor = null)
 {
     using JsonDocument document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
     JsonElement root = document.RootElement;
     string[] actualProperties = root.EnumerateObject().Select(property => property.Name).Order().ToArray();
     string[] expectedProperties =
-        ["attachmentVisibility", "captured", "colors", "schemaVersion", "slots", "useFashionMovementAnimations"];
+        ["attachmentVisibility", "captured", "colors", "schemaVersion", "slots",
+         "useFashionFootstepSounds", "useFashionMovementAnimations"];
     Array.Sort(expectedProperties, StringComparer.Ordinal);
     Assert(actualProperties.SequenceEqual(expectedProperties, StringComparer.Ordinal),
-        "Schema v4 contains missing or extra top-level properties.");
-    Assert(root.GetProperty("schemaVersion").GetInt32() == 4, "Schema version is not 4.");
+        "Schema v5 contains missing or extra top-level properties.");
+    Assert(root.GetProperty("schemaVersion").GetInt32() == 5, "Schema version is not 5.");
     Assert(root.GetProperty("captured").GetBoolean() == expectedCaptured, "Captured intent mismatch.");
     Assert(root.GetProperty("useFashionMovementAnimations").GetBoolean() == expectedFashionMovement,
         "Movement-animation source mismatch.");
+    Assert(root.GetProperty("useFashionFootstepSounds").GetBoolean() == expectedFashionFootstep,
+        "Footstep sound source mismatch.");
     Assert(!root.TryGetProperty("hideHair", out _),
-        "Schema v4 must not persist authoritative hideHair.");
+        "Schema v5 must not persist authoritative hideHair.");
     string legacyState = expectedHideHair ? "hide" : "auto";
     ValidateAttachmentVisibility(
         root.GetProperty("attachmentVisibility"),
@@ -1051,7 +1131,7 @@ void ValidateCanonicalFile(
     JsonElement slots = root.GetProperty("slots");
     string[] actualSlotKeys = slots.EnumerateObject().Select(property => property.Name).Order().ToArray();
     Assert(actualSlotKeys.SequenceEqual(SlotKeys.Order(), StringComparer.Ordinal),
-        "Schema v4 does not contain exactly the six canonical slots.");
+        "Schema v5 does not contain exactly the six canonical slots.");
     Assert(slots.GetProperty("Head").ValueKind == JsonValueKind.String &&
            slots.GetProperty("Head").GetString() == expectedHead,
         "Head slot is not persisted as a stable identifier string.");
@@ -1065,7 +1145,7 @@ void ValidateCanonicalFile(
     string[] actualColorKeys =
         colors.EnumerateObject().Select(property => property.Name).Order().ToArray();
     Assert(actualColorKeys.SequenceEqual(SlotKeys.Order(), StringComparer.Ordinal),
-        "Schema v4 does not contain exactly the six canonical color slots.");
+        "Schema v5 does not contain exactly the six canonical color slots.");
     foreach (string key in SlotKeys)
     {
         JsonElement color = colors.GetProperty(key);

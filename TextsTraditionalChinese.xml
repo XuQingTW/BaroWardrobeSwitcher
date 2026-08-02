@@ -34,6 +34,8 @@
   <barowardrobeswitcher.button.attachment_layers>外觀圖層…</barowardrobeswitcher.button.attachment_layers>
   <barowardrobeswitcher.button.animation_fashion>移動動畫：時裝優先</barowardrobeswitcher.button.animation_fashion>
   <barowardrobeswitcher.button.animation_equipment>移動動畫：實際裝備</barowardrobeswitcher.button.animation_equipment>
+  <barowardrobeswitcher.button.footstep_fashion>走路音效：跟隨時裝</barowardrobeswitcher.button.footstep_fashion>
+  <barowardrobeswitcher.button.footstep_equipment>走路音效：跟隨裝備</barowardrobeswitcher.button.footstep_equipment>
   <barowardrobeswitcher.button.hide_standard_hair>隱藏標準頭髮</barowardrobeswitcher.button.hide_standard_hair>
   <barowardrobeswitcher.button.all_auto>全部自動</barowardrobeswitcher.button.all_auto>
   <barowardrobeswitcher.button.back>返回</barowardrobeswitcher.button.back>

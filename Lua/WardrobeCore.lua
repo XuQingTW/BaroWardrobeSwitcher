@@ -3,13 +3,13 @@
 
 local Core = {}
 
-Core.MOD_VERSION = "0.5.3"
-Core.PROTOCOL_VERSION = 4
-Core.LOOK_SCHEMA_VERSION = 3
-Core.PERSISTENCE_VERSION = 4
+Core.MOD_VERSION = "0.5.10"
+Core.PROTOCOL_VERSION = 5
+Core.LOOK_SCHEMA_VERSION = 4
+Core.PERSISTENCE_VERSION = 5
 Core.HELLO_TIMEOUT_SECONDS = 5
 Core.LOOK_EXTENSION_MARKER = 0x57
-Core.LOOK_EXTENSION_VERSION = 2
+Core.LOOK_EXTENSION_VERSION = 3
 Core.HELLO_EXTENSION_MARKER = 0x57
 Core.HELLO_EXTENSION_VERSION = 1
 
@@ -66,7 +66,8 @@ Core.ATTACHMENT_VISIBILITY = {
 Core.CAPABILITY = {
     AttachmentVisibility = 0x01,
     MovementAnimationSource = 0x02,
-    CrewTargeting = 0x04
+    CrewTargeting = 0x04,
+    FootstepSoundSource = 0x08
 }
 
 Core.LIMITS = {
@@ -97,7 +98,8 @@ Core.COMMAND = {
     Clear = "clear",
     Forget = "forget",
     Visibility = "visibility",
-    Animation = "animation"
+    Animation = "animation",
+    Footstep = "footstep"
 }
 
 local validCommands = {
@@ -106,7 +108,8 @@ local validCommands = {
     [Core.COMMAND.Clear] = true,
     [Core.COMMAND.Forget] = true,
     [Core.COMMAND.Visibility] = true,
-    [Core.COMMAND.Animation] = true
+    [Core.COMMAND.Animation] = true,
+    [Core.COMMAND.Footstep] = true
 }
 
 local function shallowCopy(source)
@@ -292,6 +295,10 @@ function Core.validateLook(value)
         type(value.useFashionMovementAnimations) ~= "boolean" then
         return nil, "useFashionMovementAnimations must be a boolean"
     end
+    if value.useFashionFootstepSounds ~= nil and
+        type(value.useFashionFootstepSounds) ~= "boolean" then
+        return nil, "useFashionFootstepSounds must be a boolean"
+    end
 
     if isCanonical then
         for key, _ in pairs(slotSource) do
@@ -356,18 +363,27 @@ function Core.validateLook(value)
         hideHair = Core.legacyHideHair(attachmentVisibility),
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = value.useFashionMovementAnimations ~= false,
+        useFashionFootstepSounds = value.useFashionFootstepSounds == true,
         slots = slots,
         colors = colors
     }
 end
 
-function Core.newLook(captured, hideHair, slots, attachmentVisibility, colors, useFashionMovementAnimations)
+function Core.newLook(
+    captured,
+    hideHair,
+    slots,
+    attachmentVisibility,
+    colors,
+    useFashionMovementAnimations,
+    useFashionFootstepSounds)
     return Core.validateLook({
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = captured == true,
         hideHair = hideHair == true,
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = useFashionMovementAnimations,
+        useFashionFootstepSounds = useFashionFootstepSounds,
         slots = slots or {},
         colors = colors
     })
@@ -380,13 +396,20 @@ function Core.copyLook(look)
     return valid
 end
 
-function Core.fromLegacyLook(legacyLook, captured, hideHair, attachmentVisibility, useFashionMovementAnimations)
+function Core.fromLegacyLook(
+    legacyLook,
+    captured,
+    hideHair,
+    attachmentVisibility,
+    useFashionMovementAnimations,
+    useFashionFootstepSounds)
     return Core.validateLook({
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = captured == true,
         hideHair = hideHair == true,
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = useFashionMovementAnimations,
+        useFashionFootstepSounds = useFashionFootstepSounds,
         slots = legacyLook or {}
     })
 end
@@ -434,6 +457,7 @@ function Core.parseLegacyClientLookLine(line)
     local hideHair = false
     local attachmentVisibility = nil
     local useFashionMovementAnimations = true
+    local useFashionFootstepSounds = false
     local sessionKey = nil
     local colors = {}
 
@@ -450,7 +474,7 @@ function Core.parseLegacyClientLookLine(line)
         seen[name] = true
 
         if name == "schema" then
-            if value ~= "1" and value ~= "2" and value ~= "3" and value ~= "4" then
+            if value ~= "1" and value ~= "2" and value ~= "3" and value ~= "4" and value ~= "5" then
                 return nil, "unsupported legacy client look schema " .. tostring(value)
             end
         elseif name == "captured" then
@@ -473,6 +497,10 @@ function Core.parseLegacyClientLookLine(line)
             local reason
             useFashionMovementAnimations, reason = booleanValue(name, value)
             if useFashionMovementAnimations == nil then return nil, reason end
+        elseif name == "fashionFootstep" then
+            local reason
+            useFashionFootstepSounds, reason = booleanValue(name, value)
+            if useFashionFootstepSounds == nil then return nil, reason end
         elseif name == "visibilityHair" or
             name == "visibilityBeard" or
             name == "visibilityMoustache" or
@@ -515,7 +543,8 @@ function Core.parseLegacyClientLookLine(line)
         captured,
         hideHair,
         attachmentVisibility,
-        useFashionMovementAnimations
+        useFashionMovementAnimations,
+        useFashionFootstepSounds
     )
     if look == nil then return nil, reason end
     if not Core.hasLook(look) then return nil, "legacy client look has no captured intent" end
@@ -545,7 +574,8 @@ function Core.lookSignature(look)
         "v=" .. tostring(valid.schemaVersion),
         "captured=" .. tostring(valid.captured),
         "hideHair=" .. tostring(valid.hideHair),
-        "fashionMovement=" .. tostring(valid.useFashionMovementAnimations)
+        "fashionMovement=" .. tostring(valid.useFashionMovementAnimations),
+        "fashionFootstep=" .. tostring(valid.useFashionFootstepSounds)
     }
     for _, key in ipairs(Core.ATTACHMENT_KEYS) do
         parts[#parts + 1] = key .. "=" .. valid.attachmentVisibility[key]
@@ -593,6 +623,7 @@ function Core.writeLook(message, look)
     message.WriteByte(forceHide)
     message.WriteByte(forceShow)
     message.WriteByte(valid.useFashionMovementAnimations and 1 or 0)
+    message.WriteByte(valid.useFashionFootstepSounds and 1 or 0)
     return true
 end
 
@@ -626,8 +657,9 @@ function Core.readLook(message)
 
     local attachmentVisibility = nil
     local useFashionMovementAnimations = true
+    local useFashionFootstepSounds = false
     local remainingBits = messageRemainingBits(message)
-    if remainingBits == 32 or remainingBits == 40 then
+    if remainingBits == 32 or remainingBits == 40 or remainingBits == 48 then
         local marker = message.ReadByte()
         local extensionVersion = message.ReadByte()
         local forceHide = message.ReadByte()
@@ -635,22 +667,31 @@ function Core.readLook(message)
         if marker ~= Core.LOOK_EXTENSION_MARKER then
             return nil, "unknown look extension marker " .. tostring(marker)
         end
-        if extensionVersion ~= 1 and extensionVersion ~= Core.LOOK_EXTENSION_VERSION then
+        if extensionVersion ~= 1 and extensionVersion ~= 2 and
+            extensionVersion ~= Core.LOOK_EXTENSION_VERSION then
             return nil, "unsupported look extension version " .. tostring(extensionVersion)
         end
         if (extensionVersion == 1 and remainingBits ~= 32) or
-            (extensionVersion == Core.LOOK_EXTENSION_VERSION and remainingBits ~= 40) then
+            (extensionVersion == 2 and remainingBits ~= 40) or
+            (extensionVersion == Core.LOOK_EXTENSION_VERSION and remainingBits ~= 48) then
             return nil, "malformed look extension length " .. tostring(remainingBits)
         end
         local visibility, visibilityReason = Core.attachmentVisibilityFromMasks(forceHide, forceShow)
         if visibility == nil then return nil, visibilityReason end
         attachmentVisibility = visibility
-        if extensionVersion == Core.LOOK_EXTENSION_VERSION then
+        if extensionVersion >= 2 then
             local animationSource = message.ReadByte()
             if animationSource ~= 0 and animationSource ~= 1 then
                 return nil, "invalid movement animation source"
             end
             useFashionMovementAnimations = animationSource == 1
+        end
+        if extensionVersion >= 3 then
+            local footstepSource = message.ReadByte()
+            if footstepSource ~= 0 and footstepSource ~= 1 then
+                return nil, "invalid footstep sound source"
+            end
+            useFashionFootstepSounds = footstepSource == 1
         end
     elseif remainingBits ~= 0 then
         return nil, "malformed look extension length " .. tostring(remainingBits)
@@ -662,6 +703,7 @@ function Core.readLook(message)
         hideHair = hideHair,
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = useFashionMovementAnimations,
+        useFashionFootstepSounds = useFashionFootstepSounds,
         slots = slots,
         colors = colors
     })
@@ -779,7 +821,8 @@ function Core.validateCommand(command)
     if (command.kind == Core.COMMAND.Clear or command.kind == Core.COMMAND.Forget) and look ~= nil then
         return nil, command.kind .. " command must not contain a look"
     end
-    if (command.kind == Core.COMMAND.Visibility or command.kind == Core.COMMAND.Animation) and look == nil then
+    if (command.kind == Core.COMMAND.Visibility or command.kind == Core.COMMAND.Animation or
+        command.kind == Core.COMMAND.Footstep) and look == nil then
         return nil, command.kind .. " command requires a look"
     end
 
@@ -1010,6 +1053,13 @@ local function movementAnimationEffect(kind, look)
     })
 end
 
+local function footstepSoundEffect(kind, look)
+    return effect(kind, {
+        useFashionFootstepSounds =
+            look ~= nil and look.useFashionFootstepSounds == true
+    })
+end
+
 function Core.newClientState(options)
     options = options or {}
     local look = Core.copyLook(options.look)
@@ -1095,6 +1145,16 @@ local function restoreMovementAnimationRollback(state, effects, compensate)
     if compensate == true and rollbackActive and rollbackLook ~= nil then
         effects[#effects + 1] =
             movementAnimationEffect("ApplyMovementAnimationSourceCompensation", rollbackLook)
+    end
+end
+
+local function restoreFootstepSoundRollback(state, effects, compensate)
+    local rollbackLook = Core.copyLook(state.rollbackLook)
+    local rollbackActive = state.rollbackActive == true
+    restoreRollback(state)
+    if compensate == true and rollbackActive and rollbackLook ~= nil then
+        effects[#effects + 1] =
+            footstepSoundEffect("ApplyFootstepSoundSourceCompensation", rollbackLook)
     end
 end
 
@@ -1251,6 +1311,40 @@ function Core.reduce(currentState, event)
             effects[#effects + 1] = effect("SendCommand", {
                 operationId = state.pendingOperationId,
                 kind = Core.COMMAND.Animation,
+                baseRevision = state.revision,
+                look = Core.copyLook(updated)
+            })
+        else
+            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(updated) })
+        end
+        return state, effects
+    end
+
+    if event.type == "SetFootstepSoundSource" then
+        if state.look == nil then
+            state.error = "cannot change footstep sound source without a saved look"
+            return state, effects
+        end
+        if state.pendingKind ~= nil then
+            state.error = "cannot change footstep sound source while another operation is pending"
+            return state, effects
+        end
+        beginRollback(state)
+        state.pendingKind = Core.COMMAND.Footstep
+        state.pendingOperationId = event.operationId
+        state.pendingRemote = event.remote == true
+        state.pendingServerAccepted = false
+        local updated = Core.copyLook(state.look)
+        updated.useFashionFootstepSounds = event.enabled == true
+        state.look = updated
+        state.error = nil
+        if state.active then
+            effects[#effects + 1] =
+                footstepSoundEffect("ApplyFootstepSoundSource", updated)
+        elseif state.pendingRemote then
+            effects[#effects + 1] = effect("SendCommand", {
+                operationId = state.pendingOperationId,
+                kind = Core.COMMAND.Footstep,
                 baseRevision = state.revision,
                 look = Core.copyLook(updated)
             })
@@ -1418,7 +1512,8 @@ function Core.reduce(currentState, event)
             state.pendingRemote = false
             effects[#effects + 1] = effect("ClearRender", { remote = false, forget = true })
         elseif event.awaitAck ~= true and
-            (state.pendingKind == Core.COMMAND.Visibility or state.pendingKind == Core.COMMAND.Animation) then
+            (state.pendingKind == Core.COMMAND.Visibility or state.pendingKind == Core.COMMAND.Animation or
+                state.pendingKind == Core.COMMAND.Footstep) then
             state.pendingRemote = false
             effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
         end
@@ -1435,6 +1530,8 @@ function Core.reduce(currentState, event)
             restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
         elseif state.pendingKind == Core.COMMAND.Animation then
             restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
+        elseif state.pendingKind == Core.COMMAND.Footstep then
+            restoreFootstepSoundRollback(state, effects, state.rollbackActive == true)
         end
         state.phase = Core.PHASE.Faulted
         state.error = tostring(event.reason or "network command could not be sent")
@@ -1495,6 +1592,8 @@ function Core.reduce(currentState, event)
                 restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
             elseif state.pendingKind == Core.COMMAND.Animation then
                 restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
+            elseif state.pendingKind == Core.COMMAND.Footstep then
+                restoreFootstepSoundRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server rejected command")
@@ -1525,6 +1624,10 @@ function Core.reduce(currentState, event)
             state.pendingServerAccepted = true
             effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
         elseif kind == Core.COMMAND.Animation then
+            state.pendingRemote = false
+            state.pendingServerAccepted = true
+            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+        elseif kind == Core.COMMAND.Footstep then
             state.pendingRemote = false
             state.pendingServerAccepted = true
             effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
@@ -1563,7 +1666,8 @@ function Core.reduce(currentState, event)
         local pendingKindBeforeState = state.pendingKind
         local confirmsPendingPreference =
             (pendingKindBeforeState == Core.COMMAND.Visibility or
-                pendingKindBeforeState == Core.COMMAND.Animation) and
+                pendingKindBeforeState == Core.COMMAND.Animation or
+                pendingKindBeforeState == Core.COMMAND.Footstep) and
             look ~= nil and
             Core.lookEquals(state.look, look) and
             (state.pendingRemote == true or state.pendingServerAccepted == true)
@@ -1710,7 +1814,8 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "PersistenceSucceeded" then
-        if state.pendingKind == Core.COMMAND.Visibility or state.pendingKind == Core.COMMAND.Animation then
+        if state.pendingKind == Core.COMMAND.Visibility or state.pendingKind == Core.COMMAND.Animation or
+            state.pendingKind == Core.COMMAND.Footstep then
             clearPending(state)
             clearRollback(state)
         elseif state.pendingKind == Core.COMMAND.Save then
@@ -1773,8 +1878,25 @@ function Core.reduce(currentState, event)
         return state, effects
     end
 
+    if event.type == "FootstepSoundSourceUpdateSucceeded" then
+        if state.pendingKind == Core.COMMAND.Footstep then
+            if state.pendingRemote then
+                effects[#effects + 1] = effect("SendCommand", {
+                    operationId = state.pendingOperationId,
+                    kind = Core.COMMAND.Footstep,
+                    baseRevision = state.revision,
+                    look = Core.copyLook(state.look)
+                })
+            else
+                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            end
+        end
+        return state, effects
+    end
+
     if event.type == "PersistenceFailed" or event.type == "AttachmentVisibilityUpdateFailed" or
-        event.type == "MovementAnimationSourceUpdateFailed" then
+        event.type == "MovementAnimationSourceUpdateFailed" or
+        event.type == "FootstepSoundSourceUpdateFailed" then
         if state.pendingKind == Core.COMMAND.Visibility then
             if state.pendingServerAccepted then
                 clearPending(state)
@@ -1792,6 +1914,17 @@ function Core.reduce(currentState, event)
                 clearRollback(state)
             else
                 restoreMovementAnimationRollback(
+                    state,
+                    effects,
+                    event.type == "PersistenceFailed" and state.rollbackActive == true
+                )
+            end
+        elseif state.pendingKind == Core.COMMAND.Footstep then
+            if state.pendingServerAccepted then
+                clearPending(state)
+                clearRollback(state)
+            else
+                restoreFootstepSoundRollback(
                     state,
                     effects,
                     event.type == "PersistenceFailed" and state.rollbackActive == true
@@ -1840,6 +1973,8 @@ function Core.reduce(currentState, event)
                 restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
             elseif state.pendingKind == Core.COMMAND.Animation then
                 restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
+            elseif state.pendingKind == Core.COMMAND.Footstep then
+                restoreFootstepSoundRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server command timed out")
@@ -1861,7 +1996,8 @@ function Core.clientViewModel(state)
         phase == Core.PHASE.ApplyPending or
         phase == Core.PHASE.ClearPending or
         state.pendingKind == Core.COMMAND.Visibility or
-        state.pendingKind == Core.COMMAND.Animation
+        state.pendingKind == Core.COMMAND.Animation or
+        state.pendingKind == Core.COMMAND.Footstep
     return {
         phase = phase,
         revision = tonumber(state.revision) or 0,
@@ -1893,7 +2029,9 @@ local requiredClientEffects = {
     ApplyAttachmentVisibility = true,
     ApplyAttachmentVisibilityCompensation = true,
     ApplyMovementAnimationSource = true,
-    ApplyMovementAnimationSourceCompensation = true
+    ApplyMovementAnimationSourceCompensation = true,
+    ApplyFootstepSoundSource = true,
+    ApplyFootstepSoundSourceCompensation = true
 }
 
 local function successEventForEffect(currentEffect)
@@ -1929,6 +2067,12 @@ local function successEventForEffect(currentEffect)
         return { type = "MovementAnimationSourceUpdateSucceeded" }
     end
     if currentEffect.type == "ApplyMovementAnimationSourceCompensation" then
+        return { type = "CompensationSucceeded" }
+    end
+    if currentEffect.type == "ApplyFootstepSoundSource" then
+        return { type = "FootstepSoundSourceUpdateSucceeded" }
+    end
+    if currentEffect.type == "ApplyFootstepSoundSourceCompensation" then
         return { type = "CompensationSucceeded" }
     end
     return nil
@@ -1972,6 +2116,12 @@ local function failureEventForEffect(currentEffect, reason)
         return { type = "MovementAnimationSourceUpdateFailed", reason = message }
     end
     if currentEffect.type == "ApplyMovementAnimationSourceCompensation" then
+        return { type = "CompensationFailed", reason = message }
+    end
+    if currentEffect.type == "ApplyFootstepSoundSource" then
+        return { type = "FootstepSoundSourceUpdateFailed", reason = message }
+    end
+    if currentEffect.type == "ApplyFootstepSoundSourceCompensation" then
         return { type = "CompensationFailed", reason = message }
     end
     return nil
