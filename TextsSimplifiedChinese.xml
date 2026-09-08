@@ -100,4 +100,7 @@
   <barowardrobeswitcher.status.profile_collision>角色身份重复；已停用自动恢复</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>已清除保存的外观。</barowardrobeswitcher.status.saved_cleared>
   <barowardrobeswitcher.status.none>无</barowardrobeswitcher.status.none>
+  <barowardrobeswitcher.button.hide_empty_slot_equipment_yes>隐藏空栏位装备：开</barowardrobeswitcher.button.hide_empty_slot_equipment_yes>
+  <barowardrobeswitcher.button.hide_empty_slot_equipment_no>隐藏空栏位装备：关</barowardrobeswitcher.button.hide_empty_slot_equipment_no>
+  <barowardrobeswitcher.panel.empty_slot_equipment_help>开：保存时的空栏位会隐藏当前装备。关：显示空栏位当前穿戴的装备，例如后来背上的背包。有保存时装的栏位仍照常覆盖。此设置只影响本机显示。</barowardrobeswitcher.panel.empty_slot_equipment_help>
 </infotexts>

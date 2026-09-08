@@ -139,10 +139,13 @@ assert(clientSource:find("function Helpers.singlePlayerSelectableCharacters()", 
        clientSource:find("NET_V2_DIVING_STATE", 1, true) ~= nil and
        clientSource:find("serverSupportsCrewTargeting()", 1, true) ~= nil and
        clientSource:find("serverSupportsCrewDivingProfiles()", 1, true) ~= nil and
-       clientSource:find('tr("button.next_page")', 1, true) ~= nil and
-       clientSource:find("GUI.ListBox(", 1, true) ~= nil and
-       clientSource:find("(tutorialExpanded and 0.58 or 0.46)", 1, true) ~= nil,
-    "the compact scrollable two-page panel and bot-only wardrobe target selector are missing")
+        clientSource:find('tr("button.next_page")', 1, true) ~= nil and
+        clientSource:find("GUI.ListBox(", 1, true) ~= nil and
+        clientSource:find("local panelWidth = advancedPanelOpen and 0.46 or 0.44", 1, true) ~= nil and
+        clientSource:find("diagnosticsVisible and 0.94 or 0.76", 1, true) ~= nil and
+        clientSource:find("(tutorialExpanded and 0.78 or 0.66)", 1, true) ~= nil and
+        clientSource:find("listBox.AutoHideScrollBar = true", 1, true) ~= nil,
+    "the enlarged two-page panel and bot-only wardrobe target selector are missing")
 
 local settingsFile = nil
 for _, candidate in ipairs({
@@ -309,6 +312,8 @@ local lastUseFashionFootstepSounds = nil
 local footstepSoundByCharacterId = {}
 local hideHuskVisuals = false
 local hideHuskVisualCalls = 0
+local hideEmptySlotEquipment = true
+local emptySlotSettingSucceeds = true
 local unequipOnSave = true
 local unequipOnSaveCalls = 0
 local overrideGeneSplicerAppearance = false
@@ -323,6 +328,7 @@ local reuseCheckCount = 0
 local fashionSlotCalls = 0
 local lastFashionSavedSlots = nil
 local lastFashionEmptySlots = nil
+local lastFashionForceHideEmptySlots = nil
 local equipmentRegistrationCalls = 0
 local equipmentRemovalCalls = 0
 local stalePruneCalls = 0
@@ -342,6 +348,12 @@ local visualOverride = {
     end,
     HasCapability = function() return visualOverrideReady end,
     GetHideHuskVisuals = function() return hideHuskVisuals end,
+    GetHideEmptySlotEquipment = function() return hideEmptySlotEquipment end,
+    SetHideEmptySlotEquipment = function(hidden)
+        if not emptySlotSettingSucceeds then return false end
+        hideEmptySlotEquipment = hidden == true
+        return true
+    end,
     SetHideHuskVisuals = function(hidden)
         hideHuskVisualCalls = hideHuskVisualCalls + 1
         hideHuskVisuals = hidden == true
@@ -397,7 +409,8 @@ local visualOverride = {
         lastEmptyCaptureCharacterId = characterId(character)
         return true
     end,
-    SetFashionSlots = function(_, savedSlots, emptySlots)
+    SetFashionSlots = function(_, savedSlots, emptySlots, forceHideEmptySlots)
+        lastFashionForceHideEmptySlots = forceHideEmptySlots == true
         fashionSlotCalls = fashionSlotCalls + 1
         lastFashionSavedSlots = tostring(savedSlots or "")
         lastFashionEmptySlots = tostring(emptySlots or "")
@@ -764,6 +777,7 @@ player.CharacterHealth = { PressureAffliction = { Strength = 0 } }
 player.InPressure = true
 for _ = 1, 7 do hooks.think() end
 assert(activationCount == activationBeforeSuitPressure + 1 and
+       lastFashionForceHideEmptySlots == true and
        capturedIdentifierByCharacterId[player.ID] == "testsuit" and
        divingSlots[InvSlotType.OuterClothes] == suitItem and
        divingSlots[InvSlotType.Head] == ordinaryHat and
@@ -799,6 +813,8 @@ for _, encoded in pairs(divingProfiles) do
     if encoded:find("customdivehat", 1, true) then savedCustomDiving = encoded end
 end
 assert(savedCustomDiving:find("customdivecoat", 1, true) ~= nil and
+       lastFashionForceHideEmptySlots == false and
+       lastFashionEmptySlots:find("Bag", 1, true) ~= nil and
        activationCount == activationBeforeCustomSave + 1 and
        divingSlots[InvSlotType.Head] == customHat and
        divingSlots[InvSlotType.OuterClothes] == customSuit and
@@ -887,6 +903,8 @@ assert(lockedUnequipCalls == 1 and lockedDropCalls == 1 and lockedInventoryMoves
     "Save must remove managed gear but leave every HealthInterface item outside fashion")
 
 local nextPageButton = buttons["Next Page"]
+assert(not hasVisibleButton("Hide Empty-Slot Equipment: On"),
+    "the empty-slot equipment control must appear only on page two")
 assert(nextPageButton ~= nil and type(nextPageButton.OnClicked) == "function",
     "the main page did not expose its Next Page control")
 local removesBeforeNextPage = removedWidgets
@@ -901,9 +919,35 @@ assert(not hasVisibleButton("Appearance Layers...") and
        hasVisibleButton("Footstep Sounds: Follow Equipment") and
        hasVisibleButton("Hide Husk Appearance: No") and
        hasVisibleButton("Unequip on Save: On") and
+       hasVisibleButton("Hide Empty-Slot Equipment: On") and
        hasVisibleButton("Override Gene Splicer Appearance: No") and
        hasVisibleButton("Diagnostics"),
     "page two did not contain movement, footsteps, save behavior, gene-splicer, husk appearance, and diagnostic controls")
+do
+    local savesBefore = saveCalls
+    local capturesBefore = prefabCaptureCount
+    local masksBefore = fashionSlotCalls
+    local removesBefore = removedWidgets
+    buttons["Hide Empty-Slot Equipment: On"].OnClicked()
+    assert(removedWidgets == removesBefore,
+        "the empty-slot setting rebuilt the overlay inside its click callback")
+    hooks.think()
+    assert(not hideEmptySlotEquipment and hasVisibleButton("Hide Empty-Slot Equipment: Off") and
+           removedWidgets == removesBefore + 1 and liveOverlayRoots == 1,
+        "disabling empty-slot hiding did not update the bridge and page-two label")
+    emptySlotSettingSucceeds = false
+    buttons["Hide Empty-Slot Equipment: Off"].OnClicked()
+    hooks.think()
+    assert(not hideEmptySlotEquipment and hasVisibleButton("Hide Empty-Slot Equipment: Off"),
+        "a failed empty-slot setting write must preserve the previous choice")
+    emptySlotSettingSucceeds = true
+    buttons["Hide Empty-Slot Equipment: Off"].OnClicked()
+    hooks.think()
+    assert(hideEmptySlotEquipment and hasVisibleButton("Hide Empty-Slot Equipment: On"),
+        "empty-slot hiding could not be restored")
+    assert(saveCalls == savesBefore and prefabCaptureCount == capturesBefore and fashionSlotCalls == masksBefore,
+        "the local empty-slot setting must not recapture or overwrite a saved look")
+end
 local overrideGeneSplicerButton = buttons["Override Gene Splicer Appearance: No"]
 assert(overrideGeneSplicerButton ~= nil and type(overrideGeneSplicerButton.OnClicked) == "function",
     "page two did not expose the default-off gene-splicer appearance setting")
@@ -2179,6 +2223,129 @@ assert(buttons["Save Current Outfit"].Enabled ~= false and
        buttons["Apply Saved Look"].Enabled ~= false and
        buttons["Clear Look"].Enabled ~= false,
     "same-character P2P session replacement left F8 actions disabled")
+
+-- A fashion footstep preference must survive both reused and rebuilt sessions.
+do
+    Game.IsMultiplayer = false
+    gameSessionDataPath.SavePath = "footstep-regression.save"
+    local footstepPlayer = makeCharacter(1600, 1600, "Footstep Tester", false)
+    Character.Controlled = footstepPlayer
+    Character.CharacterList = { footstepPlayer }
+    local encoded = "captured=true|active=false|auto=false|hidehair=false|fashionFootstep=true|Head=helmet,"
+    persistence.LoadSinglePlayerProfile = function() return encoded end
+    persistence.LoadClientLook = function() return encoded end
+    assert(dofile(clientPath) == nil)
+    hooks.roundStart()
+    for _ = 1, 20 do hooks.think() end
+    openPanel = true
+    hooks.think()
+    buttons["Apply Saved Look"].OnClicked()
+    hooks.think()
+    assert(footstepSoundByCharacterId[1600] == true, "initial fashion footsteps were not applied")
+    for _, reuse in ipairs({ true, false }) do
+        buttons["Clear Look"].OnClicked()
+        hooks.think()
+        reusableCharacters[1600] = reuse
+        buttons["Apply Saved Look"].OnClicked()
+        hooks.think()
+        assert(footstepSoundByCharacterId[1600] == true,
+            "clear/reapply lost fashion footsteps (reuse=" .. tostring(reuse) .. ")")
+    end
+    Character.Controlled = nil
+    hooks.think()
+    footstepPlayer.Removed = true
+    local revived = makeCharacter(1601, 1600, "Footstep Tester", false)
+    Character.Controlled = revived
+    Character.CharacterList = { revived }
+    for _ = 1, 25 do hooks.think() end
+    buttons["Apply Saved Look"].OnClicked()
+    hooks.think()
+    assert(footstepSoundByCharacterId[1601] == true,
+        "a replacement character lost the saved fashion footstep preference")
+end
+
+do
+    Game.IsMultiplayer = true
+    gameSessionDataPath.SavePath = "footstep-multiplayer-regression.save"
+    local owner = makeCharacter(1700, 1700, "Footstep Owner", false)
+    Character.Controlled = owner
+    Character.CharacterList = { owner }
+    persistence.LoadClientLook = function()
+        return "captured=true|active=false|auto=false|hidehair=false|fashionFootstep=false|Head=helmet,"
+    end
+    assert(dofile(clientPath) == nil)
+    hooks.roundStart()
+    for _ = 1, 20 do hooks.think() end
+    local hello = newNetworkBuffer(WardrobeCore.NET.V2_HELLO)
+    assert(WardrobeCore.writeServerHello(hello, 0,
+        WardrobeCore.CAPABILITY.AttachmentVisibility + WardrobeCore.CAPABILITY.MovementAnimationSource +
+        WardrobeCore.CAPABILITY.FootstepSoundSource))
+    hello.FinalizeForTransport()
+    networkHandlers[WardrobeCore.NET.V2_HELLO](hello)
+    openPanel = true
+    hooks.think()
+    local saved, revision = nil, 0
+    local function acceptCommand(active)
+        local command = assert(WardrobeCore.readCommand(networkSent[#networkSent]))
+        if command.kind ~= WardrobeCore.COMMAND.Clear then saved = command.look end
+        revision = revision + 1
+        local state = newNetworkBuffer(WardrobeCore.NET.V2_STATE)
+        assert(WardrobeCore.writeState(state, {
+            revision = revision, characterId = owner.ID, active = active, look = saved
+        }))
+        state.FinalizeForTransport()
+        networkHandlers[WardrobeCore.NET.V2_STATE](state)
+        local ack = newNetworkBuffer(WardrobeCore.NET.V2_ACK)
+        assert(WardrobeCore.writeAck(ack, {
+            operationId = command.operationId, revision = revision, accepted = true, reason = ""
+        }))
+        ack.FinalizeForTransport()
+        networkHandlers[WardrobeCore.NET.V2_ACK](ack)
+        hooks.think()
+    end
+    buttons["Apply Saved Look"].OnClicked()
+    acceptCommand(true)
+    buttons["Next Page"].OnClicked()
+    hooks.think()
+    buttons["Footstep Sounds: Follow Equipment"].OnClicked()
+    acceptCommand(true)
+    assert(saved.useFashionFootstepSounds and footstepSoundByCharacterId[1700],
+        "accepted multiplayer fashion footsteps did not reach the renderer")
+    buttons["Back"].OnClicked()
+    hooks.think()
+    buttons["Clear Look"].OnClicked()
+    acceptCommand(false)
+    buttons["Apply Saved Look"].OnClicked()
+    acceptCommand(true)
+    assert(saved.useFashionFootstepSounds and footstepSoundByCharacterId[1700],
+        "multiplayer clear/reapply lost the accepted fashion footstep preference")
+end
+
+do
+    gameSessionDataPath.SavePath = "footstep-legacy-regression.save"
+    local owner = makeCharacter(1800, 1800, "Legacy Footstep Owner", false)
+    Character.Controlled = owner
+    Character.CharacterList = { owner }
+    assert(dofile(clientPath) == nil)
+    hooks.roundStart()
+    for _ = 1, 20 do hooks.think() end
+    networkHandlers[WardrobeCore.NET.V1_LOOK_APPLY](legacyApplyFrame(owner.ID))
+    openPanel = true
+    hooks.think()
+    buttons["Next Page"].OnClicked()
+    hooks.think()
+    buttons["Footstep Sounds: Follow Equipment"].OnClicked()
+    hooks.think()
+    assert(footstepSoundByCharacterId[1800], "legacy local fashion footsteps were not applied")
+    buttons["Back"].OnClicked()
+    hooks.think()
+    buttons["Clear Look"].OnClicked()
+    hooks.think()
+    buttons["Apply Saved Look"].OnClicked()
+    networkHandlers[WardrobeCore.NET.V1_LOOK_APPLY](legacyApplyFrame(owner.ID))
+    hooks.think()
+    assert(footstepSoundByCharacterId[1800], "legacy clear/reapply lost local fashion footsteps")
+end
 
 assert(#messages == 0,
     "routine wardrobe diagnostics leaked into the Lua console")

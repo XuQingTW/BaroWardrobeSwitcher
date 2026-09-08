@@ -1,0 +1,115 @@
+using System.Collections;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+
+// Exercise the real render transaction without creating a window, textures, or world items.
+internal static class RendererMaskProbe
+{
+    private const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic |
+                                     BindingFlags.Instance | BindingFlags.Static;
+
+    public static void Run(Assembly mod)
+    {
+        Type renderer = mod.GetType("BaroWardrobeSwitcher.VisualOverride", true)!;
+        Type sessionType = mod.GetType("BaroWardrobeSwitcher.RenderSession", true)!;
+        Type transactionType = renderer.GetNestedType("LimbRenderTransaction", All)!;
+        Type characterType = sessionType.GetProperty("Character")!.PropertyType;
+        Assembly game = characterType.Assembly;
+        Type limbType = game.GetType("Barotrauma.Limb", true)!;
+        Type spriteType = game.GetType("Barotrauma.WearableSprite", true)!;
+        Type wearableType = game.GetType("Barotrauma.Items.Components.Wearable", true)!;
+        Type slotType = wearableType.GetProperty("AllowedSlots")!.PropertyType.GetGenericArguments()[0];
+        Type attachmentType = spriteType.GetProperty("Type")!.PropertyType;
+        object outerSlot = Enum.Parse(slotType, "OuterClothes");
+        object hair = Enum.Parse(attachmentType, "Hair");
+        object beard = Enum.Parse(attachmentType, "Beard");
+        var sessions = (IDictionary)renderer.GetField("RenderSessions", All)!.GetValue(null)!;
+        MethodInfo setHidden = renderer.GetMethod("SetHideEmptySlotEquipment")!;
+        bool previous = (bool)renderer.GetMethod("GetHideEmptySlotEquipment")!.Invoke(null, null)!;
+        try
+        {
+            foreach (var scenario in new[]
+            {
+                (Hide: false, Saved: false, Forced: false, ShowHair: false, Preserve: true),
+                (Hide: false, Saved: false, Forced: false, ShowHair: true, Preserve: true),
+                (Hide: true, Saved: false, Forced: false, ShowHair: false, Preserve: false),
+                (Hide: false, Saved: true, Forced: false, ShowHair: false, Preserve: false),
+                (Hide: false, Saved: false, Forced: true, ShowHair: false, Preserve: false)
+            })
+            {
+                setHidden.Invoke(null, [scenario.Hide]);
+                object character = RuntimeHelpers.GetUninitializedObject(characterType);
+                object session = Activator.CreateInstance(sessionType, [character])!;
+                object emptySlots = sessionType.GetProperty("EmptySlots")!.GetValue(session)!;
+                emptySlots.GetType().GetMethod("Add")!.Invoke(emptySlots, [outerSlot]);
+                if (scenario.Saved)
+                {
+                    object savedSlots = sessionType.GetProperty("SavedSlots")!.GetValue(session)!;
+                    savedSlots.GetType().GetMethod("Add")!.Invoke(savedSlots, [outerSlot]);
+                }
+                Set(session, "ForceHideEmptySlots", scenario.Forced);
+                Set(session, "ForceShowAttachmentMask", scenario.ShowHair ? 1 : 0);
+                sessions.Add(character, session);
+                object wearable = RuntimeHelpers.GetUninitializedObject(wearableType);
+                var allowedSlots = (IList)Activator.CreateInstance(wearableType.GetProperty("AllowedSlots")!.PropertyType)!;
+                allowedSlots.Add(outerSlot);
+                Field(wearableType, "allowedSlots").SetValue(wearable, allowedSlots);
+                object sprite = RuntimeHelpers.GetUninitializedObject(spriteType);
+                Field(spriteType, "_wearableComponent").SetValue(sprite, wearable);
+                Set(sprite, "Type", Enum.Parse(attachmentType, "Item"));
+                Set(sprite, "HideLimb", true);
+                var hiddenTypes = (IList)Activator.CreateInstance(spriteType.GetProperty("HideWearablesOfType")!.PropertyType)!;
+                hiddenTypes.Add(hair);
+                hiddenTypes.Add(beard);
+                Set(sprite, "HideWearablesOfType", hiddenTypes);
+                object limb = RuntimeHelpers.GetUninitializedObject(limbType);
+                Field(limbType, "character").SetValue(limb, character);
+                foreach (string fieldName in new[] { "WearingItems", "OtherWearables", "wearableTypeHidingSprites", "wearableTypesToHide" })
+                {
+                    FieldInfo field = Field(limbType, fieldName);
+                    field.SetValue(limb, Activator.CreateInstance(field.FieldType));
+                }
+                ((IList)Field(limbType, "WearingItems").GetValue(limb)!).Add(sprite);
+                limbType.GetMethod("UpdateWearableTypesToHide", All)!.Invoke(limb, null);
+                object transaction = Activator.CreateInstance(transactionType, [limb])!;
+                try
+                {
+                    transactionType.GetMethod("Begin")!.Invoke(transaction, [session]);
+                    Check((bool)spriteType.GetProperty("HideLimb")!.GetValue(sprite)! == scenario.Preserve,
+                        "visible empty-slot equipment lost its body mask: " + scenario);
+                    var during = (IList)spriteType.GetProperty("HideWearablesOfType")!.GetValue(sprite)!;
+                    Check(during.Contains(hair) == (scenario.Preserve && !scenario.ShowHair),
+                        "hair hiding did not follow native mask/explicit Show: " + scenario);
+                    Check(during.Contains(beard) == scenario.Preserve,
+                        "unrelated beard mask was changed: " + scenario);
+                }
+                finally
+                {
+                    transactionType.GetMethod("Cleanup")!.Invoke(transaction, null);
+                    sessions.Remove(character);
+                }
+                Check(ReferenceEquals(spriteType.GetProperty("HideWearablesOfType")!.GetValue(sprite), hiddenTypes) &&
+                      (bool)spriteType.GetProperty("HideLimb")!.GetValue(sprite)!, "cleanup did not restore original masks");
+                object cache = Field(limbType, "wearableTypesToHide").GetValue(limb)!;
+                Check((bool)cache.GetType().GetMethod("Contains")!.Invoke(cache, [hair])!,
+                    "cleanup did not restore the native hair hide cache");
+            }
+        }
+        finally { setHidden.Invoke(null, [previous]); }
+    }
+
+    private static FieldInfo Field(Type type, string name)
+    {
+        for (Type? current = type; current != null; current = current.BaseType)
+            if (current.GetField(name, All) is FieldInfo field) return field;
+        throw new MissingFieldException(type.FullName, name);
+    }
+
+    private static void Set(object target, string name, object value) =>
+        target.GetType().GetProperty(name, All)!.SetValue(target, value);
+
+    private static void Check(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+}

@@ -2467,8 +2467,8 @@ function Helpers.tryCaptureVisualOverridePrefab(character, identifier, color)
     return true, tonumber(count) or 0
 end
 
--- Missing entries are explicit saved-empty slots, not "leave current equipment
--- alone". The renderer uses this mask to hide items equipped after the capture.
+-- Keep saved-empty slots explicit; the renderer's local setting decides whether
+-- they hide current equipment, including items equipped after capture.
 function Helpers.setFashionSlotMask(character, lookData)
     if Helpers.ensureVisualOverride() == nil or character == nil then return false end
     local savedSlots = {}
@@ -2484,7 +2484,8 @@ function Helpers.setFashionSlotMask(character, lookData)
         end
     end
     local ok, result = pcall(function()
-        return VisualOverride.SetFashionSlots(character, table.concat(savedSlots, ","), table.concat(emptySlots, ","))
+        return VisualOverride.SetFashionSlots(character, table.concat(savedSlots, ","), table.concat(emptySlots, ","),
+            lookData.forceHideEmptySlots == true)
     end)
     return ok and result == true
 end
@@ -2610,6 +2611,27 @@ function Helpers.setUnequipOnSaveEnabled(enabled)
     end)
     if not ok then
         Helpers.log("Unequip-on-save update failed: " .. tostring(result) ..
+            ". Reload the mod so LuaCs recompiles the C# plugin.")
+        return false
+    end
+    return result == true
+end
+
+function Helpers.emptySlotEquipmentHidden()
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge == nil then return true end
+    local ok, enabled = pcall(function() return bridge.GetHideEmptySlotEquipment() end)
+    return not ok or enabled ~= false
+end
+
+function Helpers.setEmptySlotEquipmentHidden(enabled)
+    local bridge = Helpers.ensureVisualOverride()
+    if bridge == nil then return false end
+    local ok, result = pcall(function()
+        return bridge.SetHideEmptySlotEquipment(enabled == true)
+    end)
+    if not ok then
+        Helpers.log("Empty-slot equipment visibility update failed: " .. tostring(result) ..
             ". Reload the mod so LuaCs recompiles the C# plugin.")
         return false
     end
@@ -3451,7 +3473,8 @@ function Helpers.divingOverrideActive(character)
 end
 
 function Helpers.currentDivingSuitLook(character)
-    local look = {}
+    -- Suit-only is a temporary isolation mode, not a saved outfit with empty slots.
+    local look = { forceHideEmptySlots = true }
     local found = false
     for _, entry in ipairs(slots) do
         local item = entry.optional ~= true and getSlotItem(character, entry.slot) or nil
@@ -5522,6 +5545,7 @@ function Helpers.clientViewModelSnapshot(character, overrideState)
         useFashionFootstepSounds = currentFootstepSoundSource(),
         hideHuskVisuals = Helpers.huskVisualsHidden(),
         unequipOnSave = Helpers.unequipOnSaveEnabled(),
+        hideEmptySlotEquipment = Helpers.emptySlotEquipmentHidden(),
         overrideGeneSplicerAppearance = Helpers.overrideGeneSplicerAppearanceEnabled(),
         divingMode = divingProfile.mode,
         divingOutfitCaptured = divingProfile.captured == true,
@@ -5647,9 +5671,9 @@ buildWindow = function()
         return
     end
 
-    local panelWidth = advancedPanelOpen and 0.40 or 0.38
-    local panelHeight = advancedPanelOpen and (diagnosticsVisible and 0.68 or 0.36) or
-        (tutorialExpanded and 0.58 or 0.46)
+    local panelWidth = advancedPanelOpen and 0.46 or 0.44
+    local panelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.76) or
+        (tutorialExpanded and 0.78 or 0.66)
     local frame = GUI.Frame(
         GUI.RectTransform(Vector2(panelWidth, panelHeight), parent, GUI.Anchor.Center),
         "GUIFrame"
@@ -5798,6 +5822,20 @@ buildWindow = function()
             true,
             overrideState.ready and not view.busy
         )
+        local emptySlotButton = Helpers.addButton(
+            list,
+            view.hideEmptySlotEquipment and
+                tr("button.hide_empty_slot_equipment_yes") or
+                tr("button.hide_empty_slot_equipment_no"),
+            function()
+                if not Helpers.setEmptySlotEquipmentHidden(not view.hideEmptySlotEquipment) then
+                    Helpers.log("Empty-slot equipment visibility setting could not be saved.")
+                end
+            end,
+            true,
+            overrideState.ready
+        )
+        emptySlotButton.ToolTip = tr("panel.empty_slot_equipment_help")
         Helpers.addButton(
             list,
             view.overrideGeneSplicerAppearance and

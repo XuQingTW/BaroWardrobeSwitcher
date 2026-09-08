@@ -358,7 +358,27 @@ Assert-Order "workshop-left-breast-injection-guard" $fashionInjection @(
     "EnumerateFashionSpritesForLimb(session, limb.type)",
     "IsFashionSpriteCompatibleWithLimb(session, descriptor.Sprite, limb)",
     "wearingItems.Add(descriptor.Sprite);",
+    "SortWearablesForDraw(wearingItems);",
+    "limb.UpdateWearableTypesToHide();"
+)
+
+$fashionLimbMask = Get-Section $renderer `
+    "List<FashionSpriteDescriptor> descriptors = GetFashionSpritesForLimb(session, limb);" `
+    "lastInjectedSpriteCount = InjectedSprites.Count;"
+Assert-Order "fashion-limb-mask-inheritance" $fashionLimbMask @(
+    "descriptor.AllowedSlots.Any(inheritedLimbMaskSlots.Contains)",
+    "descriptor.Sprite.HideLimb = true;",
     "SortWearablesForDraw(wearingItems);"
+)
+
+$fashionEquipmentOcclusion = Get-Section $renderer `
+    "private static bool ShouldHideFashionBehindVisibleEquipment(" `
+    "private static void CaptureFashionHiddenWearableTypes("
+Assert-Order "fashion-equipment-occlusion" $fashionEquipmentOcclusion @(
+    "IsEquipmentSprite(equipmentSprite)",
+    "equipmentSprite.HideLimb",
+    "equipmentSprite.HideOtherWearables",
+    "ShouldDrawOriginalForEmptySavedSlot(limb.character, equipmentSprite)"
 )
 
 $visibility = Get-Section $renderer `
@@ -376,8 +396,8 @@ $maskBegin = Get-Section $renderer `
 Assert-Order "live-equipment-hide-cache-begin" $maskBegin @(
     "originalMasks[equipmentSprite] = new SpriteMaskState(equipmentSprite);",
     "ClearMask(equipmentSprite, emptyHideWearablesOfType);",
-    "limb.UpdateWearableTypesToHide();",
-    "List<FashionSpriteDescriptor> descriptors"
+    "List<FashionSpriteDescriptor> descriptors",
+    "limb.UpdateWearableTypesToHide();"
 )
 
 $maskCleanup = Get-Section $renderer `
@@ -597,6 +617,36 @@ Assert-Contract "fallback-uses-transaction-descriptors" $missingFashionFallback 
 if ($missingFashionFallback.Contains("EnumerateFashionSpritesForLimb(")) {
     throw "Fallback draw must reuse the transaction descriptor snapshot."
 }
+
+Assert-Contract "footstep-lifecycle-diagnostics" $renderer @(
+    'session.FootstepSoundCalls++;',
+    'session.FashionFootstepSoundCalls++;',
+    'DescribeFashionFootstepSounds(session)',
+    'descriptor.Sprite.Limb + ":" + descriptor.Sprite.Sound'
+)
+
+$emptySlotSetting = Get-Section $renderer `
+    "internal static void SetHideEmptySlotEquipmentSetting(" `
+    "internal static void SetOverrideGeneSplicerAppearanceSetting("
+Assert-Contract "empty-slot-setting-default-persistence-rollback" $emptySlotSetting @(
+    "hideEmptySlotEquipmentFallback = setting?.Value ?? true;",
+    "hideEmptySlotEquipmentSetting?.Value ?? hideEmptySlotEquipmentFallback",
+    "SaveBooleanSetting(hideEmptySlotEquipmentSetting)",
+    "hideEmptySlotEquipmentSetting.TrySetValue(previous);"
+)
+$emptySlotDraw = Get-Section $renderer `
+    "internal static bool TryOverrideDrawWearable(" `
+    "internal static LimbRenderTransaction BeginLimbDraw("
+Assert-Order "empty-slot-gear-bypasses-fashion-deduplication" $emptySlotDraw @(
+    "if (ShouldDrawOriginalForEmptySavedSlot(limb.character, original)) { return false; }",
+    "bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(",
+    "if (hideOriginalForEmptySavedSlot)",
+    "TryGetFashionSprite("
+)
+Assert-Contract "empty-slot-bag-appendage-policy" $renderer @(
+    "!((session.ForceHideEmptySlots || GetHideEmptySlotEquipment()) &&",
+    "session.EmptySlots.Contains(InvSlotType.Bag)"
+)
 
 $wearableSort = Get-Section $renderer `
     "private static void SortWearablesForDraw(" `

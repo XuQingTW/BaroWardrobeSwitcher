@@ -323,6 +323,8 @@ namespace BaroWardrobeSwitcher
 
         public HashSet<InvSlotType> EmptySlots { get; set; } = new HashSet<InvSlotType>();
 
+        public bool ForceHideEmptySlots { get; set; }
+
         public HashSet<InvSlotType> SavedSlots { get; set; } = new HashSet<InvSlotType>();
 
         public List<object> FashionAnimations { get; } = new List<object>();
@@ -334,6 +336,10 @@ namespace BaroWardrobeSwitcher
         public bool UseFashionMovementAnimations { get; set; } = true;
 
         public bool UseFashionFootstepSounds { get; set; }
+
+        public int FootstepSoundCalls { get; set; }
+
+        public int FashionFootstepSoundCalls { get; set; }
 
         public HashSet<object> SuppressedEquipmentAnimations { get; } = new HashSet<object>();
 

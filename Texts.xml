@@ -100,4 +100,7 @@
   <barowardrobeswitcher.status.profile_collision>ambiguous identity; automatic restore disabled</barowardrobeswitcher.status.profile_collision>
   <barowardrobeswitcher.status.saved_cleared>Saved look cleared.</barowardrobeswitcher.status.saved_cleared>
   <barowardrobeswitcher.status.none>none</barowardrobeswitcher.status.none>
+  <barowardrobeswitcher.button.hide_empty_slot_equipment_yes>Hide Empty-Slot Equipment: On</barowardrobeswitcher.button.hide_empty_slot_equipment_yes>
+  <barowardrobeswitcher.button.hide_empty_slot_equipment_no>Hide Empty-Slot Equipment: Off</barowardrobeswitcher.button.hide_empty_slot_equipment_no>
+  <barowardrobeswitcher.panel.empty_slot_equipment_help>On: slots left empty when saving hide current equipment. Off: show equipment worn in those slots, such as a backpack equipped later. Saved fashion still overrides its occupied slots. This setting only affects your local view.</barowardrobeswitcher.panel.empty_slot_equipment_help>
 </infotexts>

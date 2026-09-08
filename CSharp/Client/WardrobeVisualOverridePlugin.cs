@@ -105,6 +105,15 @@ namespace BaroWardrobeSwitcher
                 LuaCsLogger.Log("[Baro Wardrobe Switcher] UnequipOnSave setting unavailable; using true.");
             }
             if (hasPackage &&
+                ConfigService.TryGetConfig(package, "HideEmptySlotEquipment", out ISettingBase<bool> hideEmptySlotEquipment))
+            {
+                VisualOverride.SetHideEmptySlotEquipmentSetting(hideEmptySlotEquipment, ConfigService);
+            }
+            else
+            {
+                LuaCsLogger.Log("[Baro Wardrobe Switcher] HideEmptySlotEquipment setting unavailable; using true.");
+            }
+            if (hasPackage &&
                 ConfigService.TryGetConfig(package, "OverrideGeneSplicerAppearance", out ISettingBase<bool> overrideGeneSplicerAppearance))
             {
                 VisualOverride.SetOverrideGeneSplicerAppearanceSetting(overrideGeneSplicerAppearance, ConfigService);
@@ -128,6 +137,7 @@ namespace BaroWardrobeSwitcher
             VisualOverride.SetPanelKeySetting(null);
             VisualOverride.SetHideHuskVisualsSetting(null, null);
             VisualOverride.SetUnequipOnSaveSetting(null, null);
+            VisualOverride.SetHideEmptySlotEquipmentSetting(null, null);
             VisualOverride.SetOverrideGeneSplicerAppearanceSetting(null, null);
             VisualOverride.ClearAll();
             harmonyInstance?.UnpatchSelf();
@@ -1128,10 +1138,12 @@ namespace BaroWardrobeSwitcher
         private static ISettingBase<string> panelKeySetting;
         private static ISettingBase<bool> hideHuskVisualsSetting;
         private static ISettingBase<bool> unequipOnSaveSetting;
+        private static ISettingBase<bool> hideEmptySlotEquipmentSetting;
         private static ISettingBase<bool> overrideGeneSplicerAppearanceSetting;
         private static IConfigService configService;
         private static bool hideHuskVisualsFallback;
         private static bool unequipOnSaveFallback = true;
+        private static bool hideEmptySlotEquipmentFallback = true;
         private static bool overrideGeneSplicerAppearanceFallback;
 
         public static string GetVersion()
@@ -1499,9 +1511,13 @@ namespace BaroWardrobeSwitcher
                    ", forceHideAttachments=0x" + (session?.ForceHideAttachmentMask ?? 0).ToString("X2") +
                    ", forceShowAttachments=0x" + (session?.ForceShowAttachmentMask ?? 0).ToString("X2") +
                    ", hideHuskVisuals=" + GetHideHuskVisuals() +
+                   ", hideEmptySlotEquipment=" + GetHideEmptySlotEquipment() +
                    ", sprites=" + spriteCount +
                    ", animations=" + animationCount +
                    ", fashionFootsteps=" + (session?.UseFashionFootstepSounds ?? false) +
+                   ", footstepCalls=" + (session?.FootstepSoundCalls ?? 0) +
+                   ", fashionFootstepCalls=" + (session?.FashionFootstepSoundCalls ?? 0) +
+                   ", fashionFootstepTags=" + DescribeFashionFootstepSounds(session) +
                    ", sounds=" + soundCount +
                    ", itemSounds=" + componentSoundCount +
                    ", suppressedSounds=" + suppressedSoundCount +
@@ -1645,6 +1661,37 @@ namespace BaroWardrobeSwitcher
                 }
             }
             unequipOnSaveFallback = enabled;
+            return true;
+        }
+
+        internal static void SetHideEmptySlotEquipmentSetting(
+            ISettingBase<bool> setting,
+            IConfigService service)
+        {
+            hideEmptySlotEquipmentSetting = setting;
+            configService = service;
+            hideEmptySlotEquipmentFallback = setting?.Value ?? true;
+        }
+
+        public static bool GetHideEmptySlotEquipment()
+        {
+            return hideEmptySlotEquipmentSetting?.Value ?? hideEmptySlotEquipmentFallback;
+        }
+
+        public static bool SetHideEmptySlotEquipment(bool enabled)
+        {
+            if (hideEmptySlotEquipmentSetting != null)
+            {
+                bool previous = hideEmptySlotEquipmentSetting.Value;
+                if (!hideEmptySlotEquipmentSetting.TrySetValue(enabled)) { return false; }
+                if (!SaveBooleanSetting(hideEmptySlotEquipmentSetting))
+                {
+                    hideEmptySlotEquipmentSetting.TrySetValue(previous);
+                    LuaCsLogger.Log("[Baro Wardrobe Switcher] Failed to persist HideEmptySlotEquipment.");
+                    return false;
+                }
+            }
+            hideEmptySlotEquipmentFallback = enabled;
             return true;
         }
 
@@ -1990,7 +2037,8 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
-        public static bool SetFashionSlots(Character character, string savedSlotsCsv, string emptySlotsCsv)
+        public static bool SetFashionSlots(
+            Character character, string savedSlotsCsv, string emptySlotsCsv, bool forceHideEmptySlots = false)
         {
             if (character == null) { return false; }
             RenderSession session = GetCaptureSession(character);
@@ -2004,6 +2052,7 @@ namespace BaroWardrobeSwitcher
             session.SuppressedEquipmentComponentSounds.Clear();
             session.SavedSlots = savedSlots;
             session.EmptySlots = emptySlots;
+            session.ForceHideEmptySlots = forceHideEmptySlots;
             if (changed)
             {
                 LuaCsLogger.Log(
@@ -2304,6 +2353,12 @@ namespace BaroWardrobeSwitcher
             HashSet<WearableSprite> drawnSprites = transaction.DrawnSprites;
             if (transaction.InjectedSprites.Contains(original))
             {
+                if (ShouldHideFashionBehindVisibleEquipment(limb))
+                {
+                    skipOriginal = true;
+                    drawOverrideHiddenAfterDrawCount++;
+                    return true;
+                }
                 // Fail closed at the actual draw boundary. A stale dictionary key or
                 // interrupted render transaction must never draw one limb's sprite on
                 // another physical limb.
@@ -2316,6 +2371,9 @@ namespace BaroWardrobeSwitcher
                 drawOverrideHitCount++;
                 return false;
             }
+            // Let empty-slot gear reach the native draw before same-limb fashion
+            // deduplication can mistake a backpack for already-drawn clothing.
+            if (ShouldDrawOriginalForEmptySavedSlot(limb.character, original)) { return false; }
             bool hideOriginalForEmptySavedSlot = ShouldHideOriginalForEmptySavedSlot(limb.character, original);
             // Empty is an explicit appearance choice. Resolve it before looking for
             // a same-type fashion sprite that may belong to a different saved slot.
@@ -2435,7 +2493,8 @@ namespace BaroWardrobeSwitcher
                 !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
                 !session.IsActive ||
                 (!session.SavedSlots.Contains(InvSlotType.Bag) &&
-                 !session.EmptySlots.Contains(InvSlotType.Bag)))
+                 !((session.ForceHideEmptySlots || GetHideEmptySlotEquipment()) &&
+                   session.EmptySlots.Contains(InvSlotType.Bag))))
             {
                 return false;
             }
@@ -2601,8 +2660,12 @@ namespace BaroWardrobeSwitcher
         internal static FootstepSoundTransaction BeginFootstepSound(Limb limb)
         {
             if (limb?.character == null ||
-                !RenderSessions.TryGetValue(limb.character, out RenderSession session) ||
-                !session.IsActive ||
+                !RenderSessions.TryGetValue(limb.character, out RenderSession session))
+            {
+                return null;
+            }
+            session.FootstepSoundCalls++;
+            if (!session.IsActive ||
                 !session.IsValid ||
                 !session.UseFashionFootstepSounds ||
                 !HasCapability("footstepSound"))
@@ -2618,6 +2681,7 @@ namespace BaroWardrobeSwitcher
             try
             {
                 transaction.Begin(session);
+                session.FashionFootstepSoundCalls++;
                 return transaction;
             }
             catch (Exception ex)
@@ -2633,6 +2697,17 @@ namespace BaroWardrobeSwitcher
                 ReturnFootstepSoundTransaction(transaction);
                 return null;
             }
+        }
+
+        private static string DescribeFashionFootstepSounds(RenderSession session)
+        {
+            if (session == null) { return "none"; }
+            string[] tags = session.Descriptors
+                .Where(descriptor => !string.IsNullOrWhiteSpace(descriptor?.Sprite?.Sound))
+                .Select(descriptor => descriptor.Sprite.Limb + ":" + descriptor.Sprite.Sound)
+                .Distinct()
+                .ToArray();
+            return tags.Length == 0 ? "none" : string.Join(",", tags);
         }
 
         internal static Exception EndFootstepSound(
@@ -2694,6 +2769,7 @@ namespace BaroWardrobeSwitcher
                 {
                     WearableSprite sprite = descriptor.Sprite;
                     if (!IsFashionSpriteCompatibleWithLimb(session, sprite, limb)) { continue; }
+                    if (ShouldHideFashionBehindVisibleEquipment(limb)) { continue; }
                     if (drawnSprites.Contains(sprite)) { continue; }
 
                     drawnSprites.Add(sprite);
@@ -3645,6 +3721,34 @@ namespace BaroWardrobeSwitcher
             return false;
         }
 
+        private static bool ShouldDrawOriginalForEmptySavedSlot(Character character, WearableSprite original)
+        {
+            if (character == null || GetHideEmptySlotEquipment() ||
+                !RenderSessions.TryGetValue(character, out RenderSession session) || session.ForceHideEmptySlots)
+            {
+                return false;
+            }
+            return ShouldHideOriginalForEmptySavedSlot(character, original) &&
+                   !ShouldHideOriginalForSavedSlot(character, original);
+        }
+
+        private static bool ShouldHideFashionBehindVisibleEquipment(Limb limb)
+        {
+            if (limb?.WearingItems == null) { return false; }
+            foreach (WearableSprite equipmentSprite in limb.WearingItems)
+            {
+                if (!IsEquipmentSprite(equipmentSprite) ||
+                    !equipmentSprite.HideLimb ||
+                    !equipmentSprite.HideOtherWearables ||
+                    !ShouldDrawOriginalForEmptySavedSlot(limb.character, equipmentSprite))
+                {
+                    continue;
+                }
+                return true;
+            }
+            return false;
+        }
+
         private static void CaptureFashionHiddenWearableTypes(RenderSession session, WearableSprite sprite)
         {
             if (session == null || sprite?.HideWearablesOfType == null || sprite.HideWearablesOfType.Count == 0) { return; }
@@ -4068,12 +4172,46 @@ namespace BaroWardrobeSwitcher
                     return;
                 }
 
+                HashSet<InvSlotType> inheritedLimbMaskSlots = null;
                 for (int index = 0; index < wearingItems.Count; index++)
                 {
                     WearableSprite equipmentSprite = wearingItems[index];
                     if (!IsEquipmentSprite(equipmentSprite) || session.TryGetDescriptor(equipmentSprite, out _))
                     {
                         continue;
+                    }
+                    bool suppressedEquipment =
+                        ShouldHideOriginalForSavedSlot(limb.character, equipmentSprite) ||
+                        (ShouldHideOriginalForEmptySavedSlot(limb.character, equipmentSprite) &&
+                         !ShouldDrawOriginalForEmptySavedSlot(limb.character, equipmentSprite));
+                    if (suppressedEquipment && equipmentSprite.HideLimb &&
+                        equipmentSprite.WearableComponent?.AllowedSlots != null)
+                    {
+                        inheritedLimbMaskSlots ??= new HashSet<InvSlotType>();
+                        foreach (InvSlotType slot in equipmentSprite.WearableComponent.AllowedSlots)
+                        {
+                            inheritedLimbMaskSlots.Add(slot);
+                        }
+                    }
+                    bool preserveEquipmentMasks = ShouldDrawOriginalForEmptySavedSlot(limb.character, equipmentSprite);
+                    List<WearableType> filteredHideTypes = null;
+                    if (preserveEquipmentMasks)
+                    {
+                        // Visible real gear keeps its native body and attachment masks.
+                        // Only explicit Show choices override its attachment hiding.
+                        if (session.ForceShowAttachmentMask != 0 && equipmentSprite.HideWearablesOfType != null)
+                        {
+                            foreach (WearableType hiddenType in equipmentSprite.HideWearablesOfType)
+                            {
+                                if (AttachmentBits.TryGetValue(hiddenType, out int bit) &&
+                                    (session.ForceShowAttachmentMask & bit) != 0)
+                                {
+                                    filteredHideTypes ??= new List<WearableType>(equipmentSprite.HideWearablesOfType);
+                                    filteredHideTypes.Remove(hiddenType);
+                                }
+                            }
+                        }
+                        if (filteredHideTypes == null) { continue; }
                     }
                     if (!NeedsMaskClear(equipmentSprite)) { continue; }
                     originalMasks ??= new Dictionary<WearableSprite, SpriteMaskState>();
@@ -4082,16 +4220,15 @@ namespace BaroWardrobeSwitcher
                     {
                         wearableTypesCacheChanged = true;
                     }
-                    ClearMask(equipmentSprite, emptyHideWearablesOfType);
+                    if (preserveEquipmentMasks)
+                    {
+                        equipmentSprite.HideWearablesOfType = filteredHideTypes;
+                    }
+                    else
+                    {
+                        ClearMask(equipmentSprite, emptyHideWearablesOfType);
+                    }
                 }
-                // Equip caches HideWearablesOfType before Limb.Draw starts. Rebuild
-                // that cache while real equipment masks are cleared so attachments
-                // reach DrawWearable and the wardrobe visibility policy can decide.
-                if (wearableTypesCacheChanged)
-                {
-                    limb.UpdateWearableTypesToHide();
-                }
-
                 static List<FashionSpriteDescriptor> GetFashionSpritesForLimb(RenderSession session, Limb limb)
                 {
                     if (session.FashionSpritesByLimb.TryGetValue(limb.type, out List<FashionSpriteDescriptor> cached))
@@ -4127,9 +4264,36 @@ namespace BaroWardrobeSwitcher
                     wearingItems.Add(descriptor.Sprite);
                     InjectedSprites.Add(descriptor.Sprite);
                 }
+                if (inheritedLimbMaskSlots?.Count > 0)
+                {
+                    for (int index = 0; index < descriptors.Count; index++)
+                    {
+                        FashionSpriteDescriptor descriptor = descriptors[index];
+                        if (descriptor?.Sprite == null ||
+                            descriptor.Sprite.HideLimb ||
+                            !descriptor.AllowedSlots.Any(inheritedLimbMaskSlots.Contains))
+                        {
+                            continue;
+                        }
+                        originalMasks ??= new Dictionary<WearableSprite, SpriteMaskState>();
+                        if (!originalMasks.ContainsKey(descriptor.Sprite))
+                        {
+                            originalMasks[descriptor.Sprite] = new SpriteMaskState(descriptor.Sprite);
+                        }
+                        descriptor.Sprite.HideLimb = true;
+                    }
+                }
                 if (InjectedSprites.Count > 0)
                 {
                     SortWearablesForDraw(wearingItems);
+                    wearableTypesCacheChanged = true;
+                }
+                // Equip caches HideWearablesOfType before Limb.Draw starts. Rebuild
+                // that cache after native mask changes and fashion injection so
+                // fashion clothing can hide its own arm and attachment sprites.
+                if (wearableTypesCacheChanged)
+                {
+                    limb.UpdateWearableTypesToHide();
                 }
                 lastInjectedSpriteCount = InjectedSprites.Count;
             }
