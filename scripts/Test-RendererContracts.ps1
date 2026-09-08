@@ -362,15 +362,6 @@ Assert-Order "workshop-left-breast-injection-guard" $fashionInjection @(
     "limb.UpdateWearableTypesToHide();"
 )
 
-$fashionLimbMask = Get-Section $renderer `
-    "List<FashionSpriteDescriptor> descriptors = GetFashionSpritesForLimb(session, limb);" `
-    "lastInjectedSpriteCount = InjectedSprites.Count;"
-Assert-Order "fashion-limb-mask-inheritance" $fashionLimbMask @(
-    "descriptor.AllowedSlots.Any(inheritedLimbMaskSlots.Contains)",
-    "descriptor.Sprite.HideLimb = true;",
-    "SortWearablesForDraw(wearingItems);"
-)
-
 $fashionEquipmentOcclusion = Get-Section $renderer `
     "private static bool ShouldHideFashionBehindVisibleEquipment(" `
     "private static void CaptureFashionHiddenWearableTypes("

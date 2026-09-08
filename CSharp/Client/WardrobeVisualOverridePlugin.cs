@@ -4172,26 +4172,14 @@ namespace BaroWardrobeSwitcher
                     return;
                 }
 
-                HashSet<InvSlotType> inheritedLimbMaskSlots = null;
+                // Replaced equipment must not transfer its body masks to fashion.
+                // The saved sprite's own HideLimb controls exposed hands/feet.
                 for (int index = 0; index < wearingItems.Count; index++)
                 {
                     WearableSprite equipmentSprite = wearingItems[index];
                     if (!IsEquipmentSprite(equipmentSprite) || session.TryGetDescriptor(equipmentSprite, out _))
                     {
                         continue;
-                    }
-                    bool suppressedEquipment =
-                        ShouldHideOriginalForSavedSlot(limb.character, equipmentSprite) ||
-                        (ShouldHideOriginalForEmptySavedSlot(limb.character, equipmentSprite) &&
-                         !ShouldDrawOriginalForEmptySavedSlot(limb.character, equipmentSprite));
-                    if (suppressedEquipment && equipmentSprite.HideLimb &&
-                        equipmentSprite.WearableComponent?.AllowedSlots != null)
-                    {
-                        inheritedLimbMaskSlots ??= new HashSet<InvSlotType>();
-                        foreach (InvSlotType slot in equipmentSprite.WearableComponent.AllowedSlots)
-                        {
-                            inheritedLimbMaskSlots.Add(slot);
-                        }
                     }
                     bool preserveEquipmentMasks = ShouldDrawOriginalForEmptySavedSlot(limb.character, equipmentSprite);
                     List<WearableType> filteredHideTypes = null;
@@ -4263,25 +4251,6 @@ namespace BaroWardrobeSwitcher
                     }
                     wearingItems.Add(descriptor.Sprite);
                     InjectedSprites.Add(descriptor.Sprite);
-                }
-                if (inheritedLimbMaskSlots?.Count > 0)
-                {
-                    for (int index = 0; index < descriptors.Count; index++)
-                    {
-                        FashionSpriteDescriptor descriptor = descriptors[index];
-                        if (descriptor?.Sprite == null ||
-                            descriptor.Sprite.HideLimb ||
-                            !descriptor.AllowedSlots.Any(inheritedLimbMaskSlots.Contains))
-                        {
-                            continue;
-                        }
-                        originalMasks ??= new Dictionary<WearableSprite, SpriteMaskState>();
-                        if (!originalMasks.ContainsKey(descriptor.Sprite))
-                        {
-                            originalMasks[descriptor.Sprite] = new SpriteMaskState(descriptor.Sprite);
-                        }
-                        descriptor.Sprite.HideLimb = true;
-                    }
                 }
                 if (InjectedSprites.Count > 0)
                 {
