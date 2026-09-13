@@ -208,7 +208,11 @@ $contracts = @(
             "public HashSet<object> SuppressedEquipmentAnimations { get; }",
             "RegisterSuppressedEquipmentAnimations(character, item);",
             "session.SuppressedEquipmentAnimations.Contains(animationInfo)",
-            "FashionEffectPolicy.ShouldSuppressEquipmentAnimation(item, animationInfo)"
+            "FashionEffectPolicy.ShouldSuppressEquipmentAnimation(item, animationInfo)",
+            'PatchApplied("AnimController.GetSpeed")',
+            "VisualOverride.PreserveEquipmentMovementSpeed(__instance, __0, ref __result);",
+            "session.EquipmentMovementAnimations.Remove(animationInfo);",
+            "__result = true;"
         )
     },
     @{
@@ -502,7 +506,7 @@ $temporaryAnimation = Get-Section $renderer `
 Assert-Order "exact-equipment-animation-suppression" $temporaryAnimation @(
     "if (!session.UseFashionMovementAnimations) { return true; }",
     "session.SuppressedEquipmentAnimations.Contains(animationInfo)",
-    "session.FashionAnimations.Count > 0",
+    "session.FashionAnimations.Count == 0",
     "FashionEffectPolicy.IsLargeEquipmentMovementAnimation(animationInfo)"
 )
 

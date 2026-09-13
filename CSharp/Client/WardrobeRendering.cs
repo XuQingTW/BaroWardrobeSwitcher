@@ -343,6 +343,32 @@ namespace BaroWardrobeSwitcher
 
         public HashSet<object> SuppressedEquipmentAnimations { get; } = new HashSet<object>();
 
+        public Dictionary<object, (GroundedMovementParams Parameters, float Priority, long LastRefresh)>
+            EquipmentMovementAnimations { get; } =
+                new Dictionary<object, (GroundedMovementParams, float, long)>();
+
+        public long MovementAnimationFrame { get; set; }
+
+        internal float LimitEquipmentMovementSpeed(AnimationType type, bool backwards, float speed)
+        {
+            if (!UseFashionMovementAnimations) { return speed; }
+            GroundedMovementParams selected = null;
+            float priority = float.NegativeInfinity;
+            foreach (var movement in EquipmentMovementAnimations.Values)
+            {
+                // Like native temporary animations, require a refresh each update,
+                // allowing the previous frame because input and effects run separately.
+                if (MovementAnimationFrame - movement.LastRefresh > 1 ||
+                    movement.Parameters.AnimationType != type || movement.Priority <= priority) { continue; }
+                selected = movement.Parameters;
+                priority = movement.Priority;
+            }
+            if (selected == null) { return speed; }
+            float equipmentSpeed = selected.MovementSpeed *
+                (backwards ? selected.BackwardsMovementMultiplier : 1.0f);
+            return Math.Min(speed, equipmentSpeed);
+        }
+
         public List<StatusEffect> FashionSounds { get; } = new List<StatusEffect>();
 
         public List<StatusEffect> LoopingFashionSounds { get; } = new List<StatusEffect>();
@@ -560,6 +586,7 @@ namespace BaroWardrobeSwitcher
             Array.Clear(FashionAnimationInvokeArguments, 0, FashionAnimationInvokeArguments.Length);
             FashionAnimationInvokeArguments[1] = false;
             SuppressedEquipmentAnimations.Clear();
+            EquipmentMovementAnimations.Clear();
             FashionSounds.Clear();
             LoopingFashionSounds.Clear();
             Array.Clear(FashionSoundInvokeArguments, 0, FashionSoundInvokeArguments.Length);

@@ -1174,6 +1174,8 @@ namespace BaroWardrobeSwitcher
             new[] { typeof(WearableSprite), typeof(float), typeof(SpriteBatch), typeof(Color), typeof(float), typeof(SpriteEffects) });
         private static readonly MethodInfo UpdateAnimationsMethod =
             AccessTools.Method(typeof(AnimController), "UpdateAnimations", new[] { typeof(float) });
+        private static readonly MethodInfo GetSpeedMethod =
+            AccessTools.Method(typeof(AnimController), "GetSpeed", new[] { typeof(AnimationType) });
         private static readonly Type AnimLoadInfoType =
             typeof(StatusEffect).GetNestedType("AnimLoadInfo", BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly MethodInfo TryLoadTemporaryAnimationMethod = AnimLoadInfoType == null
@@ -1278,6 +1280,7 @@ namespace BaroWardrobeSwitcher
             PatchStates["Limb.DrawWearable"] = new PatchState(required: true);
             PatchStates["Limb.Draw"] = new PatchState(required: true);
             PatchStates["AnimController.UpdateAnimations"] = new PatchState(required: false);
+            PatchStates["AnimController.GetSpeed"] = new PatchState(required: false);
             PatchStates["AnimController.TryLoadTemporaryAnimation"] = new PatchState(required: false);
             PatchStates["StatusEffect.PlaySound"] = new PatchState(required: false);
             PatchStates["ItemComponent.PlaySound"] = new PatchState(required: false);
@@ -1315,6 +1318,12 @@ namespace BaroWardrobeSwitcher
                 "AnimController.UpdateAnimations",
                 UpdateAnimationsMethod,
                 postfix: AccessTools.Method(typeof(AnimControllerUpdateAnimationsPatch), "Postfix"),
+                required: false);
+            PatchTarget(
+                harmony,
+                "AnimController.GetSpeed",
+                GetSpeedMethod,
+                postfix: AccessTools.Method(typeof(AnimControllerGetSpeedPatch), "Postfix"),
                 required: false);
             PatchTarget(
                 harmony,
@@ -1373,6 +1382,7 @@ namespace BaroWardrobeSwitcher
                            DrawWearableMethod != null;
                 case "animation":
                     return PatchApplied("AnimController.UpdateAnimations") &&
+                           PatchApplied("AnimController.GetSpeed") &&
                            PatchApplied("AnimController.TryLoadTemporaryAnimation") &&
                            UpdateAnimationsMethod != null &&
                            TryLoadTemporaryAnimationMethod != null &&
@@ -1556,6 +1566,7 @@ namespace BaroWardrobeSwitcher
             foreach (RenderSession session in RenderSessions.Values)
             {
                 session.SuppressedEquipmentAnimations.Clear();
+                session.EquipmentMovementAnimations.Clear();
                 session.IsActive = false;
                 session.RemoveOwnedAppendages();
                 session.ForceHideAttachmentMask = 0;
@@ -1571,6 +1582,7 @@ namespace BaroWardrobeSwitcher
             if (RenderSessions.TryGetValue(character, out RenderSession session))
             {
                 session.SuppressedEquipmentAnimations.Clear();
+                session.EquipmentMovementAnimations.Clear();
                 session.SuppressedEquipmentSounds.Clear();
                 session.SuppressedEquipmentComponentSounds.Clear();
                 session.IsActive = false;
@@ -2048,6 +2060,7 @@ namespace BaroWardrobeSwitcher
                 !session.SavedSlots.SetEquals(savedSlots) ||
                 !session.EmptySlots.SetEquals(emptySlots);
             session.SuppressedEquipmentAnimations.Clear();
+            session.EquipmentMovementAnimations.Clear();
             session.SuppressedEquipmentSounds.Clear();
             session.SuppressedEquipmentComponentSounds.Clear();
             session.SavedSlots = savedSlots;
@@ -2121,6 +2134,7 @@ namespace BaroWardrobeSwitcher
             }
 
             session.UseFashionMovementAnimations = enabled;
+            if (!enabled) { session.EquipmentMovementAnimations.Clear(); }
             return true;
         }
 
@@ -2200,6 +2214,7 @@ namespace BaroWardrobeSwitcher
                     foreach (object animationInfo in animations)
                     {
                         session.SuppressedEquipmentAnimations.Remove(animationInfo);
+                        session.EquipmentMovementAnimations.Remove(animationInfo);
                     }
                 }
             }
@@ -2840,6 +2855,11 @@ namespace BaroWardrobeSwitcher
 
         internal static void KeepFashionEffectsAlive(AnimController animController)
         {
+            if (animController?.Character != null &&
+                RenderSessions.TryGetValue(animController.Character, out RenderSession session))
+            {
+                session.MovementAnimationFrame++;
+            }
             KeepFashionAnimationsAlive(animController);
             KeepFashionSoundsAlive(animController);
         }
@@ -2856,10 +2876,46 @@ namespace BaroWardrobeSwitcher
                 return true;
             }
             if (!session.UseFashionMovementAnimations) { return true; }
-            if (session.SuppressedEquipmentAnimations.Contains(animationInfo)) { return false; }
-            if (session.FashionAnimations.Count > 0) { return true; }
+            bool suppress = session.SuppressedEquipmentAnimations.Contains(animationInfo) ||
+                (session.FashionAnimations.Count == 0 &&
+                 FashionEffectPolicy.IsLargeEquipmentMovementAnimation(animationInfo));
+            if (!suppress) { return true; }
 
-            return !FashionEffectPolicy.IsLargeEquipmentMovementAnimation(animationInfo);
+            // Suppress the pose only. Diving suits encode their ground speed in
+            // these animation files, not in Character.SpeedMultiplier.
+            if (!(animController is HumanoidAnimController) ||
+                !(animationInfo is StatusEffect.AnimLoadInfo info)) { return true; }
+            try
+            {
+                if (!session.EquipmentMovementAnimations.TryGetValue(animationInfo, out var movement))
+                {
+                    GroundedMovementParams parameters = info.Type == AnimationType.Walk
+                        ? HumanWalkParams.GetAnimParams(character, info.File, false)
+                        : info.Type == AnimationType.Run
+                            ? HumanRunParams.GetAnimParams(character, info.File, false)
+                            : null;
+                    if (parameters == null) { return true; }
+                    movement = (parameters, info.Priority, session.MovementAnimationFrame);
+                }
+                movement.LastRefresh = session.MovementAnimationFrame;
+                session.EquipmentMovementAnimations[animationInfo] = movement;
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogAnimationError($"Failed to preserve equipment movement speed: {ex.Message}");
+                return true;
+            }
+        }
+
+        internal static void PreserveEquipmentMovementSpeed(
+            AnimController animController, AnimationType type, ref float speed)
+        {
+            if ((type != AnimationType.Walk && type != AnimationType.Run) ||
+                animController?.Character == null ||
+                !RenderSessions.TryGetValue(animController.Character, out RenderSession session) ||
+                !session.IsActive || !session.IsValid || !HasCapability("animation")) { return; }
+            speed = session.LimitEquipmentMovementSpeed(type, animController.IsMovingBackwards, speed);
         }
 
         private static void KeepFashionAnimationsAlive(AnimController animController)
@@ -4486,9 +4542,21 @@ namespace BaroWardrobeSwitcher
 
     internal static class AnimControllerTryLoadTemporaryAnimationPatch
     {
-        private static bool Prefix(AnimController __instance, object __0)
+        private static bool Prefix(AnimController __instance, object __0, ref bool __result)
         {
-            return VisualOverride.ShouldLoadTemporaryAnimation(__instance, __0);
+            if (VisualOverride.ShouldLoadTemporaryAnimation(__instance, __0)) { return true; }
+            // StatusEffect blacklists (character, animation) after a false result.
+            // A cosmetic suppression must count as success so equipment can resume.
+            __result = true;
+            return false;
+        }
+    }
+
+    internal static class AnimControllerGetSpeedPatch
+    {
+        private static void Postfix(AnimController __instance, AnimationType __0, ref float __result)
+        {
+            VisualOverride.PreserveEquipmentMovementSpeed(__instance, __0, ref __result);
         }
     }
 

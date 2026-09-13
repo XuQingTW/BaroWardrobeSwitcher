@@ -107,6 +107,7 @@ List<string> failures = [];
 try
 {
     Run("empty-slot-native-mask-transaction", () => RendererMaskProbe.Run(modAssembly), failures);
+    Run("equipment-movement-speed-and-animation-retry", () => MovementAnimationProbe.Run(modAssembly), failures);
     Run("canonical-v5-json", TestCanonicalV5, failures);
     Run("persistence-diagnostic-contract", TestDiagnosticContract, failures);
     Run("private-file-log", TestPrivateFileLog, failures);

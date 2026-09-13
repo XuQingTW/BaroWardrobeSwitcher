@@ -410,6 +410,8 @@ else
 
 RequireMethod("AnimController.UpdateAnimations(float)", animController, "UpdateAnimations",
     new[] { typeof(float) }, typeof(void), optional: true);
+RequireMethod("AnimController.GetSpeed(AnimationType)", animController, "GetSpeed",
+    new[] { RequireType("Barotrauma.AnimationType") }, typeof(float), optional: true);
 RequireMethod("AnimController.TryLoadTemporaryAnimation(AnimLoadInfo,bool)", animController, "TryLoadTemporaryAnimation",
     new[] { animLoadInfo, typeof(bool) }, typeof(bool), optional: true);
 RequireMethod("StatusEffect.PlaySound(Entity,Hull,Vector2)", statusEffect, "PlaySound",
