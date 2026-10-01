@@ -191,6 +191,13 @@ local buildWindow
 local buildAttachmentVisibilityWindow
 local toggleWindow
 local fullPanelOpen = false
+
+--鏡頭控制
+local WPreviewZoom = 4
+local CX = 0.4
+--鏡頭的環境設定
+local WLightState = nil
+
 local Helpers = {}
 -- 潛水外觀模式：0 關閉、1 潛水服、2 自訂；需和 C# 潛水存檔及網路驗證一致。
 Helpers.DIVING_MODE_NONE = 0
@@ -5435,6 +5442,7 @@ function Helpers.dumpDebugLog()
     emit("visualOverrideCharacter=" .. tostring(debugStatus))
     emit("---- wardrobe diagnostic dump end ----")
     lastOperation = "Debug diagnostics written to WardrobeClient.log."
+
 end
 
 function Helpers.clearWindow()
@@ -5445,6 +5453,7 @@ function Helpers.clearWindow()
     diagnosticsVisible = false
     windowNeedsRefresh = false
     Helpers.resetOverlay()
+    Helpers.setLightingPreview(false)
 end
 
 function Helpers.requestWindowClose()
@@ -5457,16 +5466,21 @@ function Helpers.requestWindowClose()
     -- the current root alive until the next think tick instead of removing it
     -- from inside its own OnClicked callback.
     windowNeedsRefresh = true
+    Helpers.setLightingPreview(false)
 end
 
 function Helpers.addText(parent, text)
     local block = GUI.TextBlock(GUI.RectTransform(Vector2(1.0, 0.0), parent.RectTransform), text)
     block.TextColor = Color.White
+    block.Wrap = true
+    block.SetTextPos()
+    block.CalculateHeightFromText()
     return block
 end
 
 function Helpers.addButton(parent, text, action, refresh, enabled)
     local button = GUI.Button(GUI.RectTransform(Vector2(1.0, 0.08), parent.RectTransform), text)
+    button.TextBlock.AutoScaleHorizontal = true
     if enabled == false then
         pcall(function() button.Enabled = false end)
     end
@@ -5493,6 +5507,7 @@ function Helpers.addButtonPair(parent, leftText, leftAction, leftEnabled, rightT
     )
     local function add(text, action, enabled)
         local button = GUI.Button(GUI.RectTransform(Vector2(0.5, 1.0), row.RectTransform), text)
+        button.TextBlock.AutoScaleHorizontal = true
         if enabled == false then pcall(function() button.Enabled = false end) end
         button.OnClicked = function()
             local ok, reason = pcall(action)
@@ -5687,11 +5702,15 @@ buildWindow = function()
         return
     end
 
-    local panelWidth = advancedPanelOpen and 0.46 or 0.44
-    local panelHeight = advancedPanelOpen and (diagnosticsVisible and 0.94 or 0.76) or
-        (tutorialExpanded and 0.78 or 0.66)
+    local panelWidth = advancedPanelOpen and 0.25 or 0.22
+    local panelHeight = advancedPanelOpen and (diagnosticsVisible and 0.9 or 0.5) or
+        (tutorialExpanded and 0.8 or 0.55)
+    local transform =GUI.RectTransform(Vector2(panelWidth, panelHeight),
+        parent,
+        GUI.Anchor.CenterRight)
+    transform.RelativeOffset = Vector2(0.02, 0.0)
     local frame = GUI.Frame(
-        GUI.RectTransform(Vector2(panelWidth, panelHeight), parent, GUI.Anchor.Center),
+        transform,
         "GUIFrame"
     )
     window = frame
@@ -5915,7 +5934,7 @@ buildAttachmentVisibilityWindow = function()
     end
 
     local frame = GUI.Frame(
-        GUI.RectTransform(Vector2(0.38, 0.56), parent, GUI.Anchor.Center),
+        GUI.RectTransform(Vector2(0.2, 0.6), parent, GUI.Anchor.CenterRight),
         "GUIFrame"
     )
     window = frame
@@ -5965,13 +5984,16 @@ buildAttachmentVisibilityWindow = function()
     end, true, true)
 end
 
+
 toggleWindow = function()
     if fullPanelOpen then
         Helpers.clearWindow()
+
     else
         fullPanelOpen = true
         advancedPanelOpen = false
         diagnosticsVisible = false
+
         buildWindow()
     end
 end
@@ -6139,7 +6161,6 @@ function Helpers.handleRoundStartSessionChange()
         lastSessionKey = sessionKey
         return
     end
-
     local sessionKeyChanged = sessionKey ~= lastSessionKey
     local sessionObjectChanged = not rawequal(sessionObject, lastSessionObject)
     lastSessionObject = sessionObject
@@ -6151,6 +6172,53 @@ function Helpers.handleRoundStartSessionChange()
         Helpers.rebindCurrentLookForReplacedSession()
         Helpers.debugLog("Rebound wardrobe state after the game replaced its session object.")
     end
+end
+-- 處理一下鏡頭控制
+function Helpers.updateCamera(character)
+    if character == nil then return end
+    local cam = GameMain.GameScreen.Cam
+    if cam == nil then return end
+    cam.MaxZoom = math.max(cam.MaxZoom, WPreviewZoom)
+    cam.Zoom = WPreviewZoom
+    local offsetX = (0.5 - CX) * cam.Resolution.X / cam.Zoom
+    cam.Position = character.WorldPosition + Vector2(offsetX, 0)
+
+--    cam.UpdateTransform(false)
+end
+--鎖定一下鏡頭
+Hook.Patch(
+    "Barotrauma.Camera",
+    "MoveCamera",
+    function (cam,ptable)
+        if not fullPanelOpen or GameMain == nil or GameMain.GameScreen == nil  then return end
+        Helpers.updateCamera(controlled())
+
+    end,
+    Hook.HookMethodType.After
+)
+--開一下OP不要被視野擋住
+function Helpers.setLightingPreview(enable)
+    if not enable then
+        if WLightState ~= nil then
+            local state = WLightState
+            state.manager.LightingEnabled = state.lighting
+            state.manager.LosEnabled = state.los
+            WLightState = nil
+        end
+        return
+    end
+    if GameMain == nil or GameMain.LightManager == nil then return end
+    local manager = GameMain.LightManager
+
+    if WLightState == nil then
+        WLightState = {
+            manager = manager,
+            lighting = manager.LightingEnabled,
+            los = manager.LosEnabled
+        }
+    end
+    manager.LightingEnabled = false
+    manager.LosEnabled = false
 end
 
 -- 每幀入口：處理待辦、角色狀態與介面；昂貴的新工作應使用事件或間隔檢查。
@@ -6187,6 +6255,7 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
         if actualCharacterId > 0 then multiplayerOwnerCharacterId = actualCharacterId end
     end
     local character = controlled()
+    Helpers.setLightingPreview(fullPanelOpen)
     if character == nil then
         Helpers.handleNoControlledCharacter()
         if fullPanelOpen and (window == nil or windowNeedsRefresh) then
@@ -6216,8 +6285,9 @@ Hook.Add("think", "barowardrobeswitcher.panel", function()
     end
     if fullPanelOpen then
         Helpers.drawOverlay()
+        --變更了鏡頭鎖定調整方法，先註解調關注一下
+        --Helpers.updateCamera(character)
     end
-
 end)
 
 Hook.Add("roundStart", "barowardrobeswitcher.notice", function()
@@ -6375,6 +6445,7 @@ Hook.Add("roundEnd", "barowardrobeswitcher.cleanup", function()
     else
         lastOperation = Helpers.hasSavedLook() and "Saved look needs to be applied again." or "Round ended."
     end
+    Helpers.setLightingPreview(false)
 end)
 
 Helpers.log("Loaded. Press " .. currentPanelKey() .. " to open the wardrobe panel.")
