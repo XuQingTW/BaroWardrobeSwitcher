@@ -7,8 +7,10 @@ using System.Text.Json.Serialization;
 
 namespace BaroWardrobeSwitcher
 {
+    // 潛水外觀的存檔分檔；共用解析、雜湊與安全寫檔方法在其他 WardrobePersistence partial 中。
     public static partial class WardrobePersistence
     {
+        // 這是 DivingProfiles.json 自己的格式版本，不跟隨模組版本自動增加。
         private const int DivingProfilesVersion = 1;
         private const string DivingProfilesFileName = "DivingProfiles.json";
         private const int MaximumDivingProfiles = 512;
@@ -35,6 +37,8 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        // mode：0 關閉、1 潛水服、2 自訂，對應 Lua Helpers.DIVING_MODE_*。
+        // encodedLook 是 Lua 橋接字串；存檔時解析成欄位，profileKey 則雜湊後保存。
         public static bool SaveDivingProfile(string profileKey, int mode, string encodedLook)
         {
             ClearLastError();
@@ -52,6 +56,7 @@ namespace BaroWardrobeSwitcher
                 DivingProfile profile = document.Profiles.FirstOrDefault(
                     candidate => string.Equals(candidate.ProfileHash, profileHash, StringComparison.Ordinal));
 
+                // 關閉且沒有捕捉紀錄才刪除；單純切到關閉仍可保留已存的自訂外觀。
                 if (mode == 0 && !look.Captured && !HasAnySlot(look.Slots))
                 {
                     if (profile != null) { document.Profiles.Remove(profile); }
@@ -83,6 +88,7 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        // 缺檔建立空資料；格式損壞則隔離原檔，再回傳空資料供後續使用。
         private static DivingProfilesDocument ReadDivingProfiles()
         {
             string path = GetDivingProfilesPath();

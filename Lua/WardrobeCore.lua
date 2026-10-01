@@ -3,6 +3,10 @@
 
 local Core = {}
 
+-- 編輯導覽：共用資料格式與驗證在前半部；按鈕操作的狀態轉換請找 Core.reduce。
+-- 此檔由客戶端與伺服器共用，遊戲物件、GUI、讀寫檔案應放在各自的 Switcher 中。
+-- MOD_VERSION 是模組版本；PROTOCOL／LOOK_SCHEMA／PERSISTENCE 分別管理協定、外觀與存檔格式。
+-- 更動格式時須同步讀寫端與遷移邏輯，不能只提高版本數字。
 Core.MOD_VERSION = "0.5.10"
 Core.PROTOCOL_VERSION = 5
 Core.LOOK_SCHEMA_VERSION = 4
@@ -13,6 +17,7 @@ Core.LOOK_EXTENSION_VERSION = 3
 Core.HELLO_EXTENSION_MARKER = 0x57
 Core.HELLO_EXTENSION_VERSION = 1
 
+-- 訊息名稱是雙方約定的通道；V1/V2 是既有命名，不等於目前 PROTOCOL_VERSION。
 Core.NET = {
     V2_HELLO = "barowardrobeswitcher.v2.hello",
     V2_COMMAND = "barowardrobeswitcher.v2.command",
@@ -29,6 +34,7 @@ Core.NET = {
     V1_LOOK_CLEAR = "barowardrobeswitcher.look.clear"
 }
 
+-- 新增裝備欄位時，也要更新兩個 Switcher 的 slots、C# 的 SlotKeys 與相關驗證上限。
 Core.SLOT_KEYS = {
     "Head",
     "Headset",
@@ -50,6 +56,7 @@ Core.ATTACHMENT_KEYS = {
     "FaceAttachment"
 }
 
+-- 每個部位占一個位元，須與 C# VisualOverride 的 Attachment*Bit 對應。
 Core.ATTACHMENT_BITS = {
     Hair = 0x01,
     Beard = 0x02,
@@ -59,12 +66,14 @@ Core.ATTACHMENT_BITS = {
 
 Core.ATTACHMENT_MASK = 0x0F
 
+-- auto 跟隨原本遮蔽規則；hide/show 表示玩家明確要求隱藏／顯示。
 Core.ATTACHMENT_VISIBILITY = {
     Auto = "auto",
     Hide = "hide",
     Show = "show"
 }
 
+-- 握手時宣告支援的功能；新增多人功能須同時處理客戶端判斷與伺服器宣告。
 Core.CAPABILITY = {
     AttachmentVisibility = 0x01,
     MovementAnimationSource = 0x02,
@@ -280,6 +289,8 @@ end
 -- Every wire and persistence path converges here. Returning a fresh canonical
 -- table prevents unknown fields or mutable caller-owned slot tables from
 -- leaking into reducer state.
+-- 統一外觀資料的入口：成功回傳正規化後的 look，失敗回傳 nil, reason。
+-- 新增外觀欄位時，除了這裡也要檢查 copy、簽章、網路編碼與持久化是否都有保留。
 function Core.validateLook(value)
     if type(value) ~= "table" then
         return nil, "look must be a table"
@@ -600,6 +611,7 @@ function Core.lookEquals(left, right)
     return leftSignature ~= nil and leftSignature == rightSignature
 end
 
+-- 網路欄位的型別與先後順序必須和 readLook 完全一致；顏色缺省不等於顏色為 0。
 function Core.writeLook(message, look)
     local valid, reason = Core.validateLook(look)
     if valid == nil then return false, reason end
@@ -1253,6 +1265,9 @@ end
 -- The reducer is deliberately pure: it describes game/network work as effects
 -- instead of touching Barotrauma globals. Both client realms can therefore use
 -- the same transitions and rollback rules.
+-- 操作流程的核心：輸入舊狀態與事件，回傳新狀態及待執行的 effects。
+-- 這裡只描述要做什麼；實際存檔、發送訊息與繪圖由 adapter 執行並回報結果。
+-- 修改儲存／套用／清除時，要一起檢查成功、失敗回復及換角色的分支。
 function Core.reduce(currentState, event)
     if type(currentState) ~= "table" then error("currentState must be a table") end
     if type(event) ~= "table" or type(event.type) ~= "string" then error("event.type is required") end
@@ -2214,6 +2229,8 @@ end
 -- Local effects are drained synchronously and their adapter results are fed back
 -- through the reducer. Network acknowledgements remain separate root events,
 -- which keeps asynchronous authority changes explicit.
+-- 將 reducer 的 effects 交給 adapters，再把成功／失敗事件送回 reducer。
+-- adapter 應回傳結果，避免在執行途中重入同一個 controller.dispatch。
 function Core.createClientController(initialState, adapters)
     local state = copyClientState(initialState or Core.newClientState())
     adapters = adapters or {}

@@ -1,3 +1,5 @@
+-- 編輯導覽：多人命令入口是 handleV2Command，實際修改集中在 commitSave／Apply／Clear。
+-- 伺服器以自己的裝備與 prefab 資料驗證請求；此檔不依賴客戶端 C# 渲染器。
 local MOD_NAME = "Baro Wardrobe Switcher"
 
 if not SERVER then return end
@@ -42,6 +44,7 @@ pcall(function() Client = LuaUserData.CreateStatic("Barotrauma.Networking.Client
 pcall(function() GameMain = LuaUserData.CreateStatic("Barotrauma.GameMain", true) end)
 pcall(function() ItemPrefab = LuaUserData.CreateStatic("Barotrauma.ItemPrefab", true) end)
 
+-- 裝備欄位須與 Core.SLOT_KEYS 及客戶端 slots 對應，避免單人可用、多人卻被拒絕。
 local slots = {
     { key = "Head", slot = InvSlotType.Head },
     { key = "Headset", slot = InvSlotType.Headset },
@@ -53,6 +56,8 @@ local slots = {
 local slotByKey = {}
 for _, entry in ipairs(slots) do slotByKey[entry.key] = entry end
 
+-- persistent* 保存可持久化紀錄；sessions／activeByCharacterId 管理目前連線與實體。
+-- 角色實體 ID 會隨場景更換，不應拿來當跨場景存檔的身分鍵。
 local persistentRecords = {}
 local persistentCrewRecords = {}
 local legacySteamRecords = {}
@@ -65,6 +70,7 @@ local observerRevisionByCharacterId = {}
 local serverSessionId = tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
 local lastGameSessionKey = nil
 local roundReactivationGeneration = 0
+-- 重試結果快取的保留時間（秒）與帳號數上限；同一連線的操作數上限另在 Core.LIMITS。
 local OPERATION_CACHE_RETENTION_SECONDS = 120
 local MAX_RETAINED_OPERATION_ACCOUNTS = 64
 local CREW_PERSISTENCE_VERSION = 2
@@ -1631,6 +1637,7 @@ local function restoreCommitState(session, snapshot)
     end
 end
 
+-- 有穩定帳號才落盤；寫入失敗還原快照，避免記憶體狀態與存檔不一致。
 local function persistStableSessionOrRollback(session, snapshot)
     if session.accountId == nil then return true end
     updatePersistentRecord(session)
@@ -1998,6 +2005,8 @@ local function nextRevision(session)
     return true
 end
 
+-- 儲存是一整筆操作：先驗證存檔可寫，再依設定卸裝；失敗時嘗試還原裝備與狀態。
+-- targeted 走船員紀錄；unequipOnSave=false 對應保留裝備的儲存模式。
 local function commitSave(session, character, clientLook, targeted, unequipOnSave)
     if not canAdvanceRevision(session) then return false, "revision_exhausted" end
     local look, reason = captureAuthoritativeLook(character, clientLook)
@@ -2319,6 +2328,8 @@ Networking.Receive(NET.V2_HELLO, function(message, client)
     sendOwnInactiveState(session)
 end)
 
+-- 驗證順序：封包／操作識別 → 重複操作 → revision → 目標權限 → 實際提交。
+-- 重複命令必須回傳先前結果；過期 revision 不可重新套用，否則會撤銷較新的清除操作。
 local function handleV2Command(message, client, targeted)
     if handleGameSessionChange ~= nil then handleGameSessionChange() end
     local session = sessionFor(client)

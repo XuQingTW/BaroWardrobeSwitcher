@@ -17,6 +17,8 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using LuaCsLogger = BaroWardrobeSwitcher.WardrobeFileLogger;
 
+// 編輯導覽：Plugin 負責載入設定；WardrobePersistence 負責存檔；VisualOverride 負責外觀橋接。
+// 繪圖、動畫與音效的 Harmony hooks 在檔尾；多人權威狀態由 Lua 伺服器管理。
 namespace BaroWardrobeSwitcher
 {
     /// <summary>
@@ -60,6 +62,7 @@ namespace BaroWardrobeSwitcher
 
     }
 
+    // 設定名稱需和 Config 中的定義一致；新增選項也要接上預設值及 Dispose 清理。
     public sealed class WardrobeVisualOverridePlugin : IAssemblyPlugin
     {
         private Harmony harmonyInstance;
@@ -148,6 +151,7 @@ namespace BaroWardrobeSwitcher
     public static partial class WardrobePersistence
     {
         public const string Version = "0.5.10";
+        // ClientLook.json 格式版本，需與 Lua Core.PERSISTENCE_VERSION 及遷移程式對應。
         private const int PersistenceVersion = 5;
         private const string ModFolderName = "BaroWardrobeSwitcher";
         private const string ClientLookFileName = "ClientLook.json";
@@ -158,6 +162,7 @@ namespace BaroWardrobeSwitcher
             "BaroWardrobeSwitcher.PersistenceProbe.StorageRoot";
         internal const string TestFailurePointAppContextKey =
             "BaroWardrobeSwitcher.PersistenceProbe.FailurePoint";
+        // 與 Lua Core.SLOT_KEYS 使用相同名稱；新增欄位須同步解析、驗證與渲染支援。
         private static readonly string[] SlotKeys =
         {
             "Head",
@@ -449,6 +454,7 @@ namespace BaroWardrobeSwitcher
             throw new InvalidDataException("Unsupported client wardrobe persistence schema: " + version);
         }
 
+        // 先寫同目錄臨時檔並 flush，再替換正式檔／保留備份，避免直接截斷原存檔。
         private static void WriteJson<T>(string path, T value)
         {
             string directory = Path.GetDirectoryName(path);
@@ -1134,6 +1140,7 @@ namespace BaroWardrobeSwitcher
     {
 
         public const string Version = "0.5.10";
+        // 設定缺失時使用此鍵；Lua currentPanelKey 與 Config 的預設值也要一起檢查。
         private const string DefaultPanelKeyName = "F8";
         private static ISettingBase<string> panelKeySetting;
         private static ISettingBase<bool> hideHuskVisualsSetting;
@@ -1289,6 +1296,7 @@ namespace BaroWardrobeSwitcher
             PatchStates["Affliction.GetFaceTint"] = new PatchState(required: false);
         }
 
+        // 遊戲更新後若 hook 失效，先核對實際方法簽章與相容性探針，再調整註冊。
         public static void InstallPatches(Harmony harmony)
         {
             ResetPatchStatus();
@@ -4464,6 +4472,8 @@ namespace BaroWardrobeSwitcher
 
     }
 
+    // Prefix 暫時換入外觀，Postfix 補畫缺少的圖像，Finalizer 負責還原。
+    // 還原必須涵蓋例外路徑，且不能吞掉遊戲或其他模組拋出的原始例外。
     internal static class LimbDrawPatch
     {
         internal struct State

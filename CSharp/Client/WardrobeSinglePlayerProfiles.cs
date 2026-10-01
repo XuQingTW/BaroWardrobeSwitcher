@@ -15,6 +15,7 @@ namespace BaroWardrobeSwitcher
     /// </summary>
     public static partial class WardrobePersistence
     {
+        // 單人角色存檔有獨立版本；新增 JSON 欄位時也需檢查舊版遷移與 Validate 邏輯。
         private const int SinglePlayerProfilesVersion = 3;
         private const string SinglePlayerProfilesFileName = "SinglePlayerProfiles.json";
         private const int MaximumSinglePlayerProfiles = 512;
@@ -56,6 +57,7 @@ namespace BaroWardrobeSwitcher
             }
         }
 
+        // 用「戰役 + 穩定角色鍵」查找；顯示名稱只供辨識，不能替代 characterKey。
         public static string LoadSinglePlayerProfile(string campaignKey, string characterKey)
         {
             ClearLastError();
@@ -91,6 +93,7 @@ namespace BaroWardrobeSwitcher
                 Dictionary<string, string> parts = ParseParts(encodedLook);
                 ClientLookDocument look = ParseClientLook(encodedLook);
                 ValidateDocument(look);
+                // captured=true 的全空欄位仍是有效外觀，表示玩家刻意儲存空裝外觀。
                 if (!HasAnySlot(look.Slots) && !look.Captured)
                 {
                     return DeleteSinglePlayerProfile(campaignKey, characterKey);
@@ -117,6 +120,7 @@ namespace BaroWardrobeSwitcher
                 }
 
                 existing.DisplayName = safeDisplayName;
+                // 自動套用是使用意圖，不能僅因有存檔就一律啟用。
                 existing.AutoApply = GetBoolean(parts, "auto") || GetBoolean(parts, "active");
                 existing.Captured = look.Captured;
                 existing.UseFashionMovementAnimations =
@@ -161,6 +165,7 @@ namespace BaroWardrobeSwitcher
 
         // Import is recorded per campaign even when no legacy look exists. Without
         // that tombstone, every profile load would repeatedly probe the old file.
+        // 每個戰役只嘗試一次舊檔匯入；保留這個紀錄可避免每次載入反覆讀取舊檔。
         public static bool TryImportLegacyClientLook(
             string campaignKey,
             string characterKey,

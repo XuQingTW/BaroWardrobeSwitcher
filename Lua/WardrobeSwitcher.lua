@@ -1,5 +1,7 @@
 -- Client facade: projects the pure Core state machine onto Barotrauma networking,
 -- persistence, renderer transactions and the in-game panel.
+-- 編輯導覽：介面找 buildWindow；按鈕動作找 saveFashionAndUnequip／applyFashionToCurrentEquipment。
+-- 多人同步找 sendNextProtocolCommand／handleNetworkLookApply；每幀與換場處理在檔尾 Hook.Add。
 local MOD_NAME = "Baro Wardrobe Switcher"
 local Core = assert(
     type(WardrobeCore) == "table" and
@@ -77,6 +79,8 @@ local visualOverrideDiagnostics = nil
 local WardrobePersistence = nil
 local wardrobePersistenceFailure = nil
 local globalTick = 0
+-- 以下間隔以 think 累計的 tick 計算，不是秒；數字越小檢查越頻繁。
+-- BRIDGE 控制 C# 橋接重試，EQUIPMENT_POLL 補捉裝備事件漏報。
 local BRIDGE_RETRY_TICKS = 60
 local EQUIPMENT_POLL_TICKS = 6
 local visualOverrideNextAttemptTick = 0
@@ -84,6 +88,7 @@ local wardrobePersistenceNextAttemptTick = 0
 local singlePlayerTransferSettingNextAttemptTick = 0
 local persistentClientLookNextAttemptTick = 0
 
+-- 顯示文字優先查 Texts*.xml 的 barowardrobeswitcher.*；缺少翻譯才使用 fallback。
 local function tr(key, fallback)
     local tag = "barowardrobeswitcher." .. tostring(key)
     local ok, localized = pcall(function()
@@ -131,6 +136,8 @@ local function slotLabel(entry)
     return tr(entry.labelKey, entry.label)
 end
 
+-- key 是資料用名稱，labelKey 是翻譯索引，slot 對應遊戲裝備欄。
+-- optional 的基因接合器欄位另受 OverrideGeneSplicerAppearance 設定控制。
 local slots = {
     { key = "Head", label = "Head", labelKey = "slot.head", slot = InvSlotType.Head },
     { key = "Headset", label = "Headset", labelKey = "slot.headset", slot = InvSlotType.Headset },
@@ -150,6 +157,7 @@ local visualCarrierPriority = {
 }
 
 local legacyLookMetadata = {}
+-- 各角色的執行期狀態分開保存；不要把目前選取角色的狀態直接共用給全船員。
 local characterStates = {}
 local transferToUnconfiguredCharacter = false
 local singlePlayerTransferSettingLoaded = false
@@ -184,6 +192,7 @@ local buildAttachmentVisibilityWindow
 local toggleWindow
 local fullPanelOpen = false
 local Helpers = {}
+-- 潛水外觀模式：0 關閉、1 潛水服、2 自訂；需和 C# 潛水存檔及網路驗證一致。
 Helpers.DIVING_MODE_NONE = 0
 Helpers.DIVING_MODE_SUIT = 1
 Helpers.DIVING_MODE_CUSTOM = 2
@@ -212,6 +221,7 @@ local selectableCharactersCacheTick = -1
 local selectableCharactersCache = nil
 local nextSessionPollTick = 0
 
+-- F8 是後備值；使用者設定由 C# GetPanelKeyName 提供，修改預設鍵時也要檢查 Config。
 local function currentPanelKey()
     if cachedPanelKey ~= nil and globalTick < panelKeyNextRefreshTick then
         return cachedPanelKeyName, cachedPanelKey
@@ -2869,6 +2879,8 @@ function Helpers.writeAndSendV2Command(command, baseRevision)
     return ok == true
 end
 
+-- 新協定一次只保留一筆等待回覆的命令，以伺服器 revision 作為下一次修改的基準。
+-- 調整佇列時須保留 operationId 的重試語意，避免同一個儲存操作重複卸裝。
 function Helpers.sendNextProtocolCommand()
     if not Helpers.isMultiplayerClient() or Networking == nil or #protocolCommandQueue == 0 then return false end
 
@@ -4091,6 +4103,7 @@ clientEffectAdapters.ApplyFootstepSoundSourceCompensation = function(currentEffe
     return { type = "CompensationFailed", reason = "footstep sound source rollback failed" }
 end
 
+-- 儲存按鈕入口；是否卸裝由後續設定與 effect 決定，不能只從函式名稱判斷。
 function Helpers.saveFashionAndUnequip()
     local character = controlled()
     if character == nil then
@@ -4113,6 +4126,7 @@ function Helpers.saveFashionAndUnequip()
     return true
 end
 
+-- 單人直接要求本機套用；多人先送命令，由伺服器確認外觀狀態。
 function Helpers.applyFashionToCurrentEquipment(silent)
     local character = controlled()
     if character == nil then
@@ -4157,6 +4171,7 @@ function Helpers.applyFashionToCurrentEquipment(silent)
     return true
 end
 
+-- 清除目前套用效果並保留已存外觀；刪除已存外觀另走 clearSavedLook。
 function Helpers.clearActiveLook()
     local character = controlled()
     local multiplayerClearRequested = Helpers.isMultiplayerClient()
@@ -5658,6 +5673,7 @@ function Helpers.updateFootstepSoundSource(enabled)
     return true
 end
 
+-- 主面板的排版與按鈕集中於此；改文案優先調整 Texts*.xml，改行為則追蹤按鈕 callback。
 buildWindow = function()
     -- Rebuild the whole overlay. Removing only the child frame can leave its
     -- old controls in Barotrauma's GUI update list for another interaction.
@@ -5885,6 +5901,7 @@ buildWindow = function()
     end, true)
 end
 
+-- 附件顯示設定頁：頭髮、鬍鬚等選項透過共用狀態流程更新，不能只改按鈕文字。
 buildAttachmentVisibilityWindow = function()
     Helpers.resetOverlay()
     windowNeedsRefresh = false
@@ -6136,6 +6153,7 @@ function Helpers.handleRoundStartSessionChange()
     end
 end
 
+-- 每幀入口：處理待辦、角色狀態與介面；昂貴的新工作應使用事件或間隔檢查。
 Hook.Add("think", "barowardrobeswitcher.panel", function()
     globalTick = globalTick + 1
 

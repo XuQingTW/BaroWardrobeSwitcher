@@ -86,6 +86,7 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
+        // 從來源 WearableSprite 建立獨立且針對目標角色初始化的圖像，避免直接改共用 prefab。
         public static bool TryCreate(
             Character character,
             Item sourceItem,
@@ -420,6 +421,7 @@ namespace BaroWardrobeSwitcher
         // drawable until the entire replacement has validated successfully.
         public RenderSession CaptureTarget => pendingCapture ?? this;
 
+        // 新外觀先放子 session；整套驗證成功前，舊外觀仍可繼續繪製。
         public RenderSession BeginPendingCapture()
         {
             if (disposed) { throw new ObjectDisposedException(nameof(RenderSession)); }
@@ -428,6 +430,7 @@ namespace BaroWardrobeSwitcher
             return pendingCapture;
         }
 
+        // 只移交子 session 的所有權，不釋放它；接手端須負責後續提交或 Dispose。
         public RenderSession DetachPendingCapture()
         {
             RenderSession detached = pendingCapture;
@@ -435,6 +438,7 @@ namespace BaroWardrobeSwitcher
             return detached;
         }
 
+        // 中止未完成的捕捉並清理其資源，不會清除父 session 已提交的外觀。
         public bool AbortPendingCapture()
         {
             if (pendingCapture == null) { return false; }
@@ -599,6 +603,7 @@ namespace BaroWardrobeSwitcher
 
             // Temporary prefab items stay alive for exactly as long as any descriptor
             // or captured effect can reference their components. Remove them last.
+            // 最後才移除本 session 建立的臨時物品；不可把玩家的真裝備加入此清單。
             foreach (Item item in ownedTemporaryItems.ToList())
             {
                 // Barotrauma can remove all world items before LuaCs unloads this

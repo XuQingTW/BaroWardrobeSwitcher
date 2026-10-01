@@ -13,6 +13,7 @@ namespace BaroWardrobeSwitcher
     /// </summary>
     internal static class FashionEffectPolicy
     {
+        // 相容其他模組時優先補 tag／元件判斷；名稱比對僅作缺少標記時的後備。
         private static readonly Identifier DeepDivingTag = new Identifier("deepdiving");
         private static readonly Identifier DeepDivingLargeTag = new Identifier("deepdivinglarge");
         private static readonly FieldInfo PropertyConditionalsField =
@@ -30,6 +31,7 @@ namespace BaroWardrobeSwitcher
         private static readonly FieldInfo TargetItemComponentField =
             typeof(StatusEffect).GetField("TargetItemComponent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+        // 捕捉外觀動畫與抑制真裝備動畫是不同方向；修改規則時要一起檢查兩者。
         public static bool ShouldCaptureAnimation(Item item, object animationInfo)
         {
             bool sealedSuit = IsSealedSuit(item);
@@ -60,6 +62,8 @@ namespace BaroWardrobeSwitcher
             return IsSealedSuit(item);
         }
 
+        // 受條件／所需物品控制的音效交給原遊戲，例如警報，不當成純外觀音效複製。
+        // 反射欄位失效時回傳 true，讓上層保留遊戲對這類音效的控制。
         internal static bool IsStateDependentStatusEffect(StatusEffect statusEffect)
         {
             if (statusEffect == null) { return false; }
