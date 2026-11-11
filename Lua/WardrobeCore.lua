@@ -157,10 +157,6 @@ local function normalizeUInt32(value, field)
     return normalized
 end
 
-local function normalizeRevision(value, field)
-    return normalizeUInt32(value, field or "revision")
-end
-
 local function rawSlotIdentifier(value)
     if type(value) == "table" then
         value = value.identifier
@@ -193,10 +189,8 @@ function Core.validateAttachmentVisibility(value, legacyHideHair)
         return nil, "attachmentVisibility must be a table"
     end
 
-    local expected = {}
-    for _, key in ipairs(Core.ATTACHMENT_KEYS) do expected[key] = true end
     for key, _ in pairs(value) do
-        if expected[key] ~= true then
+        if Core.ATTACHMENT_BITS[key] == nil then
             return nil, "unknown attachment visibility layer " .. tostring(key)
         end
     end
@@ -334,7 +328,6 @@ function Core.validateLook(value)
 
     local slots = {}
     local colors = {}
-    local count = 0
     local payloadBytes = 8
     for _, key in ipairs(Core.SLOT_KEYS) do
         local identifier = rawSlotIdentifier(slotSource[key])
@@ -347,7 +340,6 @@ function Core.validateLook(value)
                 false
             )
             if valid == nil then return nil, reason end
-            count = count + 1
             payloadBytes = payloadBytes + #key + #identifier + 5
             slots[key] = identifier
             if rawColor ~= nil then
@@ -361,9 +353,6 @@ function Core.validateLook(value)
         end
     end
 
-    if count > Core.LIMITS.MAX_SLOTS then
-        return nil, "look contains too many slots"
-    end
     if payloadBytes > Core.LIMITS.MAX_PAYLOAD_BYTES then
         return nil, "look exceeds maximum payload size"
     end
@@ -377,7 +366,9 @@ function Core.validateLook(value)
     return {
         schemaVersion = Core.LOOK_SCHEMA_VERSION,
         captured = value.captured == true,
-        hideHair = Core.legacyHideHair(attachmentVisibility),
+        hideHair = attachmentVisibility.Hair == Core.ATTACHMENT_VISIBILITY.Hide and
+            attachmentVisibility.Beard == Core.ATTACHMENT_VISIBILITY.Hide and
+            attachmentVisibility.Moustache == Core.ATTACHMENT_VISIBILITY.Hide,
         attachmentVisibility = attachmentVisibility,
         useFashionMovementAnimations = value.useFashionMovementAnimations ~= false,
         useFashionFootstepSounds = value.useFashionFootstepSounds == true,
@@ -404,6 +395,16 @@ function Core.newLook(
         slots = slots or {},
         colors = colors
     })
+end
+
+-- Internal state is canonical; public entry points still normalize with validateLook.
+local function copyLook(look)
+    if look == nil then return nil end
+    local copy = shallowCopy(look)
+    copy.slots = shallowCopy(look.slots)
+    copy.colors = shallowCopy(look.colors)
+    copy.attachmentVisibility = shallowCopy(look.attachmentVisibility)
+    return copy
 end
 
 function Core.copyLook(look)
@@ -574,14 +575,17 @@ function Core.parseLegacyClientLookLine(line)
     }
 end
 
-function Core.hasLook(look)
-    local valid = Core.validateLook(look)
-    if valid == nil then return false end
-    if valid.captured then return true end
+local function hasLook(look)
+    if look == nil then return false end
+    if look.captured then return true end
     for _, key in ipairs(Core.SLOT_KEYS) do
-        if valid.slots[key] ~= nil then return true end
+        if look.slots[key] ~= nil then return true end
     end
     return false
+end
+
+function Core.hasLook(look)
+    return hasLook(Core.validateLook(look))
 end
 
 function Core.lookSignature(look)
@@ -607,8 +611,8 @@ end
 function Core.lookEquals(left, right)
     if left == nil or right == nil then return left == right end
     local leftSignature = Core.lookSignature(left)
-    local rightSignature = Core.lookSignature(right)
-    return leftSignature ~= nil and leftSignature == rightSignature
+    return leftSignature ~= nil and
+        (left == right or leftSignature == Core.lookSignature(right))
 end
 
 -- 網路欄位的型別與先後順序必須和 readLook 完全一致；顏色缺省不等於顏色為 0。
@@ -757,7 +761,7 @@ function Core.readClientHello(message)
 end
 
 function Core.writeServerHello(message, revision, capabilities)
-    local validRevision, reason = normalizeRevision(revision, "revision")
+    local validRevision, reason = normalizeUInt32(revision, "revision")
     if validRevision == nil then return false, reason end
     capabilities = tonumber(capabilities)
     if capabilities == nil then capabilities = Core.CAPABILITY.AttachmentVisibility end
@@ -819,7 +823,7 @@ function Core.validateCommand(command)
         false
     )
     if operationId == nil then return nil, operationReason end
-    local revision, revisionReason = normalizeRevision(command.baseRevision or 0, "baseRevision")
+    local revision, revisionReason = normalizeUInt32(command.baseRevision or 0, "baseRevision")
     if revision == nil then return nil, revisionReason end
     local targetCharacterId = command.targetCharacterId
     if targetCharacterId ~= nil then
@@ -932,7 +936,7 @@ end
 
 function Core.writeState(message, state)
     if type(state) ~= "table" then return false, "state must be a table" end
-    local revision, revisionReason = normalizeRevision(state.revision or 0, "revision")
+    local revision, revisionReason = normalizeUInt32(state.revision or 0, "revision")
     if revision == nil then return false, revisionReason end
     local characterId = tonumber(state.characterId)
     if characterId == nil or characterId < 0 or characterId > 65535 or characterId % 1 ~= 0 then
@@ -1059,7 +1063,7 @@ function Core.writeAck(message, ack)
         false
     )
     if operationId == nil then return false, operationReason end
-    local revision, revisionReason = normalizeRevision(ack.revision or 0, "revision")
+    local revision, revisionReason = normalizeUInt32(ack.revision or 0, "revision")
     if revision == nil then return false, revisionReason end
     local reason = tostring(ack.reason or "")
     local validReason, reasonError = checkBoundedString(
@@ -1113,8 +1117,8 @@ end
 
 local function copyClientState(state)
     local copy = shallowCopy(state)
-    copy.look = Core.copyLook(state.look)
-    copy.rollbackLook = Core.copyLook(state.rollbackLook)
+    copy.look = copyLook(state.look)
+    copy.rollbackLook = copyLook(state.rollbackLook)
     return copy
 end
 
@@ -1127,7 +1131,7 @@ end
 local function attachmentVisibilityEffect(kind, look)
     return effect(kind, {
         attachmentVisibility = look ~= nil and
-            Core.validateAttachmentVisibility(look.attachmentVisibility, false) or
+            shallowCopy(look.attachmentVisibility) or
             Core.attachmentVisibilityFromLegacy(false)
     })
 end
@@ -1192,20 +1196,20 @@ local function clearRollback(state)
 end
 
 local function beginRollback(state)
-    state.rollbackLook = Core.copyLook(state.look)
+    state.rollbackLook = copyLook(state.look)
     state.rollbackActive = state.active == true
     state.rollbackAutoApply = state.autoApply == true
 end
 
 local function restoreRollback(state)
-    state.look = Core.copyLook(state.rollbackLook)
+    state.look = copyLook(state.rollbackLook)
     state.active = state.rollbackActive == true
     state.autoApply = state.rollbackAutoApply == true
     if state.characterKey == nil then
         state.phase = Core.PHASE.NoCharacter
     elseif state.active then
         state.phase = Core.PHASE.Active
-    elseif Core.hasLook(state.look) then
+    elseif hasLook(state.look) then
         state.phase = Core.PHASE.SavedInactive
     else
         state.phase = Core.PHASE.Idle
@@ -1214,31 +1218,19 @@ local function restoreRollback(state)
     clearRollback(state)
 end
 
-local function restoreAttachmentVisibilityRollback(state, effects, compensate)
-    local rollbackLook = Core.copyLook(state.rollbackLook)
+local function restoreSettingRollback(state, effects, compensate)
+    local kind = state.pendingKind
+    local rollbackLook = copyLook(state.rollbackLook)
     local rollbackActive = state.rollbackActive == true
     restoreRollback(state)
-    if compensate == true and rollbackActive and rollbackLook ~= nil then
+    if compensate ~= true or not rollbackActive or rollbackLook == nil then return end
+    if kind == Core.COMMAND.Visibility then
         effects[#effects + 1] =
             attachmentVisibilityEffect("ApplyAttachmentVisibilityCompensation", rollbackLook)
-    end
-end
-
-local function restoreMovementAnimationRollback(state, effects, compensate)
-    local rollbackLook = Core.copyLook(state.rollbackLook)
-    local rollbackActive = state.rollbackActive == true
-    restoreRollback(state)
-    if compensate == true and rollbackActive and rollbackLook ~= nil then
+    elseif kind == Core.COMMAND.Animation then
         effects[#effects + 1] =
             movementAnimationEffect("ApplyMovementAnimationSourceCompensation", rollbackLook)
-    end
-end
-
-local function restoreFootstepSoundRollback(state, effects, compensate)
-    local rollbackLook = Core.copyLook(state.rollbackLook)
-    local rollbackActive = state.rollbackActive == true
-    restoreRollback(state)
-    if compensate == true and rollbackActive and rollbackLook ~= nil then
+    elseif kind == Core.COMMAND.Footstep then
         effects[#effects + 1] =
             footstepSoundEffect("ApplyFootstepSoundSourceCompensation", rollbackLook)
     end
@@ -1285,7 +1277,7 @@ function Core.reduce(currentState, event)
 
     if event.type == "CharacterLost" then
         cancelPendingForLifecycle(state)
-        local preserveAutoApply = Core.hasLook(state.look) and
+        local preserveAutoApply = hasLook(state.look) and
             (state.active == true or state.autoApply == true)
         state.phase = Core.PHASE.NoCharacter
         state.characterKey = nil
@@ -1302,7 +1294,7 @@ function Core.reduce(currentState, event)
 
     if event.type == "CharacterReady" then
         state.characterKey = event.characterKey
-        state.phase = Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle
+        state.phase = hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle
         state.active = false
         clearPending(state)
         clearRollback(state)
@@ -1325,7 +1317,7 @@ function Core.reduce(currentState, event)
         state.autoApply = event.autoApply == true
         state.phase = state.characterKey == nil and Core.PHASE.NoCharacter or
             (state.active and Core.PHASE.Active or
-            (Core.hasLook(look) and Core.PHASE.SavedInactive or Core.PHASE.Idle))
+            (hasLook(look) and Core.PHASE.SavedInactive or Core.PHASE.Idle))
         state.error = nil
         clearPending(state)
         clearRollback(state)
@@ -1354,9 +1346,11 @@ function Core.reduce(currentState, event)
         state.pendingOperationId = event.operationId
         state.pendingRemote = event.remote == true
         state.pendingServerAccepted = false
-        local updated = Core.copyLook(state.look)
+        local updated = copyLook(state.look)
         updated.attachmentVisibility = visibility
-        updated.hideHair = Core.legacyHideHair(visibility)
+        updated.hideHair = visibility.Hair == Core.ATTACHMENT_VISIBILITY.Hide and
+            visibility.Beard == Core.ATTACHMENT_VISIBILITY.Hide and
+            visibility.Moustache == Core.ATTACHMENT_VISIBILITY.Hide
         state.look = updated
         state.error = nil
         if state.active then
@@ -1367,10 +1361,10 @@ function Core.reduce(currentState, event)
                 operationId = state.pendingOperationId,
                 kind = Core.COMMAND.Visibility,
                 baseRevision = state.revision,
-                look = Core.copyLook(updated)
+                look = copyLook(updated)
             })
         else
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(updated) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(updated) })
         end
         return state, effects
     end
@@ -1389,7 +1383,7 @@ function Core.reduce(currentState, event)
         state.pendingOperationId = event.operationId
         state.pendingRemote = event.remote == true
         state.pendingServerAccepted = false
-        local updated = Core.copyLook(state.look)
+        local updated = copyLook(state.look)
         updated.useFashionMovementAnimations = event.enabled == true
         state.look = updated
         state.error = nil
@@ -1401,10 +1395,10 @@ function Core.reduce(currentState, event)
                 operationId = state.pendingOperationId,
                 kind = Core.COMMAND.Animation,
                 baseRevision = state.revision,
-                look = Core.copyLook(updated)
+                look = copyLook(updated)
             })
         else
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(updated) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(updated) })
         end
         return state, effects
     end
@@ -1423,7 +1417,7 @@ function Core.reduce(currentState, event)
         state.pendingOperationId = event.operationId
         state.pendingRemote = event.remote == true
         state.pendingServerAccepted = false
-        local updated = Core.copyLook(state.look)
+        local updated = copyLook(state.look)
         updated.useFashionFootstepSounds = event.enabled == true
         state.look = updated
         state.error = nil
@@ -1435,10 +1429,10 @@ function Core.reduce(currentState, event)
                 operationId = state.pendingOperationId,
                 kind = Core.COMMAND.Footstep,
                 baseRevision = state.revision,
-                look = Core.copyLook(updated)
+                look = copyLook(updated)
             })
         else
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(updated) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(updated) })
         end
         return state, effects
     end
@@ -1457,19 +1451,19 @@ function Core.reduce(currentState, event)
     if event.type == "Deactivate" then
         state.active = false
         state.phase = state.characterKey == nil and Core.PHASE.NoCharacter or
-            (Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
+            (hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
         return state, effects
     end
 
     if event.type == "PrepareSceneTransition" then
         cancelPendingForLifecycle(state)
-        state.autoApply = Core.hasLook(state.look) and
+        state.autoApply = hasLook(state.look) and
             (event.reapply == true or state.active == true or state.autoApply == true)
         state.active = false
         state.phase = state.characterKey == nil and Core.PHASE.NoCharacter or
-            (Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
-        if Core.hasLook(state.look) then
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            (hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
+        if hasLook(state.look) then
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
         end
         return state, effects
     end
@@ -1512,10 +1506,10 @@ function Core.reduce(currentState, event)
                 operationId = state.pendingOperationId,
                 kind = Core.COMMAND.Save,
                 baseRevision = state.revision,
-                look = Core.copyLook(look)
+                look = copyLook(look)
             })
         else
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(look) })
         end
         return state, effects
     end
@@ -1538,7 +1532,7 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "UnequipFailed" then
-        local rollbackLook = Core.copyLook(state.rollbackLook)
+        local rollbackLook = copyLook(state.rollbackLook)
         restoreRollback(state)
         state.phase = Core.PHASE.Faulted
         state.error = tostring(event.reason or "unequip failed")
@@ -1593,7 +1587,7 @@ function Core.reduce(currentState, event)
             state.autoApply = false
             clearPending(state)
             clearRollback(state)
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
         elseif event.awaitAck ~= true and state.pendingKind == Core.COMMAND.Clear then
             state.pendingRemote = false
             effects[#effects + 1] = effect("ClearRender", { remote = false })
@@ -1604,7 +1598,7 @@ function Core.reduce(currentState, event)
             (state.pendingKind == Core.COMMAND.Visibility or state.pendingKind == Core.COMMAND.Animation or
                 state.pendingKind == Core.COMMAND.Footstep) then
             state.pendingRemote = false
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
         end
         return state, effects
     end
@@ -1615,12 +1609,10 @@ function Core.reduce(currentState, event)
             state.pendingKind == Core.COMMAND.Clear or
             state.pendingKind == Core.COMMAND.Forget then
             restoreRollback(state)
-        elseif state.pendingKind == Core.COMMAND.Visibility then
-            restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
-        elseif state.pendingKind == Core.COMMAND.Animation then
-            restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
-        elseif state.pendingKind == Core.COMMAND.Footstep then
-            restoreFootstepSoundRollback(state, effects, state.rollbackActive == true)
+        elseif state.pendingKind == Core.COMMAND.Visibility or
+            state.pendingKind == Core.COMMAND.Animation or
+            state.pendingKind == Core.COMMAND.Footstep then
+            restoreSettingRollback(state, effects, state.rollbackActive == true)
         end
         state.phase = Core.PHASE.Faulted
         state.error = tostring(event.reason or "network command could not be sent")
@@ -1631,7 +1623,7 @@ function Core.reduce(currentState, event)
     if event.type == "LocalApplyRequested" then
         local requestedLook = event.look or state.look
         local validLook, lookReason = Core.validateLook(requestedLook)
-        if validLook == nil or not Core.hasLook(validLook) then
+        if validLook == nil or not hasLook(validLook) then
             state.phase = Core.PHASE.Faulted
             state.error = tostring(lookReason or "cannot apply without a saved look")
             return state, effects
@@ -1640,7 +1632,7 @@ function Core.reduce(currentState, event)
         state.look = validLook
         state.phase = Core.PHASE.ApplyPending
         state.error = nil
-        effects[#effects + 1] = effect("Render", { look = Core.copyLook(validLook) })
+        effects[#effects + 1] = effect("Render", { look = copyLook(validLook) })
         return state, effects
     end
 
@@ -1677,12 +1669,10 @@ function Core.reduce(currentState, event)
                 state.pendingKind == Core.COMMAND.Clear or
                 state.pendingKind == Core.COMMAND.Forget then
                 restoreRollback(state)
-            elseif state.pendingKind == Core.COMMAND.Visibility then
-                restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
-            elseif state.pendingKind == Core.COMMAND.Animation then
-                restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
-            elseif state.pendingKind == Core.COMMAND.Footstep then
-                restoreFootstepSoundRollback(state, effects, state.rollbackActive == true)
+            elseif state.pendingKind == Core.COMMAND.Visibility or
+                state.pendingKind == Core.COMMAND.Animation or
+                state.pendingKind == Core.COMMAND.Footstep then
+                restoreSettingRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server rejected command")
@@ -1711,15 +1701,15 @@ function Core.reduce(currentState, event)
         elseif kind == Core.COMMAND.Visibility then
             state.pendingRemote = false
             state.pendingServerAccepted = true
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
         elseif kind == Core.COMMAND.Animation then
             state.pendingRemote = false
             state.pendingServerAccepted = true
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
         elseif kind == Core.COMMAND.Footstep then
             state.pendingRemote = false
             state.pendingServerAccepted = true
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
         else
             clearPending(state)
             state.phase = Core.PHASE.ApplyPending
@@ -1765,11 +1755,11 @@ function Core.reduce(currentState, event)
             state.look = look
             state.active = event.active == true
             state.phase = state.active and Core.PHASE.Active or
-                (Core.hasLook(look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
+                (hasLook(look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
             state.pendingRemote = false
             state.pendingServerAccepted = true
             state.error = nil
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
             return state, effects
         end
 
@@ -1806,7 +1796,7 @@ function Core.reduce(currentState, event)
                 state.phase = Core.PHASE.ApplyPending
                 state.active = false
                 effects[#effects + 1] = effect("Render", {
-                    look = Core.copyLook(look),
+                    look = copyLook(look),
                     revision = revision,
                     characterId = event.characterId
                 })
@@ -1814,7 +1804,7 @@ function Core.reduce(currentState, event)
         else
             state.active = false
             state.phase = confirmsPendingDestructive and Core.PHASE.ClearPending or
-                (Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
+                (hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
             effects[#effects + 1] = effect("ClearRender", {
                 characterId = event.characterId,
                 remote = true,
@@ -1835,7 +1825,7 @@ function Core.reduce(currentState, event)
         state.error = nil
         clearPending(state)
         clearRollback(state)
-        effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+        effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
         return state, effects
     end
 
@@ -1850,19 +1840,19 @@ function Core.reduce(currentState, event)
         local kind = event.forget == true and Core.COMMAND.Forget or state.pendingKind
         local preservePending = state.pendingOperationId ~= nil and state.pendingRemote == true
         state.active = false
-        state.autoApply = event.preserveAutoApply == true and Core.hasLook(state.look)
+        state.autoApply = event.preserveAutoApply == true and hasLook(state.look)
         if event.save == true then
             state.phase = Core.PHASE.Saving
-            effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
             return state, effects
         elseif kind == Core.COMMAND.Forget then
             state.phase = Core.PHASE.ClearPending
             effects[#effects + 1] = effect("ClearPersistence")
             return state, effects
         elseif kind == Core.COMMAND.Clear then
-            if Core.hasLook(state.look) then
+            if hasLook(state.look) then
                 state.phase = Core.PHASE.ClearPending
-                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+                effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
             else
                 state.phase = state.characterKey ~= nil and Core.PHASE.Idle or Core.PHASE.NoCharacter
                 clearPending(state)
@@ -1870,15 +1860,15 @@ function Core.reduce(currentState, event)
             end
             return state, effects
         else
-            if Core.hasLook(state.look) then
-                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+            if hasLook(state.look) then
+                effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
             end
         end
         if preservePending then
             state.phase = Core.PHASE.ClearPending
         else
             state.phase = state.characterKey == nil and Core.PHASE.NoCharacter or
-                (Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
+                (hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
             clearPending(state)
         end
         clearRollback(state)
@@ -1886,7 +1876,7 @@ function Core.reduce(currentState, event)
     end
 
     if event.type == "ClearRenderFailed" then
-        local preserveAutoApply = event.preserveAutoApply == true and Core.hasLook(state.look)
+        local preserveAutoApply = event.preserveAutoApply == true and hasLook(state.look)
         if state.pendingServerAccepted then
             state.active = false
             state.autoApply = false
@@ -1915,7 +1905,7 @@ function Core.reduce(currentState, event)
                 clearPending(state)
                 clearRollback(state)
             elseif state.pendingRemote ~= true then
-                effects[#effects + 1] = effect("Unequip", { look = Core.copyLook(state.look) })
+                effects[#effects + 1] = effect("Unequip", { look = copyLook(state.look) })
             end
         elseif state.pendingKind == Core.COMMAND.Forget then
             state.look = nil
@@ -1928,7 +1918,7 @@ function Core.reduce(currentState, event)
             state.active = false
             state.autoApply = false
             state.phase = state.characterKey == nil and Core.PHASE.NoCharacter or
-                (Core.hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
+                (hasLook(state.look) and Core.PHASE.SavedInactive or Core.PHASE.Idle)
             clearPending(state)
             clearRollback(state)
         end
@@ -1942,10 +1932,10 @@ function Core.reduce(currentState, event)
                     operationId = state.pendingOperationId,
                     kind = Core.COMMAND.Visibility,
                     baseRevision = state.revision,
-                    look = Core.copyLook(state.look)
+                    look = copyLook(state.look)
                 })
             else
-                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+                effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
             end
         end
         return state, effects
@@ -1958,10 +1948,10 @@ function Core.reduce(currentState, event)
                     operationId = state.pendingOperationId,
                     kind = Core.COMMAND.Animation,
                     baseRevision = state.revision,
-                    look = Core.copyLook(state.look)
+                    look = copyLook(state.look)
                 })
             else
-                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+                effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
             end
         end
         return state, effects
@@ -1974,10 +1964,10 @@ function Core.reduce(currentState, event)
                     operationId = state.pendingOperationId,
                     kind = Core.COMMAND.Footstep,
                     baseRevision = state.revision,
-                    look = Core.copyLook(state.look)
+                    look = copyLook(state.look)
                 })
             else
-                effects[#effects + 1] = effect("Persist", { look = Core.copyLook(state.look) })
+                effects[#effects + 1] = effect("Persist", { look = copyLook(state.look) })
             end
         end
         return state, effects
@@ -1986,34 +1976,14 @@ function Core.reduce(currentState, event)
     if event.type == "PersistenceFailed" or event.type == "AttachmentVisibilityUpdateFailed" or
         event.type == "MovementAnimationSourceUpdateFailed" or
         event.type == "FootstepSoundSourceUpdateFailed" then
-        if state.pendingKind == Core.COMMAND.Visibility then
+        if state.pendingKind == Core.COMMAND.Visibility or
+            state.pendingKind == Core.COMMAND.Animation or
+            state.pendingKind == Core.COMMAND.Footstep then
             if state.pendingServerAccepted then
                 clearPending(state)
                 clearRollback(state)
             else
-                restoreAttachmentVisibilityRollback(
-                    state,
-                    effects,
-                    event.type == "PersistenceFailed" and state.rollbackActive == true
-                )
-            end
-        elseif state.pendingKind == Core.COMMAND.Animation then
-            if state.pendingServerAccepted then
-                clearPending(state)
-                clearRollback(state)
-            else
-                restoreMovementAnimationRollback(
-                    state,
-                    effects,
-                    event.type == "PersistenceFailed" and state.rollbackActive == true
-                )
-            end
-        elseif state.pendingKind == Core.COMMAND.Footstep then
-            if state.pendingServerAccepted then
-                clearPending(state)
-                clearRollback(state)
-            else
-                restoreFootstepSoundRollback(
+                restoreSettingRollback(
                     state,
                     effects,
                     event.type == "PersistenceFailed" and state.rollbackActive == true
@@ -2030,7 +2000,7 @@ function Core.reduce(currentState, event)
                 clearPending(state)
                 clearRollback(state)
             else
-                local rollbackLook = Core.copyLook(state.rollbackLook)
+                local rollbackLook = copyLook(state.rollbackLook)
                 local rollbackActive = state.rollbackActive == true
                 restoreRollback(state)
                 if rollbackActive and rollbackLook ~= nil then
@@ -2058,12 +2028,10 @@ function Core.reduce(currentState, event)
                 state.pendingKind == Core.COMMAND.Clear or
                 state.pendingKind == Core.COMMAND.Forget then
                 restoreRollback(state)
-            elseif state.pendingKind == Core.COMMAND.Visibility then
-                restoreAttachmentVisibilityRollback(state, effects, state.rollbackActive == true)
-            elseif state.pendingKind == Core.COMMAND.Animation then
-                restoreMovementAnimationRollback(state, effects, state.rollbackActive == true)
-            elseif state.pendingKind == Core.COMMAND.Footstep then
-                restoreFootstepSoundRollback(state, effects, state.rollbackActive == true)
+            elseif state.pendingKind == Core.COMMAND.Visibility or
+                state.pendingKind == Core.COMMAND.Animation or
+                state.pendingKind == Core.COMMAND.Footstep then
+                restoreSettingRollback(state, effects, state.rollbackActive == true)
             end
             state.phase = Core.PHASE.Faulted
             state.error = tostring(event.reason or "server command timed out")
@@ -2080,6 +2048,7 @@ end
 function Core.clientViewModel(state)
     if type(state) ~= "table" then error("state must be a table") end
     local look = Core.copyLook(state.look)
+    local hasSavedLook = hasLook(look)
     local phase = state.phase
     local busy = phase == Core.PHASE.Saving or
         phase == Core.PHASE.ApplyPending or
@@ -2092,14 +2061,14 @@ function Core.clientViewModel(state)
         revision = tonumber(state.revision) or 0,
         characterKey = state.characterKey,
         look = look,
-        hasSavedLook = Core.hasLook(look),
+        hasSavedLook = hasSavedLook,
         active = state.active == true,
         autoApply = state.autoApply == true,
         busy = busy,
         canSave = state.characterKey ~= nil and not busy,
-        canApply = state.characterKey ~= nil and Core.hasLook(look) and not busy,
+        canApply = state.characterKey ~= nil and hasSavedLook and not busy,
         canClear = state.characterKey ~= nil and not busy,
-        canForget = Core.hasLook(look) and not busy,
+        canForget = hasSavedLook and not busy,
         error = state.error
     }
 end

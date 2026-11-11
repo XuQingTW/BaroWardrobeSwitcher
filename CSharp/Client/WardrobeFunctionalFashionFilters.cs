@@ -40,13 +40,6 @@ namespace BaroWardrobeSwitcher
                 : IsLargeEquipmentMovementAnimation(animationInfo));
         }
 
-        public static bool ShouldCaptureItemSounds(Item item) => !ShouldSuppressCosmeticSounds(item);
-
-        public static bool ShouldCaptureStatusEffect(StatusEffect statusEffect)
-        {
-            return !IsStateDependentStatusEffect(statusEffect);
-        }
-
         public static bool ShouldSuppressEquipmentAnimation(Item item, object animationInfo)
         {
             return IsSealedSuit(item) && IsMovementAnimation(animationInfo);
@@ -55,11 +48,6 @@ namespace BaroWardrobeSwitcher
         public static bool ShouldKeepComponentLoopAlive(ActionType actionType)
         {
             return actionType == ActionType.Always || actionType == ActionType.OnWearing;
-        }
-
-        public static bool ShouldPreserveSealedSuitMasks(Item item)
-        {
-            return IsSealedSuit(item);
         }
 
         // 受條件／所需物品控制的音效交給原遊戲，例如警報，不當成純外觀音效複製。
@@ -109,48 +97,27 @@ namespace BaroWardrobeSwitcher
             {
                 return true;
             }
-            return IsSealedSuitText(NormalizedItemText(item));
+            string text = NormalizedItemText(item);
+            return text.Contains("exosuit") ||
+                   text.Contains("divingsuit") ||
+                   text.Contains("divesuit") ||
+                   text.Contains("pucs") ||
+                   text.Contains("puccs");
         }
 
-        private static bool ShouldSuppressCosmeticSounds(Item item)
+        public static bool ShouldCaptureItemSounds(Item item)
         {
-            if (IsSealedSuit(item)) { return true; }
-
-            string identifier = ItemIdentifier(item);
-            if (identifier.Equals("autoinjectorheadset", StringComparison.OrdinalIgnoreCase) ||
-                identifier.Equals("injectorheadset", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+            if (IsSealedSuit(item)) { return false; }
 
             // Compatibility fallback for older and third-party prefabs that expose no
             // functional tag. Do not use localized display names unless needed.
             string text = NormalizedItemText(item);
-            return text.Contains("autoinjectorheadset") ||
-                   text.Contains("injectorheadset") ||
-                   text.Contains("autoinjector");
+            return !text.Contains("injectorheadset") && !text.Contains("autoinjector");
         }
 
         private static bool HasTag(Item item, Identifier tag)
         {
-            try
-            {
-                return item != null && (item.HasTag(tag) || (item.Prefab?.Tags?.Contains(tag) ?? false));
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static bool HasEntries(IEnumerable values)
-        {
-            if (values == null) { return false; }
-            foreach (object value in values)
-            {
-                if (value != null) { return true; }
-            }
-            return false;
+            return item != null && (item.HasTag(tag) || (item.Prefab?.Tags?.Contains(tag) ?? false));
         }
 
         private static bool HasEntriesOrCannotInspect(FieldInfo field, StatusEffect statusEffect)
@@ -158,7 +125,11 @@ namespace BaroWardrobeSwitcher
             object value = field.GetValue(statusEffect);
             if (value == null) { return false; }
             if (!(value is IEnumerable values)) { return true; }
-            return HasEntries(values);
+            foreach (object entry in values)
+            {
+                if (entry != null) { return true; }
+            }
+            return false;
         }
 
         private static bool IsEnabledOrCannotInspect(FieldInfo field, StatusEffect statusEffect)
@@ -176,50 +147,11 @@ namespace BaroWardrobeSwitcher
             return true;
         }
 
-        private static bool IsSealedSuitText(string text)
-        {
-            if (string.IsNullOrEmpty(text)) { return false; }
-            return text.Contains("exosuit") ||
-                   text.Contains("divingsuit") ||
-                   text.Contains("divesuit") ||
-                   text.Contains("pucs") ||
-                   text.Contains("puccs");
-        }
-
         private static string NormalizedItemText(Item item)
         {
-            return Normalize(ItemIdentifier(item) + " " + ItemName(item));
-        }
-
-        private static string ItemIdentifier(Item item)
-        {
-            try
-            {
-                return item?.Prefab?.Identifier.ToString() ?? string.Empty;
-            }
-            catch
-            {
-                return string.Empty;
-            }
-        }
-
-        private static string ItemName(Item item)
-        {
-            try
-            {
-                if (item?.Prefab?.Name != null) { return item.Prefab.Name.ToString(); }
-                return item?.Name.ToString() ?? string.Empty;
-            }
-            catch
-            {
-                return string.Empty;
-            }
-        }
-
-        private static string Normalize(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) { return string.Empty; }
-            return new string(value.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+            string name = item?.Prefab?.Name?.ToString() ?? item?.Name?.ToString() ?? string.Empty;
+            string text = item?.Prefab?.Identifier.ToString() + " " + name;
+            return new string(text.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
         }
 
         internal static bool IsMovementAnimation(object animationInfo)

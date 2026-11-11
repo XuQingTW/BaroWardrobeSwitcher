@@ -177,9 +177,7 @@ local function cloneLook(look)
 end
 
 local function characterEntityId(character)
-    if character == nil then return 0 end
-    local ok, id = pcall(function() return character.ID end)
-    return ok and tonumber(id) or 0
+    return character ~= nil and tonumber(character.ID) or 0
 end
 
 local function clientCharacter(client)
@@ -1397,12 +1395,6 @@ local function captureAuthoritativeLook(character, clientLook)
     return canonicalizeLook(raw, true)
 end
 
-local function readCoreLook(message)
-    local look, reason = Core.readLook(message)
-    if look == nil then error(reason or "invalid_look") end
-    return look
-end
-
 local function writeLegacyLook(message, characterId, look)
     message.WriteUInt16(characterId or 0)
     for _, entry in ipairs(slots) do
@@ -2233,7 +2225,7 @@ local function parseV2Command(message, targeted)
     if command.targeted then command.targetCharacterId = tonumber(message.ReadUInt16()) end
     command.hasLook = message.ReadBoolean() == true
     if command.hasLook then
-        local ok, lookOrError, readReason = pcall(readCoreLook, message)
+        local ok, lookOrError, readReason = pcall(Core.readLook, message)
         if ok and lookOrError ~= nil then
             command.look = lookOrError
         else

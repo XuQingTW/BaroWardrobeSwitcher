@@ -9,7 +9,7 @@
 
 LuaCs is an upstream dependency, not an official Barotrauma API. Barotrauma's public modding guide does not document the private renderer seams needed by this mod, so the pinned official source and a runtime reflection probe are both release inputs.
 
-The executable/API checks and in-game matrix target 1.13.4.0. After every applicable item in [TESTING.md](TESTING.md) was recorded as passing, `version.json` was promoted to `verified` and `filelist.xml` was updated to declare 1.13.4.0. Content-package metadata records that result; it is not a substitute for the underlying tests.
+The executable/API checks and in-game matrix target 1.13.4.0. After every applicable item in the testing checklist maintained outside the mod directory was recorded as passing, `version.json` was promoted to `verified` and `filelist.xml` was updated to declare 1.13.4.0. Content-package metadata records that result; it is not a substitute for the underlying tests.
 
 Pinned contracts used by the adapter:
 
@@ -51,14 +51,7 @@ Optional capabilities:
 
 Missing required targets disable the visual override without mutating character render state. Missing optional targets disable only their advertised capability and are visible through the readiness report.
 
-Run the contract probe on a machine with the game installed:
-
-```powershell
-./scripts/Test-Compatibility.ps1 `
-  -BarotraumaInstallDir "C:\Program Files (x86)\Steam\steamapps\common\Barotrauma" `
-  -LuaCsPublicizedDir "C:\Program Files (x86)\Steam\steamapps\common\Barotrauma\Publicized" `
-  -RequireOptional
-```
+Contract probes and their run instructions are maintained outside the mod directory in the Codex workspace.
 
 ## Network compatibility
 
@@ -76,6 +69,6 @@ The v1 bridge is scheduled for removal in v0.6.0. V2 state is revisioned; v1 rem
 
 ## Release gates
 
-Complete every applicable automated and in-game check in [TESTING.md](TESTING.md). For a new game target, retain the previously verified metadata until that matrix passes; then update `declaredGameVersion` and `filelist.xml` `gameversion`, set `compatibilityStatus` to `verified`, and run `python scripts/verify_package.py --release`.
+Complete every applicable automated and in-game check in the testing checklist maintained outside the mod directory. For a new game target, retain the previously verified metadata until that matrix passes; then update `declaredGameVersion` and `filelist.xml` `gameversion`, set `compatibilityStatus` to `verified`, and run the external package verifier with `--release`.
 
 The `filelist.xml` `gameversion` value records the version actually verified; it is metadata, not proof of runtime compatibility.

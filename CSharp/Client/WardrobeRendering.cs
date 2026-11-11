@@ -266,26 +266,8 @@ namespace BaroWardrobeSwitcher
 
         private static string GetResolvedSpritePath(Sprite sprite)
         {
-            if (sprite == null) { return string.Empty; }
-            try
-            {
-                if (!string.IsNullOrWhiteSpace(sprite.FullPath))
-                {
-                    return sprite.FullPath;
-                }
-            }
-            catch
-            {
-                // Fall through to the content path value.
-            }
-            try
-            {
-                return sprite.FilePath?.Value ?? string.Empty;
-            }
-            catch
-            {
-                return string.Empty;
-            }
+            string fullPath = sprite?.FullPath;
+            return string.IsNullOrWhiteSpace(fullPath) ? sprite?.FilePath?.Value ?? string.Empty : fullPath;
         }
 
         private static void RemoveSprite(Sprite sprite)
@@ -610,7 +592,11 @@ namespace BaroWardrobeSwitcher
                 // plugin. Do not ask the engine to remove the same temporary item
                 // twice during that shutdown sequence.
                 if (item == null || item.Removed) { continue; }
-                try { item.Remove(); } catch { }
+                try { item.Remove(); }
+                catch (Exception ex)
+                {
+                    WardrobeFileLogger.Log($"[Baro Wardrobe Switcher] Failed to remove temporary fashion item {item.Prefab?.Identifier} (ID {item.ID}): {ex.GetType().Name}: {ex.Message}");
+                }
             }
             ownedTemporaryItems.Clear();
         }

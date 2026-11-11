@@ -1,5 +1,7 @@
 # Baro Wardrobe Switcher
 
+開發導覽：[檔案樹、功能入口與逐函式索引](docs/CODEMAP.md)。
+
 LuaCsForBarotrauma client-side wardrobe switcher for real equipment plus stored fashion visuals.
 
 Version 0.5.3 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It preserves per-item custom clothing colors across save, apply, scene changes, reconnects, and restarts using protocol 4 and look schema 3. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [COMPATIBILITY.md](COMPATIBILITY.md) for the pinned game/LuaCs contracts and release gates.
@@ -67,14 +69,6 @@ Version 0.5.3 targets the verified Barotrauma 1.13.4.0 and LuaCs contracts. It p
 - The renderer continues through Barotrauma's native `Item.GetSpriteColor()` path. Colored prefab fallbacks set `Item.SpriteColor` before capture; the mod does not recompute or double-multiply tint, limb alpha, or death color.
 - Server synchronization is event-driven: connect sends a targeted snapshot and accepted state changes broadcast once. There is no steady-state heartbeat or per-frame full-client scan; clients still hold early apply/clear messages briefly while a target character entity is spawning.
 
-## Build and verification
+## Development checks
 
-Release builds require explicit paths and write only to the ignored `artifacts` directory:
-
-```powershell
-./scripts/Build.ps1 `
-  -BarotraumaInstallDir "C:\Program Files (x86)\Steam\steamapps\common\Barotrauma" `
-  -LuaCsPublicizedDir "C:\Program Files (x86)\Steam\steamapps\common\Barotrauma\Publicized"
-```
-
-Run `scripts/Test-Compatibility.ps1` against the same installation, execute the pure Lua tests under MoonSharp, and run `scripts/verify_package.py` before packaging. After the manual matrix is complete and compatibility metadata is promoted, `scripts/verify_package.py --release` is the final manifest gate. Game assemblies and generated binaries must never be committed or included in the Workshop source package.
+Build scripts, test tools, test fixtures, and generated output are maintained outside the mod directory in the Codex workspace. LuaCs loads the runtime sources directly through `ModConfig.xml`.

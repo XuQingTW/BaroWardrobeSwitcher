@@ -91,7 +91,7 @@ namespace BaroWardrobeSwitcher
                 string characterHash = HashRequiredKey(characterKey, nameof(characterKey));
                 string safeDisplayName = ValidateDisplayName(displayName);
                 Dictionary<string, string> parts = ParseParts(encodedLook);
-                ClientLookDocument look = ParseClientLook(encodedLook);
+                ClientLookDocument look = ParseClientLook(parts);
                 ValidateDocument(look);
                 // captured=true 的全空欄位仍是有效外觀，表示玩家刻意儲存空裝外觀。
                 if (!HasAnySlot(look.Slots) && !look.Captured)
@@ -459,8 +459,7 @@ namespace BaroWardrobeSwitcher
                         profile.UseFashionMovementAnimations,
                     UseFashionFootstepSounds =
                         profile.UseFashionFootstepSounds,
-                    AttachmentVisibility =
-                        CopyAttachmentVisibility(profile.AttachmentVisibility),
+                    AttachmentVisibility = profile.AttachmentVisibility,
                     Slots = profile.Slots,
                     Colors = profile.Colors
                 };
@@ -470,8 +469,6 @@ namespace BaroWardrobeSwitcher
                     throw new InvalidDataException(
                         "Single-player wardrobe profile has no captured look.");
                 }
-                profile.AttachmentVisibility =
-                    CopyAttachmentVisibility(look.AttachmentVisibility);
                 profile.Slots = CopySlots(look.Slots);
                 profile.Colors = CopyColors(look.Colors);
             }

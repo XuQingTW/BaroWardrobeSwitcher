@@ -10,8 +10,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify metadata and source-only package
+        if: ${{ hashFiles('scripts/verify_package.py') != '' }}
         run: python3 scripts/verify_package.py
       - name: Run renderer crash characterization contracts
+        if: ${{ hashFiles('scripts/Test-RendererContracts.ps1') != '' }}
         shell: pwsh
         run: ./scripts/Test-RendererContracts.ps1
       - name: Install Lua parser

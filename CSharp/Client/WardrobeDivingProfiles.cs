@@ -50,7 +50,7 @@ namespace BaroWardrobeSwitcher
                 }
 
                 string profileHash = HashRequiredKey(profileKey, nameof(profileKey));
-                ClientLookDocument look = ParseClientLook(encodedLook);
+                ClientLookDocument look = ParseClientLook(ParseParts(encodedLook));
                 ValidateDocument(look);
                 DivingProfilesDocument document = ReadDivingProfiles();
                 DivingProfile profile = document.Profiles.FirstOrDefault(
